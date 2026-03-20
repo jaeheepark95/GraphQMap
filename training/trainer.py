@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -370,7 +371,14 @@ class Stage2Trainer:
                 num_logical=num_logical,
             )
 
+            # Skip nan/inf losses to avoid corrupting weights
+            if torch.isnan(losses["total"]) or torch.isinf(losses["total"]):
+                num_batches += 1
+                continue
+
             losses["total"].backward()
+            grad_clip = getattr(self.cfg.training, 'grad_clip_norm', 1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip)
             self.optimizer.step()
 
             for k in accum:

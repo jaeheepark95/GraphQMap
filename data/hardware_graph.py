@@ -165,9 +165,10 @@ def extract_qubit_properties(backend: Any) -> dict[str, np.ndarray]:
         frequency[q] = qp.frequency if qp.frequency is not None else 0.0
 
         # Readout error from measure gate
-        meas_props = target["measure"]
-        if (q,) in meas_props and meas_props[(q,)] is not None:
-            readout_error[q] = meas_props[(q,)].error or 0.0
+        if "measure" in target.operation_names:
+            meas_props = target["measure"]
+            if (q,) in meas_props and meas_props[(q,)] is not None:
+                readout_error[q] = meas_props[(q,)].error or 0.0
 
         # Average single-qubit gate error (average over sx, x)
         sq_errors = []
