@@ -1,0 +1,33 @@
+# Dataset (large files, generated/downloaded)
+data/circuits/qasm/
+data/circuits/labels/
+data/circuits/backends/
+data/circuits/splits/
+data/circuits/queko/
+!data/circuits/README.md
+
+# Temporary downloads
+tmp_downloads/
+
+# Training outputs
+checkpoints/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

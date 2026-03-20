@@ -1,0 +1,182 @@
+# GraphQMap Stage 2: Noise-Aware Surrogate Metric Fine-tuning Configuration
+
+# ---- Model Architecture ----
+# Inherits from stage1; only overrides are listed here.
+# Config loader merges stage2 on top of stage1 defaults.
+model:
+  embedding_dim: 64
+
+  circuit_gnn:
+    node_input_dim: 4
+    edge_input_dim: 3
+    num_layers: 3
+    num_heads: 4
+    activation: elu
+    dropout: 0.1
+    use_batchnorm: true
+    residual_layers: [2, 3]
+
+  hardware_gnn:
+    node_input_dim: 6
+    edge_input_dim: 2
+    num_layers: 3
+    num_heads: 4
+    activation: elu
+    dropout: 0.1
+    use_batchnorm: true
+    residual_layers: [2, 3]
+
+  cross_attention:
+    num_layers: 2
+    num_heads: 4
+    ffn_hidden_dim: 128
+    dropout: 0.1
+
+  score_head:
+    d_k: 64
+
+# ---- Sinkhorn ----
+sinkhorn:
+  tau: 0.05                  # fixed at tau_min in stage 2
+  schedule: fixed
+  max_iter: 20
+  tolerance: 1.0e-6
+
+# ---- Training ----
+training:
+  stage: 2
+  optimizer:
+    type: adamw
+    lr: 5.0e-4
+    weight_decay: 1.0e-4
+  scheduler:
+    type: cosine_annealing
+    T_max: 100
+    eta_min: 1.0e-6
+  warmup_epochs: 3
+
+  max_epochs: 100
+  early_stopping:
+    monitor: val_pst          # actual PST, NOT surrogate loss
+    patience: 10
+    min_delta: 0.005          # 0.5% PST improvement threshold
+
+  # PST validation schedule
+  pst_validation:
+    interval: 5               # measure every N epochs
+    num_circuits: 100          # representative circuits for validation
+    convergence_checks: 3      # stop if N consecutive < min_delta
+
+# ---- Loss ----
+loss:
+  type: surrogate
+  weights:
+    l_surr: 1.0               # error-aware edge quality (primary)
+    alpha: 0.1                 # L_node: NISQ node quality (bounded [-1,0] after normalization)
+    lambda_sep: 0.1            # L_sep: multi-programming separation
+
+# ---- Data ----
+data:
+  data_root: data/circuits
+  splits:
+    train: data/circuits/splits/stage2_all.json
+    val: data/circuits/splits/val.json
+
+  multi_programming:
+    ratios:
+      single: 0.5
+      dual: 0.3
+      quad: 0.2
+    occupancy_min: 0.3
+    occupancy_max: 0.75
+
+  normalization:
+    epsilon: 1.0e-8
+
+# ---- Batching ----
+batching:
+  max_total_nodes: 512
+  backend_balanced: true
+
+# ---- Hardware Backends ----
+backends:
+  training:
+    # 5Q
+    - FakeAthens
+    - FakeBelem
+    - FakeBogota
+    - FakeBurlington
+    - FakeEssex
+    - FakeLima
+    - FakeLondon
+    - FakeManila
+    - FakeOurense
+    - FakeQuito
+    - FakeRome
+    - FakeSantiago
+    - FakeValencia
+    - FakeVigo
+    - FakeYorktown
+    # 7Q
+    - FakeCasablanca
+    - FakeJakarta
+    - FakeLagos
+    - FakeNairobi
+    - FakeOslo
+    - FakePerth
+    # 15-16Q
+    - FakeMelbourne
+    - FakeGuadalupe
+    # 20Q
+    - FakeAlmaden
+    - FakeBoeblingen
+    - FakeJohannesburg
+    - FakePoughkeepsie
+    - FakeSingapore
+    # 27-28Q
+    - FakeAlgiers
+    - FakeAuckland
+    - FakeCairo
+    - FakeCambridge
+    - FakeGeneva
+    - FakeHanoi
+    - FakeKolkata
+    - FakeMontreal
+    - FakeMumbai
+    - FakeParis
+    - FakePeekskill
+    - FakeSydney
+    # 33Q
+    - FakePrague
+    # 53Q
+    - FakeRochester
+    # 65Q
+    - FakeManhattan
+    # 127Q
+    - FakeBrisbane
+    - FakeCusco
+    - FakeKawasaki
+    - FakeKyiv
+    - FakeKyoto
+    - FakeOsaka
+    - FakeQuebec
+    - FakeSherbrooke
+    - FakeWashington
+    # Synthetic backends (QUEKO + MLQD)
+    - queko_aspen4           # 16Q
+    - queko_tokyo            # 20Q
+    - queko_rochester        # 53Q
+    - queko_sycamore         # 54Q
+    - mlqd_grid5x5           # 25Q
+  test:
+    - FakeToronto            # 27Q
+    - FakeBrooklyn           # 65Q
+    - FakeTorino             # 133Q
+
+# ---- Misc ----
+seed: 42
+device: cuda
+num_workers: 4
+log_dir: logs/stage2
+checkpoint_dir: checkpoints/stage2
+pretrained_checkpoint: checkpoints/stage1/best.pt

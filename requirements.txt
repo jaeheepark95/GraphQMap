@@ -1,0 +1,8 @@
+torch>=2.0
+torch-geometric>=2.4
+qiskit>=1.0
+qiskit-ibm-runtime
+scipy
+networkx
+pyyaml
+pytest
