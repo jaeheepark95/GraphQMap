@@ -3,6 +3,7 @@ data/circuits/qasm/
 data/circuits/labels/
 data/circuits/backends/
 data/circuits/splits/
+data/circuits/cache/
 data/circuits/queko/
 !data/circuits/README.md
 
