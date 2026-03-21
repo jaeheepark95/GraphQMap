@@ -10,6 +10,9 @@ data/circuits/queko/
 # Temporary downloads
 tmp_downloads/
 
+# Reference code (colleague repos)
+references/
+
 # Training outputs
 checkpoints/
 logs/

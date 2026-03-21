@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from qiskit import QuantumCircuit
 
-from evaluation.pst import measure_pst
+from evaluation.pst import create_ideal_simulator, create_noisy_simulator, measure_pst
 
 
 @dataclass
@@ -104,6 +104,10 @@ def evaluate_model_on_circuit(
         method="graphqmap",
     )
 
+    # Create simulators once, reuse across repetitions
+    ideal_sim = create_ideal_simulator(backend)
+    noisy_sim = create_noisy_simulator(backend)
+
     for rep in range(num_repetitions):
         # Inference timing
         t0 = time.perf_counter()
@@ -123,6 +127,7 @@ def evaluate_model_on_circuit(
         pst_result = measure_pst(
             circuit, backend, list(layout.values()),
             shots=shots, seed_transpiler=rep,
+            ideal_sim=ideal_sim, noisy_sim=noisy_sim,
         )
 
         result.pst_values.append(pst_result["pst"])

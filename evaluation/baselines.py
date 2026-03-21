@@ -15,7 +15,8 @@ from typing import Any
 
 from qiskit import QuantumCircuit, transpile
 
-from evaluation.pst import measure_pst
+from evaluation.pst import create_ideal_simulator, create_noisy_simulator, measure_pst
+from evaluation.transpiler import build_transpiler, transpile_with_timing
 
 
 def sabre_layout(
@@ -24,17 +25,7 @@ def sabre_layout(
     seed: int = 0,
     optimization_level: int = 3,
 ) -> list[int]:
-    """Get SabreLayout initial layout.
-
-    Args:
-        circuit: Quantum circuit.
-        backend: FakeBackendV2.
-        seed: Transpiler seed.
-        optimization_level: Qiskit transpiler optimization level (0-3).
-
-    Returns:
-        Layout as list (logical → physical).
-    """
+    """Get SabreLayout initial layout."""
     compiled = transpile(
         circuit, backend=backend,
         layout_method="sabre", routing_method="sabre",
@@ -87,14 +78,6 @@ def naive_multi_programming_layout(
 
     Each circuit gets its own SabreLayout independently.
     Conflicts are resolved by greedy first-come assignment.
-
-    Args:
-        circuits: List of circuits to map simultaneously.
-        backend: FakeBackendV2.
-        seed: Transpiler seed.
-
-    Returns:
-        Combined layout for all circuits (concatenated).
     """
     num_physical = backend.target.num_qubits
     used_physical: set[int] = set()
@@ -108,7 +91,6 @@ def naive_multi_programming_layout(
         )
         layout = _extract_layout(compiled, circuit.num_qubits)
 
-        # Resolve conflicts: reassign conflicting qubits
         resolved: list[int] = []
         available = [q for q in range(num_physical) if q not in used_physical]
 
@@ -117,13 +99,12 @@ def naive_multi_programming_layout(
                 resolved.append(phys)
                 used_physical.add(phys)
             else:
-                # Take next available
                 if available:
                     alt = available.pop(0)
                     resolved.append(alt)
                     used_physical.add(alt)
                 else:
-                    resolved.append(phys)  # fallback
+                    resolved.append(phys)
 
         combined_layout.extend(resolved)
 
@@ -158,16 +139,21 @@ def evaluate_baseline(
     circuit: QuantumCircuit,
     backend: Any,
     method: str = "sabre",
-    shots: int = 4096,
+    routing_method: str = "sabre",
+    shots: int = 8192,
     seed: int = 0,
     optimization_level: int = 3,
 ) -> dict[str, Any]:
     """Evaluate a baseline method and return PST + metrics.
 
+    Supports both layout-only baselines (sabre, dense, trivial, random)
+    and layout×routing combinations via the custom transpiler.
+
     Args:
         circuit: Quantum circuit.
         backend: FakeBackendV2.
-        method: One of 'sabre', 'dense', 'trivial', 'random'.
+        method: Layout method ('sabre', 'dense', 'trivial', 'random', 'noise_adaptive').
+        routing_method: Routing method ('sabre', 'nassc').
         shots: Simulation shots.
         seed: Random seed.
         optimization_level: Qiskit transpiler optimization level (0-3).
@@ -175,21 +161,45 @@ def evaluate_baseline(
     Returns:
         Dict with pst, swap_count, depth, method, layout.
     """
-    layout_fns = {
-        "sabre": lambda: sabre_layout(circuit, backend, seed, optimization_level),
-        "dense": lambda: dense_layout(circuit, backend, seed, optimization_level),
-        "trivial": lambda: trivial_layout(circuit, backend),
-        "random": lambda: random_layout(circuit, backend, seed),
-    }
+    if method in ("noise_adaptive",) or routing_method == "nassc":
+        # Use custom transpiler for advanced combinations
+        tc, metadata = transpile_with_timing(
+            circuit, backend,
+            layout_method=method,
+            routing_method=routing_method,
+            seed=seed,
+        )
+        ideal_sim = create_ideal_simulator(backend)
+        noisy_sim = create_noisy_simulator(backend)
+        from evaluation.benchmark import execute_on_simulators
+        avg_pst, depth, _ = execute_on_simulators(
+            tc, ideal_sim, noisy_sim, shots=shots,
+        )
+        return {
+            "pst": avg_pst,
+            "swap_count": metadata["map_cx"],
+            "depth": depth,
+            "method": f"{method}+{routing_method}",
+            "layout_time": metadata["layout_time"],
+            "total_time": metadata["total_time"],
+        }
+    else:
+        # Use simple layout + measure_pst for basic baselines
+        layout_fns = {
+            "sabre": lambda: sabre_layout(circuit, backend, seed, optimization_level),
+            "dense": lambda: dense_layout(circuit, backend, seed, optimization_level),
+            "trivial": lambda: trivial_layout(circuit, backend),
+            "random": lambda: random_layout(circuit, backend, seed),
+        }
 
-    if method not in layout_fns:
-        raise ValueError(f"Unknown method '{method}'. Available: {list(layout_fns.keys())}")
+        if method not in layout_fns:
+            raise ValueError(f"Unknown method '{method}'. Available: {list(layout_fns.keys())}")
 
-    layout = layout_fns[method]()
-    result = measure_pst(
-        circuit, backend, layout, shots=shots,
-        optimization_level=optimization_level,
-    )
-    result["method"] = method
-    result["layout"] = layout
-    return result
+        layout = layout_fns[method]()
+        result = measure_pst(
+            circuit, backend, layout, shots=shots,
+            optimization_level=optimization_level,
+        )
+        result["method"] = method
+        result["layout"] = layout
+        return result

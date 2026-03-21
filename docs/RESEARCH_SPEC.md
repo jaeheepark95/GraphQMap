@@ -646,20 +646,66 @@ Following baseline research: **1-circuit, 2-circuit, 4-circuit** multi-programmi
 
 ### Metrics
 
-| Type | Metric |
-|------|--------|
-| **Primary** | PST (Probability of Successful Trials) |
-| **Secondary** | SWAP count, circuit depth |
-| **Speed** | Inference latency (model forward + Hungarian), end-to-end time (+ transpile) |
+| Type | Metric | Definition |
+|------|--------|------------|
+| **Primary** | PST (Probability of Successful Trials) | P(correct output) — probability of the ideal most-probable bitstring appearing in noisy execution. Standard definition used in QUEKO and multi-programming papers. |
+| **Secondary** | Hellinger Fidelity | Full distribution similarity between ideal and noisy outputs (more nuanced but less standard). |
+| **Secondary** | SWAP count, circuit depth | Compilation quality metrics. |
+| **Speed** | Inference latency (model forward + Hungarian), end-to-end time (+ transpile) | |
+
+**PST computation pipeline:**
+1. Create AerSimulator with `tensor_network` + GPU (cuQuantum) — handles any circuit size without OOM
+2. Simulators created **once per backend**, reused across all circuits (ideal_sim + noisy_sim)
+3. Transpile circuit with initial layout (via custom PassManager supporting layout×routing combinations)
+4. Run ideal simulation (same transpiled circuit, no noise) to find most probable bitstring
+5. Run noisy simulation (same transpiled circuit, backend noise model)
+6. PST = noisy_counts[ideal_bitstring] / total_shots
+7. Supports multi-register circuits (space-separated bitstrings → per-register PST averaged)
+
+**Simulation method priority:** tensor_network+GPU → tensor_network+CPU → statevector (small circuits only)
+**Default shots:** 8192
+
+### Transpilation
+
+Custom PassManager builder (`evaluation/transpiler.py`) supporting all combinations:
+
+| Layout Method | Routing Method | Description |
+|---------------|---------------|-------------|
+| `graphqmap` (model) | `sabre` | Our method + standard routing |
+| `graphqmap` (model) | `nassc` | Our method + noise-aware routing |
+| `sabre` | `sabre` | Qiskit default baseline |
+| `sabre` | `nassc` | SABRE layout + noise-aware routing |
+| `dense` | `sabre` | Dense layout baseline |
+| `noise_adaptive` | `sabre` | Noise-adaptive layout baseline |
+| `trivial` | `sabre` | Identity mapping baseline |
+
+Per-stage timing measured: init, layout, routing, optimization, scheduling.
+
+### Benchmark Circuits
+
+Standard evaluation set (shared with MQM colleague for direct comparison):
+`toffoli_3`, `fredkin_3`, `3_17_13`, `4mod5-v1_22`, `mod5mils_65`, `alu-v0_27`, `decod24-v2_43`, `4gt13_92`
+
+Extended set adds: `bv_n3`, `bv_n4`, `peres_3`, `xor5_254`
+
+All benchmark circuits stored in `data/circuits/qasm/benchmarks/` (23 total .qasm files).
 
 ### Statistical Reliability
 
 Multiple repetitions per experiment (matching baseline research), reporting mean and standard deviation.
+Results presented as pandas DataFrame with per-circuit PST, depth, CX count, timing, and Avg row.
 
 ### Baselines
 
-- Follow existing baseline research for direct comparison
-- For multi-programming: naive baseline = independent Qiskit layout pass per circuit
+| Method | Description |
+|--------|-------------|
+| SABRE (layout+routing) | Qiskit default, standard baseline |
+| NASSC (noise-aware routing) | SABRE layout + NASSC routing ([Li et al.](https://arxiv.org/abs/2305.06780)) |
+| DenseLayout | Maps to densely connected subgraph |
+| NoiseAdaptive | Noise-adaptive layout ([Murali et al., ASPLOS 2019](https://arxiv.org/abs/1901.11054)) |
+| Trivial | Identity mapping (qubit i → physical i) |
+| Random | Uniformly random physical qubit assignment |
+| Naive multi-prog | Independent SABRE per circuit (multi-programming only) |
 
 ---
 

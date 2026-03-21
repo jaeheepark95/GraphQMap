@@ -2,63 +2,129 @@
 
 Pipeline:
   Model → P matrix → Hungarian → discrete layout
-  → qiskit.transpile(initial_layout, routing_method='sabre')
+  → transpile(initial_layout, routing_method='sabre')
   → noise simulation on FakeBackendV2
-  → PST computation (Hellinger fidelity between ideal and noisy distributions)
+  → PST computation
+
+Two PST metrics:
+  - pst: P(correct output) — probability of the ideal most-probable bitstring
+    appearing in noisy execution (standard definition, used in QUEKO/multi-prog papers)
+  - hellinger: Hellinger fidelity between ideal and noisy distributions (secondary)
+
+Simulation strategy (following MQM pattern):
+  - tensor_network + GPU (cuQuantum) as default — handles any circuit size
+  - Simulators created once per backend, reused across all circuits
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from qiskit import QuantumCircuit, transpile
-from qiskit.quantum_info import Statevector, hellinger_fidelity
+from qiskit.quantum_info import hellinger_fidelity
 from qiskit_aer import AerSimulator
+
+logger = logging.getLogger(__name__)
+
+# Detect best simulation config once at import time
+_SIM_CONFIG: dict[str, str] | None = None
+
+
+def _detect_sim_config() -> dict[str, str]:
+    """Detect the best available simulation method. Cached after first call."""
+    global _SIM_CONFIG
+    if _SIM_CONFIG is not None:
+        return _SIM_CONFIG
+
+    # Try tensor_network + GPU first (handles any circuit size)
+    try:
+        sim = AerSimulator(method="tensor_network", device="GPU")
+        qc = QuantumCircuit(2, 2)
+        qc.h(0)
+        qc.cx(0, 1)
+        qc.measure_all()
+        sim.run(qc, shots=1).result()
+        _SIM_CONFIG = {"method": "tensor_network", "device": "GPU"}
+        logger.info("Simulation method: tensor_network + GPU (cuQuantum)")
+        return _SIM_CONFIG
+    except Exception:
+        pass
+
+    # Try tensor_network on CPU
+    try:
+        sim = AerSimulator(method="tensor_network", device="CPU")
+        qc = QuantumCircuit(2, 2)
+        qc.h(0)
+        qc.cx(0, 1)
+        qc.measure_all()
+        sim.run(qc, shots=1).result()
+        _SIM_CONFIG = {"method": "tensor_network", "device": "CPU"}
+        logger.info("Simulation method: tensor_network + CPU")
+        return _SIM_CONFIG
+    except Exception:
+        pass
+
+    # Fallback to statevector (only works for small circuits)
+    _SIM_CONFIG = {"method": "statevector"}
+    logger.warning("Simulation method: statevector (large circuits may OOM)")
+    return _SIM_CONFIG
+
+
+def get_sim_config() -> dict[str, str]:
+    """Get the detected simulation configuration."""
+    return _detect_sim_config()
+
+
+def create_ideal_simulator(backend: Any) -> AerSimulator:
+    """Create a noiseless simulator for a backend. Reuse across circuits.
+
+    Args:
+        backend: FakeBackendV2 instance.
+
+    Returns:
+        AerSimulator configured without noise model.
+    """
+    sim_config = _detect_sim_config()
+    return AerSimulator.from_backend(backend, noise_model=None, **sim_config)
+
+
+def create_noisy_simulator(backend: Any) -> AerSimulator:
+    """Create a noisy simulator for a backend. Reuse across circuits.
+
+    Args:
+        backend: FakeBackendV2 instance.
+
+    Returns:
+        AerSimulator configured with backend noise model.
+    """
+    sim_config = _detect_sim_config()
+    return AerSimulator.from_backend(backend, **sim_config)
 
 
 def compute_ideal_distribution(circuit: QuantumCircuit) -> dict[str, float]:
-    """Compute the ideal output probability distribution via statevector simulation.
+    """Compute ideal output distribution for a circuit using statevector.
 
     Args:
-        circuit: Quantum circuit (without measurements).
+        circuit: Quantum circuit (measurements optional).
 
     Returns:
-        Dict mapping bitstrings to probabilities.
+        Dict mapping bitstring → probability.
     """
-    # Remove measurements if present
-    bare = circuit.remove_final_measurements(inplace=False)
-    sv = Statevector.from_instruction(bare)
+    from qiskit.quantum_info import Statevector
+
+    if circuit.num_clbits > 0:
+        qc = circuit.remove_final_measurements(inplace=False)
+    else:
+        qc = circuit
+    sv = Statevector.from_instruction(qc)
     probs = sv.probabilities_dict()
-    # Filter near-zero entries and convert numpy types to float
-    return {k: float(v) for k, v in probs.items() if v > 1e-10}
-
-
-def run_noisy_simulation(
-    compiled_circuit: QuantumCircuit,
-    backend: Any,
-    shots: int = 4096,
-) -> dict[str, float]:
-    """Run noisy simulation on a FakeBackendV2 using AerSimulator.
-
-    Args:
-        compiled_circuit: Transpiled circuit (must include measurements).
-        backend: FakeBackendV2 instance.
-        shots: Number of shots.
-
-    Returns:
-        Dict mapping bitstrings to probabilities.
-    """
-    sim = AerSimulator.from_backend(backend)
-    result = sim.run(compiled_circuit, shots=shots).result()
-    counts = result.get_counts()
-    total = sum(counts.values())
-    return {k: v / total for k, v in counts.items()}
+    return {k: v for k, v in probs.items() if v > 1e-10}
 
 
 def _count_2q_gates(circuit: QuantumCircuit, backend: Any = None) -> int:
     """Count native 2-qubit gates in a circuit, auto-detecting gate type."""
     ops = circuit.count_ops()
-    # Try backend-specific gate first
     if backend is not None:
         from data.hardware_graph import _get_two_qubit_gate_name
         try:
@@ -66,24 +132,62 @@ def _count_2q_gates(circuit: QuantumCircuit, backend: Any = None) -> int:
             return ops.get(gate_name, 0)
         except ValueError:
             pass
-    # Fallback: check common 2Q gates
     for name in ("cx", "ecr", "cz"):
         if ops.get(name, 0) > 0:
             return ops[name]
     return 0
 
 
+def compute_pst(
+    result_counts: dict[str, int],
+    ideal_counts: dict[str, int],
+) -> float | list[float]:
+    """Compute PST from result and ideal count dicts.
+
+    Supports multi-register circuits (space-separated bitstrings).
+    Follows MQM PSTv2 pattern.
+
+    Args:
+        result_counts: Noisy simulation counts.
+        ideal_counts: Ideal simulation counts.
+
+    Returns:
+        PST value (float) or list of per-register PSTs for multi-register circuits.
+    """
+    ideal_result = max(ideal_counts, key=lambda k: ideal_counts[k])
+    total_shots = sum(result_counts.values())
+
+    if " " in ideal_result:
+        # Multi-register: compute per-register PST
+        ideal_parts = ideal_result.split(" ")
+        psts = []
+        for idx, ideal_part in enumerate(ideal_parts):
+            matching_counts = []
+            for key, count in result_counts.items():
+                parts = key.split(" ")
+                if ideal_part == parts[idx]:
+                    matching_counts.append(count)
+            psts.append(sum(matching_counts) / total_shots)
+        return psts
+    else:
+        return result_counts.get(ideal_result, 0) / total_shots
+
+
 def measure_pst(
     circuit: QuantumCircuit,
     backend: Any,
     layout: list[int] | dict[int, int],
-    shots: int = 4096,
+    shots: int = 8192,
     seed_transpiler: int = 0,
     optimization_level: int = 3,
+    ideal_sim: AerSimulator | None = None,
+    noisy_sim: AerSimulator | None = None,
 ) -> dict[str, Any]:
     """Measure PST for a given circuit + layout + backend.
 
-    Full pipeline: transpile → noise sim → Hellinger fidelity.
+    Both ideal and noisy simulations run on the SAME transpiled circuit.
+    Ideal = transpiled circuit without noise (fair comparison).
+    Noisy = transpiled circuit with backend noise model.
 
     Args:
         circuit: Original quantum circuit (with or without measurements).
@@ -92,10 +196,13 @@ def measure_pst(
         shots: Number of simulation shots.
         seed_transpiler: Transpiler random seed.
         optimization_level: Qiskit transpiler optimization level (0-3).
+        ideal_sim: Pre-created ideal simulator (avoids re-creation per circuit).
+        noisy_sim: Pre-created noisy simulator (avoids re-creation per circuit).
 
     Returns:
         Dict with:
-        - pst: Hellinger fidelity (float in [0, 1])
+        - pst: P(correct output) (float in [0, 1]) — primary metric
+        - hellinger: Hellinger fidelity (float in [0, 1]) — secondary metric
         - swap_count: estimated SWAP count
         - depth: compiled circuit depth
         - compiled_2q: total native 2Q gates in compiled circuit
@@ -123,17 +230,33 @@ def measure_pst(
     swap_count = max(0, compiled_2q - original_2q) // 3
     depth = compiled.depth()
 
-    # Ideal distribution
-    ideal_dist = compute_ideal_distribution(circuit)
+    # Create simulators if not provided (backward compatibility)
+    if ideal_sim is None:
+        ideal_sim = create_ideal_simulator(backend)
+    if noisy_sim is None:
+        noisy_sim = create_noisy_simulator(backend)
+
+    # Ideal simulation
+    ideal_counts = ideal_sim.run(compiled, shots=shots).result().get_counts()
+    ideal_total = sum(ideal_counts.values())
+    ideal_dist = {k: v / ideal_total for k, v in ideal_counts.items() if v > 0}
 
     # Noisy simulation
-    noisy_dist = run_noisy_simulation(compiled, backend, shots=shots)
+    noisy_counts = noisy_sim.run(compiled, shots=shots).result().get_counts()
+    noisy_total = sum(noisy_counts.values())
+    noisy_dist = {k: v / noisy_total for k, v in noisy_counts.items()}
 
-    # PST via Hellinger fidelity
-    pst = hellinger_fidelity(ideal_dist, noisy_dist)
+    # Primary metric: PST = P(correct output)
+    pst = compute_pst(noisy_counts, ideal_counts)
+    if isinstance(pst, list):
+        pst = sum(pst) / len(pst)
+
+    # Secondary metric: Hellinger fidelity
+    hellinger = hellinger_fidelity(ideal_dist, noisy_dist)
 
     return {
         "pst": pst,
+        "hellinger": hellinger,
         "swap_count": swap_count,
         "depth": depth,
         "compiled_2q": compiled_2q,
@@ -144,11 +267,13 @@ def measure_pst_batch(
     circuits: list[QuantumCircuit],
     backend: Any,
     layouts: list[list[int] | dict[int, int]],
-    shots: int = 4096,
+    shots: int = 8192,
     seed_transpiler: int = 0,
     optimization_level: int = 3,
 ) -> list[dict[str, Any]]:
     """Measure PST for a batch of circuits.
+
+    Creates simulators once and reuses for all circuits.
 
     Args:
         circuits: List of quantum circuits.
@@ -161,12 +286,16 @@ def measure_pst_batch(
     Returns:
         List of result dicts from measure_pst.
     """
+    ideal_sim = create_ideal_simulator(backend)
+    noisy_sim = create_noisy_simulator(backend)
+
     results = []
     for circuit, layout in zip(circuits, layouts):
         result = measure_pst(
             circuit, backend, layout,
             shots=shots, seed_transpiler=seed_transpiler,
             optimization_level=optimization_level,
+            ideal_sim=ideal_sim, noisy_sim=noisy_sim,
         )
         results.append(result)
     return results

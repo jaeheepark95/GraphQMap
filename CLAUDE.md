@@ -15,11 +15,14 @@ Currently focused on single-circuit mapping; multi-programming (2, 4 circuits) d
 - `models/` — GNN encoders, cross-attention, score head, sinkhorn, hungarian
 - `data/` — dataset loaders, graph construction, label generation, normalization
 - `training/` — training loops, loss functions, tau scheduler, early stopping
-- `evaluation/` — PST measurement, metrics, baselines
+- `evaluation/` — PST measurement, metrics, baselines, transpiler, benchmarks
+  - `evaluation/transpiler.py` — custom PassManager builder (layout×routing combinations, per-stage timing)
+  - `evaluation/benchmark.py` — structured benchmark runner (DataFrame output, simulator reuse)
+  - `evaluation/prev_methods/` — baseline routing/layout methods (NASSC, NoiseAdaptive)
 - `configs/` — hyperparameter configs (YAML)
 - `scripts/` — dataset generation/processing scripts
 - `docs/` — research specification and documentation
-- `tests/` — unit and integration tests (129 tests)
+- `tests/` — unit and integration tests (119 tests)
 
 ## Dataset Structure
 All circuit data lives under `data/circuits/` with circuits, labels, backends, and splits separated.
@@ -31,7 +34,8 @@ data/circuits/
 │   ├── mlqd/                       # 4,443 circuits (3,729 labeled)
 │   ├── mqt_bench/                  # 1,448 circuits (no labels)
 │   ├── qasmbench/                  # 111 circuits (no labels, 2Q-127Q)
-│   └── revlib/                     # 263 circuits (no labels, 3Q-127Q)
+│   ├── revlib/                     # 263 circuits (no labels, 3Q-127Q)
+│   └── benchmarks/                 # 23 evaluation benchmark circuits (3Q-9Q)
 ├── labels/                         # 4,269 total labels
 │   ├── queko/labels.json           # 540 τ⁻¹ true optimal labels
 │   └── mlqd/labels.json            # 3,729 OLSQ2 solver labels
@@ -68,11 +72,16 @@ QUEKO/MLQD circuits use hardware topologies not available as Qiskit FakeBackendV
 python train.py --config configs/stage1.yaml       # Stage 1: MLQD+QUEKO supervised
 python train.py --config configs/stage2.yaml       # Stage 2: all circuits, surrogate loss
 
-# Evaluation
-python evaluate.py --config configs/stage2.yaml --backend toronto --max-circuits 20 --reps 3
+# Evaluation (model + baselines)
+python evaluate.py --config configs/stage2.yaml --backend toronto --reps 3
+python evaluate.py --config configs/stage2.yaml --backend toronto --routing-method nassc
+
+# Benchmark (baselines only, no model)
+python evaluate.py --benchmark --backend toronto brooklyn torino
+python -m evaluation.benchmark --backend toronto --reps 2 --mode full
 
 # Tests
-pytest tests/                                       # 129 tests
+pytest tests/                                       # 119 tests
 
 # Dataset scripts
 python scripts/generate_queko_noise.py             # Generate synthetic noise profiles
@@ -105,7 +114,11 @@ python scripts/generate_mqt_bench.py               # Generate MQT Bench circuits
 - Dummy padding for rectangular l×h → h×h before Sinkhorn
 - All hyperparameters configurable via YAML
 - Batching groups samples by (backend, num_logical) for uniform tensor shapes
-- PST measurement: optimization_level configurable (default 3)
+- PST measurement: P(correct output) = primary metric, Hellinger fidelity = secondary
+- PST simulation: tensor_network + GPU (cuQuantum) as default; simulators created once per backend, reused for all circuits
+- PST measurement: optimization_level configurable (default 3), 8192 shots
+- Transpilation: custom PassManager builder supporting layout×routing combinations (sabre, nassc, dense, noise_adaptive, trivial)
+- Benchmark circuits: 8 standard circuits (toffoli_3, fredkin_3, 3_17_13, 4mod5-v1_22, mod5mils_65, alu-v0_27, decod24-v2_43, 4gt13_92)
 - Currently single-circuit only; multi-programming deferred
 
 ## Dependencies
@@ -113,10 +126,11 @@ python scripts/generate_mqt_bench.py               # Generate MQT Bench circuits
 - torch-geometric >= 2.4
 - qiskit >= 1.0
 - qiskit-ibm-runtime
-- qiskit-aer
+- qiskit-aer (with cuQuantum for tensor_network GPU)
 - scipy
 - networkx
 - pyyaml
+- pandas (benchmark reporting)
 
 ## Code Conventions
 - Type hints on all function signatures
