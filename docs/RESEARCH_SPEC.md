@@ -454,7 +454,7 @@ L_2 = L_surr + α · L_node + λ · L_sep
 | Weight | Value | Rationale |
 |--------|-------|-----------|
 | L_surr coefficient | 1.0 (fixed) | Primary objective, baseline reference |
-| α (L_node) | 0.3 | Important for NISQ but secondary to distance |
+| α (L_node) | 0.1 | Important for NISQ but secondary to distance |
 | λ (L_sep) | 0.1 | Most indirect effect |
 
 **CRITICAL: All three terms are per-pair/per-qubit normalized** (divided by pair count or qubit count). This ensures scales are comparable regardless of circuit/hardware size.
@@ -710,6 +710,10 @@ Following baseline research: **1-circuit, 2-circuit, 4-circuit** multi-programmi
 **Simulation method priority:** tensor_network+GPU → tensor_network+CPU → statevector (small circuits only)
 **Default shots:** 8192
 
+**Robustness:** On large backends (100Q+), model-generated layouts may produce very deep transpiled circuits that crash the tensor_network simulator (`CUTENSORNET_STATUS_INVALID_VALUE`). This corrupts GPU state for subsequent simulations. Mitigations:
+- **Evaluation order:** Baselines run before model evaluation per circuit, so baseline results are never affected by model failures.
+- **Simulator recovery:** On simulation failure, simulators are recreated and the failed run is recorded as NaN (excluded from averaging via `nanmean`).
+
 ### Transpilation
 
 Custom PassManager builder (`evaluation/transpiler.py`) supporting all combinations:
@@ -723,6 +727,8 @@ Custom PassManager builder (`evaluation/transpiler.py`) supporting all combinati
 | `dense` | `sabre` | Dense layout baseline |
 | `noise_adaptive` | `sabre` | Noise-adaptive layout baseline |
 | `trivial` | `sabre` | Identity mapping baseline |
+| `qap` | `sabre` | QAP-based layout (MQM) + standard routing |
+| `qap` | `nassc` | QAP-based layout (MQM) + noise-aware routing |
 
 Per-stage timing measured: init, layout, routing, optimization, scheduling.
 
@@ -733,7 +739,8 @@ Standard evaluation set (shared with MQM colleague for direct comparison):
 
 Extended set adds: `bv_n3`, `bv_n4`, `peres_3`, `xor5_254`
 
-All benchmark circuits stored in `data/circuits/qasm/benchmarks/` (23 total .qasm files).
+All benchmark circuits stored in `data/circuits/qasm/benchmarks/` (23 total .qasm files, gate-normalized to `{cx, id, rz, sx, x}`).
+For fair comparison with MQM colleague, use original (non-normalized) circuits via `--circuit-dir references/colleague/tests2/benchmarks`. Gate normalization reduces basis translation overhead, which inflates PST relative to the colleague's results.
 
 ### Statistical Reliability
 
@@ -748,6 +755,7 @@ Results presented as pandas DataFrame with per-circuit PST, depth, CX count, tim
 | NASSC (noise-aware routing) | SABRE layout + NASSC routing ([Li et al.](https://arxiv.org/abs/2305.06780)) |
 | DenseLayout | Maps to densely connected subgraph |
 | NoiseAdaptive | Noise-adaptive layout ([Murali et al., ASPLOS 2019](https://arxiv.org/abs/1901.11054)) |
+| QAP (MQM) | QAP-based mathematical layout optimization (colleague's method) |
 | Trivial | Identity mapping (qubit i → physical i) |
 | Random | Uniformly random physical qubit assignment |
 | Naive multi-prog | Independent SABRE per circuit (multi-programming only) |
@@ -788,14 +796,15 @@ Results presented as pandas DataFrame with per-circuit PST, depth, CX count, tim
 
 These items are not yet finalized and need to be decided during implementation:
 
-### Optimizer Details (Partially Decided)
+### Optimizer Details (Decided)
 - **Confirmed:** AdamW + Cosine Annealing LR scheduler
-- **Not yet decided:** Initial learning rate, weight decay, min LR for cosine annealing, warm-up epochs
+- **Stage 1 LR:** 1e-3, weight decay 1e-4, cosine eta_min 1e-6
+- **Stage 2 LR:** 1e-4, weight decay 1e-4, cosine eta_min 1e-6, warmup 5 epochs
+- **Gradient clipping (Stage 2):** max_norm 0.5
 
-### Reproducibility Settings (Deferred)
-- Random seed strategy
-- Number of experimental repetitions
-- Confidence interval reporting standards
+### Reproducibility Settings (Decided)
+- Random seed: 42 (training), 43 (evaluation)
+- Seed applied to: Python random, NumPy, PyTorch (CPU + CUDA)
 
 ---
 
@@ -949,9 +958,15 @@ def hungarian_decode(P, l):
 | **Labels** | Stage 1 sources | MLQD (OLSQ2, 3,729), QUEKO (τ⁻¹, 540) |
 | | Stage 2 (unsupervised) | MQT Bench, QASMBench, RevLib (+ all Stage 1 circuits) |
 | **Optimizer** | Type | AdamW |
-| | LR (Stage 1) | 1e-3, reduced to 1e-4 for QUEKO fine-tuning |
-| | LR (Stage 2) | 5e-4 |
-| | LR Scheduler | Cosine Annealing |
+| | Weight Decay | 1e-4 |
+| | LR (Stage 1) | 1e-3, reduced to 1e-4 for QUEKO fine-tuning (lr_factor=0.1) |
+| | LR (Stage 2) | 1e-4 |
+| | LR Scheduler | Cosine Annealing (eta_min=1e-6) |
+| | Warmup (Stage 2) | 5 epochs |
+| | Grad Clip (Stage 2) | max_norm 0.5 |
 | **Transitions** | MLQD+QUEKO→QUEKO | Val CE early stop, patience 10 |
+| | QUEKO fine-tuning end | Val CE early stop, patience 5 |
 | | Stage 1→2 | Manual (after Stage 1 completes) |
-| | Stage 2 end | Val PST early stopping |
+| | Stage 2 end | Val PST early stopping, patience 10, min_delta 0.5% |
+| **Reproducibility** | Training seed | 42 |
+| | Evaluation seed | 43 |

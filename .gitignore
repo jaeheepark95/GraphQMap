@@ -16,6 +16,7 @@ references/
 # Training outputs
 checkpoints/
 logs/
+runs/
 
 # Python
 __pycache__/

@@ -7,11 +7,11 @@ Stage 2: Noise-aware surrogate fine-tuning with L_surr + L_node + L_sep.
 
 from __future__ import annotations
 
+import csv
 import logging
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -60,6 +60,20 @@ class Stage1Trainer:
         self._setup_optimizer(cfg.training.optimizer.lr)
         self.checkpoint_dir = Path(cfg.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        # Metrics CSV
+        self.metrics_path = self.checkpoint_dir.parent / "metrics.csv"
+        with open(self.metrics_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["epoch", "phase", "tau", "lr", "train_loss", "val_loss"])
+
+    def _log_metrics(self, epoch: int, phase: str, tau: float, lr: float,
+                     train_loss: float, val_loss: float) -> None:
+        """Append one row to metrics CSV."""
+        with open(self.metrics_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch, phase, f"{tau:.6f}", f"{lr:.8f}",
+                             f"{train_loss:.6f}", f"{val_loss:.6f}"])
 
     def _setup_optimizer(self, lr: float) -> None:
         """Initialize optimizer and scheduler."""
@@ -208,6 +222,10 @@ class Stage1Trainer:
             train_loss = self.train_epoch(train_loader, epoch)
             val_loss = self.validate(val_loader, epoch)
 
+            tau = self.tau_scheduler.get_tau(epoch)
+            lr = self.scheduler.get_last_lr()[0]
+            self._log_metrics(epoch, tag, tau, lr, train_loss, val_loss)
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 self.save_checkpoint(epoch, tag=tag)
@@ -314,6 +332,12 @@ class Stage2Trainer:
         self.checkpoint_dir = Path(cfg.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+        # Metrics CSV
+        self.metrics_path = self.checkpoint_dir.parent / "metrics.csv"
+        with open(self.metrics_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["epoch", "lr", "l_total", "l_surr", "l_node", "l_sep"])
+
     def _warmup_lr(self, epoch: int) -> None:
         """Apply linear warmup to learning rate."""
         if epoch < self.warmup_epochs and self.warmup_epochs > 0:
@@ -389,11 +413,20 @@ class Stage2Trainer:
             self.scheduler.step()
 
         avg = {k: v / max(num_batches, 1) for k, v in accum.items()}
+        lr = self.optimizer.param_groups[0]['lr']
         logger.info(
-            f"Epoch {epoch} | LR={self.optimizer.param_groups[0]['lr']:.6f} | "
+            f"Epoch {epoch} | LR={lr:.6f} | "
             f"L_total={avg['total']:.6f} | L_surr={avg['l_surr']:.6f} | "
             f"L_node={avg['l_node']:.6f} | L_sep={avg['l_sep']:.6f}"
         )
+
+        # Append to metrics CSV
+        with open(self.metrics_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch, f"{lr:.8f}", f"{avg['total']:.6f}",
+                             f"{avg['l_surr']:.6f}", f"{avg['l_node']:.6f}",
+                             f"{avg['l_sep']:.6f}"])
+
         return avg
 
     def save_checkpoint(self, epoch: int, tag: str = "best") -> Path:

@@ -18,8 +18,9 @@ Currently focused on single-circuit mapping; multi-programming (2, 4 circuits) d
 - `evaluation/` — PST measurement, metrics, baselines, transpiler, benchmarks
   - `evaluation/transpiler.py` — custom PassManager builder (layout×routing combinations, per-stage timing)
   - `evaluation/benchmark.py` — structured benchmark runner (DataFrame output, simulator reuse)
-  - `evaluation/prev_methods/` — baseline routing/layout methods (NASSC, NoiseAdaptive)
-- `configs/` — hyperparameter configs (YAML)
+  - `evaluation/prev_methods/` — baseline routing/layout methods (NASSC, NoiseAdaptive, QAP)
+- `configs/` — hyperparameter configs (YAML) and config loader (`config_loader.py`)
+- `runs/` — experiment outputs (timestamped, gitignored): checkpoints, logs, config snapshots
 - `scripts/` — dataset generation/processing scripts
 - `docs/` — research specification and documentation
 - `tests/` — unit and integration tests (119 tests)
@@ -77,17 +78,27 @@ QUEKO/MLQD circuits use hardware topologies not available as Qiskit FakeBackendV
 
 ## Key Commands
 ```bash
-# Training
-python train.py --config configs/stage1.yaml       # Stage 1: MLQD+QUEKO supervised
-python train.py --config configs/stage2.yaml       # Stage 2: all circuits, surrogate loss
+# Training (each run creates a timestamped directory under runs/)
+python train.py --config configs/stage1.yaml --name baseline_v1
+python train.py --config configs/stage2.yaml --name baseline_v1 \
+  --override pretrained_checkpoint=runs/stage1/<STAGE1_RUN>/checkpoints/best.pt
+
+# Config overrides (can stack multiple --override flags)
+python train.py --config configs/stage1.yaml --name lr_test \
+  --override training.optimizer.lr=0.0005 \
+  --override training.mlqd_queko.max_epochs=50
 
 # Evaluation (model + baselines)
-python evaluate.py --config configs/stage2.yaml --backend toronto --reps 3
-python evaluate.py --config configs/stage2.yaml --backend toronto --routing-method nassc
+python evaluate.py --config configs/stage2.yaml \
+  --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
+  --backend toronto --reps 3
+python evaluate.py --config configs/stage2.yaml \
+  --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
+  --backend toronto brooklyn torino --reps 3
 
 # Benchmark (baselines only, no model)
 python evaluate.py --benchmark --backend toronto brooklyn torino
-python -m evaluation.benchmark --backend toronto --reps 2 --mode full
+python -m evaluation.benchmark --backend toronto --reps 2
 
 # Tests
 pytest tests/                                       # 119 tests
@@ -98,6 +109,30 @@ python scripts/process_mlqd.py                     # Process MLQD (extract label
 python scripts/generate_mqt_bench.py               # Generate MQT Bench circuits
 python scripts/normalize_gates.py                  # Normalize all QASM to basis gates {cx,id,rz,sx,x}
 ```
+
+## Experiment Management
+Each `train.py` run creates a timestamped directory with config snapshot:
+```
+runs/
+├── stage1/
+│   └── 20260323_025733_baseline_v1/
+│       ├── config.yaml          # Actual config used (with overrides applied)
+│       ├── source_config.txt    # Original config file path
+│       └── checkpoints/
+│           ├── mlqd_queko_best.pt   # Phase 1 best val loss
+│           ├── queko_best.pt        # Phase 2 best val loss
+│           └── best.pt             # Stage 1 final
+└── stage2/
+    └── 20260323_025902_baseline_v1/
+        ├── config.yaml
+        ├── source_config.txt
+        └── checkpoints/
+            ├── best.pt             # Best PST (if val_pst_fn provided)
+            └── final.pt            # Last epoch
+```
+- `--name` flag appends a label to the timestamp (optional but recommended)
+- Previous runs are never overwritten; each run gets its own directory
+- `runs/` is gitignored
 
 ## Hardware Backends
 - **Training (55 Qiskit + 5 synthetic = 60 backends)**:
@@ -127,8 +162,10 @@ python scripts/normalize_gates.py                  # Normalize all QASM to basis
 - Batching groups samples by (backend, num_logical) for uniform tensor shapes
 - PST measurement: P(correct output) = primary metric, Hellinger fidelity = secondary
 - PST simulation: tensor_network + GPU (cuQuantum) as default; simulators created once per backend, reused for all circuits
+- PST simulation: on tensor_network failure (large/deep circuits on 100Q+ backends), simulators are recreated to recover GPU state
+- Evaluation order: baselines run before model to prevent GPU state corruption from model-generated deep circuits
 - PST measurement: optimization_level configurable (default 3), 8192 shots
-- Transpilation: custom PassManager builder supporting layout×routing combinations (sabre, nassc, dense, noise_adaptive, trivial)
+- Transpilation: custom PassManager builder supporting layout×routing combinations (sabre, nassc, dense, noise_adaptive, trivial, qap)
 - Benchmark circuits: 8 standard circuits (toffoli_3, fredkin_3, 3_17_13, 4mod5-v1_22, mod5mils_65, alu-v0_27, decod24-v2_43, 4gt13_92)
 - Currently single-circuit only; multi-programming deferred
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -76,11 +77,37 @@ def load_config_with_base(base_path: str | Path, override_path: str | Path) -> C
     return Config(merged)
 
 
+def _setup_run_dir(cfg_dict: dict[str, Any], name: str | None, config_path: str) -> None:
+    """Create timestamped run directory and update checkpoint_dir/log_dir in-place.
+
+    Directory structure: runs/stage{N}/{YYYYMMDD_HHMMSS}_{name}/
+    Also saves a config snapshot (config.yaml) into the run directory.
+    """
+    stage = cfg_dict.get("training", {}).get("stage", "unknown")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{timestamp}_{name}" if name else timestamp
+
+    run_dir = Path("runs") / f"stage{stage}" / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg_dict["checkpoint_dir"] = str(run_dir / "checkpoints")
+    cfg_dict["log_dir"] = str(run_dir / "logs")
+
+    # Save config snapshot
+    with open(run_dir / "config.yaml", "w") as f:
+        yaml.dump(cfg_dict, f, default_flow_style=False, allow_unicode=True)
+
+    # Save source config path for reference
+    with open(run_dir / "source_config.txt", "w") as f:
+        f.write(config_path)
+
+
 def parse_args_with_config() -> Config:
     """Parse CLI arguments and load the specified config file.
 
     Usage:
         python train.py --config configs/stage1.yaml
+        python train.py --config configs/stage1.yaml --name baseline_v1
     """
     parser = argparse.ArgumentParser(description="GraphQMap")
     parser.add_argument(
@@ -90,9 +117,15 @@ def parse_args_with_config() -> Config:
         help="Path to YAML config file",
     )
     parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Experiment name (appended to timestamped run directory)",
+    )
+    parser.add_argument(
         "--override",
         type=str,
-        nargs="*",
+        action="append",
         default=[],
         help="Override config values: key=value (dot notation, e.g. training.optimizer.lr=0.001)",
     )
@@ -109,6 +142,9 @@ def parse_args_with_config() -> Config:
             d = d.setdefault(k, {})
         # Auto-cast value
         d[keys[-1]] = _auto_cast(value)
+
+    # Setup timestamped run directory
+    _setup_run_dir(cfg_dict, args.name, args.config)
 
     return Config(cfg_dict)
 

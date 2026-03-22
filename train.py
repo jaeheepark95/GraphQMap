@@ -62,6 +62,7 @@ def main() -> None:
 
     logger.info("=== GraphQMap Training — Stage %d ===", stage)
     logger.info("Device: %s", device)
+    logger.info("Run directory: %s", cfg.checkpoint_dir.rsplit("/checkpoints", 1)[0])
 
     data_root = cfg.data.data_root
     max_nodes = cfg.batching.max_total_nodes
