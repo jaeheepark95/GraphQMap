@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from qiskit import QuantumCircuit
-
 
 def load_queko_layout(layout_path: str | Path) -> list[int]:
     """Load an optimal layout from a QUEKO .layout file.
@@ -39,50 +37,3 @@ def load_queko_layout(layout_path: str | Path) -> list[int]:
             if line and not line.startswith("#"):
                 layout.append(int(line))
     return layout
-
-
-def load_queko_pair(
-    qasm_path: str | Path,
-    layout_path: str | Path,
-) -> tuple[QuantumCircuit, list[int]]:
-    """Load a QUEKO circuit and its optimal layout.
-
-    Args:
-        qasm_path: Path to the .qasm circuit file.
-        layout_path: Path to the .layout file.
-
-    Returns:
-        Tuple of (circuit, optimal_layout).
-    """
-    circuit = QuantumCircuit.from_qasm_file(str(qasm_path))
-    layout = load_queko_layout(layout_path)
-
-    if len(layout) != circuit.num_qubits:
-        raise ValueError(
-            f"Layout length ({len(layout)}) != circuit qubits ({circuit.num_qubits}) "
-            f"for {qasm_path}"
-        )
-
-    return circuit, layout
-
-
-def discover_queko_pairs(
-    queko_dir: str | Path,
-) -> list[tuple[Path, Path]]:
-    """Discover all (qasm, layout) file pairs in a QUEKO directory.
-
-    Args:
-        queko_dir: Root directory containing QUEKO files.
-
-    Returns:
-        List of (qasm_path, layout_path) tuples.
-    """
-    queko_dir = Path(queko_dir)
-    pairs = []
-
-    for qasm_file in sorted(queko_dir.rglob("*.qasm")):
-        layout_file = qasm_file.with_suffix(".layout")
-        if layout_file.exists():
-            pairs.append((qasm_file, layout_file))
-
-    return pairs

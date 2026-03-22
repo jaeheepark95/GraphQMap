@@ -12,7 +12,6 @@ from evaluation.benchmark import (
     BENCHMARK_CIRCUITS,
     execute_on_simulators,
     load_benchmark_circuit,
-    run_benchmark_comparison,
     run_benchmark_single,
 )
 from evaluation.metrics import (
@@ -55,7 +54,6 @@ __all__ = [
     "measure_pst_batch",
     "naive_multi_programming_layout",
     "random_layout",
-    "run_benchmark_comparison",
     "run_benchmark_single",
     "sabre_layout",
     "transpile_with_timing",

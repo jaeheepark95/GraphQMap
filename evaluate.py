@@ -2,12 +2,13 @@
 
 Usage:
     # Model evaluation with baselines
-    python evaluate.py --config configs/stage2.yaml --backend toronto --reps 3
-    python evaluate.py --config configs/stage2.yaml --checkpoint checkpoints/stage2/final.pt --backend toronto brooklyn torino --reps 3
+    python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto --reps 3
+
+    # Save results to CSV
+    python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto --reps 3 --output results.csv
 
     # Benchmark mode (baselines only, no model)
     python evaluate.py --benchmark --backend toronto brooklyn torino
-    python evaluate.py --benchmark --backend toronto --circuit-dir references/colleague/tests2/benchmarks
 """
 
 from __future__ import annotations

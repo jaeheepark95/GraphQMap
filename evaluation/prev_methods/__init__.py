@@ -2,5 +2,6 @@
 
 from evaluation.prev_methods.nassc import NASSCSwap
 from evaluation.prev_methods.noise_adaptive import NoiseAdaptiveLayout
+from evaluation.prev_methods.qap import QAPLayout
 
-__all__ = ["NASSCSwap", "NoiseAdaptiveLayout"]
+__all__ = ["NASSCSwap", "NoiseAdaptiveLayout", "QAPLayout"]

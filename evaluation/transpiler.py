@@ -3,7 +3,7 @@
 Supports layout_method × routing_method combinations with per-stage timing.
 Follows the MQM project's build_transpiler() pattern.
 
-Supported layout methods: graphqmap, sabre, dense, noise_adaptive, trivial, vf2
+Supported layout methods: graphqmap, sabre, dense, noise_adaptive, trivial, vf2, qap
 Supported routing methods: sabre, nassc
 """
 
@@ -35,6 +35,7 @@ from qiskit.transpiler import passes
 
 from evaluation.prev_methods.nassc import NASSCSwap
 from evaluation.prev_methods.noise_adaptive import NoiseAdaptiveLayout
+from evaluation.prev_methods.qap import QAPLayout
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +275,8 @@ def build_transpiler(
                 coupling_map,
             )
         )
+    elif layout_method == "qap":
+        pm.append(QAPLayout(backend))
     elif layout_method == "dense":
         pm.append(
             passes.DenseLayout(
@@ -430,6 +433,8 @@ def transpile_with_timing(
         layout_pm.append(
             NoiseAdaptiveLayout(backend.properties(), coupling_map)
         )
+    elif layout_method == "qap":
+        layout_pm.append(QAPLayout(backend))
     elif layout_method == "dense":
         layout_pm.append(
             passes.DenseLayout(

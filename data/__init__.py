@@ -21,7 +21,7 @@ from data.label_generation import (
 from data.multi_programming import merge_circuits, validate_multi_programming
 from data.multi_programming_sampler import sample_multi_programming_groups
 from data.normalization import zscore_normalize
-from data.queko_loader import discover_queko_pairs, load_queko_layout, load_queko_pair
+from data.queko_loader import load_queko_layout
 
 __all__ = [
     "BackendBucketSampler",
@@ -32,14 +32,12 @@ __all__ = [
     "build_hardware_graph",
     "collate_mapping_samples",
     "create_dataloader",
-    "discover_queko_pairs",
     "extract_circuit_features",
     "generate_label",
     "get_backend",
     "layout_to_permutation_matrix",
     "load_circuit",
     "load_queko_layout",
-    "load_queko_pair",
     "merge_circuits",
     "precompute_error_distance",
     "sample_multi_programming_groups",

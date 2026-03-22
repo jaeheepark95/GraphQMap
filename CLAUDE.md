@@ -20,8 +20,8 @@ Currently focused on single-circuit mapping; multi-programming (2, 4 circuits) d
   - `evaluation/benchmark.py` — structured benchmark runner (DataFrame output, simulator reuse)
   - `evaluation/prev_methods/` — baseline routing/layout methods (NASSC, NoiseAdaptive, QAP)
 - `configs/` — hyperparameter configs (YAML) and config loader (`config_loader.py`)
-- `runs/` — experiment outputs (timestamped, gitignored): checkpoints, logs, config snapshots
-- `scripts/` — dataset generation/processing scripts
+- `runs/` — experiment outputs (timestamped, gitignored): checkpoints, metrics CSV, config snapshots
+- `scripts/` — dataset generation/processing scripts, `visualize.py` (training/eval plotting)
 - `docs/` — research specification and documentation
 - `tests/` — unit and integration tests (119 tests)
 
@@ -88,17 +88,17 @@ python train.py --config configs/stage1.yaml --name lr_test \
   --override training.optimizer.lr=0.0005 \
   --override training.mlqd_queko.max_epochs=50
 
-# Evaluation (model + baselines)
+# Evaluation (model + baselines, save results to CSV)
 python evaluate.py --config configs/stage2.yaml \
   --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
-  --backend toronto --reps 3
-python evaluate.py --config configs/stage2.yaml \
-  --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
-  --backend toronto brooklyn torino --reps 3
+  --backend toronto --reps 3 --output runs/stage2/<RUN>/eval_toronto.csv
 
 # Benchmark (baselines only, no model)
 python evaluate.py --benchmark --backend toronto brooklyn torino
-python -m evaluation.benchmark --backend toronto --reps 2
+
+# Visualization
+python scripts/visualize.py runs/stage1/<RUN> runs/stage2/<RUN> \
+  --eval runs/stage2/<RUN>/eval_toronto.csv
 
 # Tests
 pytest tests/                                       # 119 tests
@@ -111,28 +111,52 @@ python scripts/normalize_gates.py                  # Normalize all QASM to basis
 ```
 
 ## Experiment Management
-Each `train.py` run creates a timestamped directory with config snapshot:
+Each `train.py` run creates a timestamped directory with config snapshot and metrics:
 ```
 runs/
 ├── stage1/
 │   └── 20260323_025733_baseline_v1/
 │       ├── config.yaml          # Actual config used (with overrides applied)
 │       ├── source_config.txt    # Original config file path
+│       ├── metrics.csv          # Per-epoch: epoch, phase, tau, lr, train_loss, val_loss
 │       └── checkpoints/
-│           ├── mlqd_queko_best.pt   # Phase 1 best val loss
-│           ├── queko_best.pt        # Phase 2 best val loss
-│           └── best.pt             # Stage 1 final
+│           ├── mlqd_queko_best.pt
+│           ├── queko_best.pt
+│           └── best.pt
 └── stage2/
     └── 20260323_025902_baseline_v1/
         ├── config.yaml
         ├── source_config.txt
+        ├── metrics.csv          # Per-epoch: epoch, lr, l_total, l_surr, l_node, l_sep
         └── checkpoints/
-            ├── best.pt             # Best PST (if val_pst_fn provided)
-            └── final.pt            # Last epoch
+            ├── best.pt
+            └── final.pt
 ```
 - `--name` flag appends a label to the timestamp (optional but recommended)
 - Previous runs are never overwritten; each run gets its own directory
 - `runs/` is gitignored
+- `checkpoint_dir`/`log_dir` in YAML configs are fallback values; overridden at runtime by `_setup_run_dir()`
+- Stage 2 `pretrained_checkpoint` must be specified via `--override` (no default path)
+
+### Visualization
+```bash
+# Training curves (loss, LR, tau)
+python scripts/visualize.py runs/stage1/<RUN>
+python scripts/visualize.py runs/stage2/<RUN>
+
+# Compare multiple runs
+python scripts/visualize.py runs/stage1/RUN_A runs/stage1/RUN_B
+
+# Evaluation results (PST bar chart + heatmap)
+python scripts/visualize.py --eval runs/stage2/<RUN>/eval_toronto.csv
+
+# Combined training + eval
+python scripts/visualize.py runs/stage1/<RUN> runs/stage2/<RUN> --eval eval.csv
+
+# Headless (save PNG only, no display)
+python scripts/visualize.py runs/stage1/<RUN> --no-show
+```
+Plots are saved to `<first_run_dir>/plots/` (or `--save-dir`).
 
 ## Hardware Backends
 - **Training (55 Qiskit + 5 synthetic = 60 backends)**:

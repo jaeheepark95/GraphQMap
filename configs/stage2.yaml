@@ -178,6 +178,7 @@ backends:
 seed: 42
 device: cuda
 num_workers: 4
-log_dir: logs/stage2
-checkpoint_dir: checkpoints/stage2
-pretrained_checkpoint: checkpoints/stage1/best.pt
+# log_dir and checkpoint_dir are auto-set by train.py (runs/stage{N}/TIMESTAMP_NAME/)
+log_dir: logs/stage2           # fallback only; overridden at runtime
+checkpoint_dir: checkpoints/stage2  # fallback only; overridden at runtime
+# pretrained_checkpoint: specify via --override pretrained_checkpoint=runs/stage1/<RUN>/checkpoints/best.pt

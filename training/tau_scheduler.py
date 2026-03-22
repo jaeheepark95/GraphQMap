@@ -51,25 +51,3 @@ class TauScheduler:
             return max(tau, self.tau_min)
 
         raise ValueError(f"Unknown schedule: {self.schedule}")
-
-    @classmethod
-    def from_config(cls, cfg: object) -> "TauScheduler":
-        """Create from a Config object.
-
-        Handles both Stage 1 (tau_max/tau_min/schedule) and
-        Stage 2 (tau/schedule=fixed) config formats.
-        """
-        schedule = getattr(cfg.sinkhorn, "schedule", "exponential")
-
-        if schedule == "fixed":
-            tau = getattr(cfg.sinkhorn, "tau", 0.05)
-            return cls(tau_max=tau, tau_min=tau, schedule="fixed")
-
-        return cls(
-            tau_max=cfg.sinkhorn.tau_max,
-            tau_min=cfg.sinkhorn.tau_min,
-            schedule=schedule,
-            total_epochs=getattr(cfg.training, "max_epochs", 100)
-            if hasattr(cfg.training, "max_epochs")
-            else getattr(cfg.training.mqt_bench, "max_epochs", 100),
-        )

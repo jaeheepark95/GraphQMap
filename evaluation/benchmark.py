@@ -1,14 +1,14 @@
 """Structured benchmark runner for GraphQMap evaluation.
 
-Follows MQM's benchmark_single.py / benchmark_layout_single.py pattern:
+Runs baseline layout×routing combinations across backends:
   - Simulators created once per backend, reused for all circuits
   - DataFrame-based results with PST, Depth, CX count, Time
-  - Supports layout_method × routing_method combinations
-  - Average row appended automatically
+  - Simulator recovery on GPU crash (tensor_network failures)
 
 Usage:
     python -m evaluation.benchmark --backend toronto --reps 2
     python -m evaluation.benchmark --backend toronto brooklyn torino --reps 1
+    python -m evaluation.benchmark --backend toronto --circuit-dir references/colleague/tests2/benchmarks
 """
 
 from __future__ import annotations
@@ -16,8 +16,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import time
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -31,7 +29,7 @@ from evaluation.pst import (
     create_ideal_simulator,
     create_noisy_simulator,
 )
-from evaluation.transpiler import build_transpiler, transpile_with_timing
+from evaluation.transpiler import transpile_with_timing
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +64,11 @@ BENCHMARK_CIRCUITS_EXTENDED = [
 # Default method combinations: (routing_method, layout_method)
 DEFAULT_COMBINATIONS = [
     ("sabre", "sabre"),
-    ("sabre", "dense"),
     ("sabre", "noise_adaptive"),
+    ("sabre", "qap"),
     ("nassc", "sabre"),
     ("nassc", "noise_adaptive"),
+    ("nassc", "qap"),
 ]
 
 # Default test backends
@@ -111,7 +110,7 @@ def execute_on_simulators(
     ideal_simulator: AerSimulator,
     noisy_simulator: AerSimulator,
     shots: int = 8192,
-) -> tuple[float, float, int]:
+) -> tuple[float, float, float | list[float]]:
     """Execute a transpiled circuit on ideal and noisy simulators.
 
     Args:
@@ -122,6 +121,9 @@ def execute_on_simulators(
 
     Returns:
         Tuple of (avg_pst, depth, pst_value_or_list).
+
+    Raises:
+        QiskitError: If simulation fails (e.g. tensor_network GPU crash).
     """
     ideal_result = ideal_simulator.run(
         transpiled_circuit, shots=shots
@@ -148,6 +150,9 @@ def run_benchmark_single(
     warm_up: int = 1,
 ) -> dict[str, pd.DataFrame]:
     """Run single-circuit benchmarks across backends and method combinations.
+
+    On simulation failure (e.g. tensor_network GPU crash), the simulators
+    are recreated and the failed run is recorded as NaN.
 
     Args:
         circuit_names: List of circuit names. Defaults to BENCHMARK_CIRCUITS.
@@ -182,7 +187,12 @@ def run_benchmark_single(
         ideal_sim = create_ideal_simulator(backend)
         noisy_sim = create_noisy_simulator(backend)
 
-        # Column labels: (metric, "routing+layout")
+        def recreate_simulators():
+            nonlocal ideal_sim, noisy_sim
+            logger.info("  Recreating simulators after failure...")
+            ideal_sim = create_ideal_simulator(backend)
+            noisy_sim = create_noisy_simulator(backend)
+
         method_labels = [f"{r}+{l}" for r, l in combinations]
 
         all_pst = {label: [] for label in method_labels}
@@ -209,21 +219,25 @@ def run_benchmark_single(
                         routing_method=routing,
                         seed=seed + j,
                     )
-                    avg_pst, depth, _ = execute_on_simulators(
-                        tc, ideal_sim, noisy_sim, shots=shots
-                    )
+                    try:
+                        avg_pst, depth, _ = execute_on_simulators(
+                            tc, ideal_sim, noisy_sim, shots=shots
+                        )
+                    except Exception as e:
+                        logger.warning("  Simulation failed: %s", e)
+                        recreate_simulators()
+                        avg_pst = float("nan")
 
-                    # Skip warm-up runs
                     if j >= warm_up:
                         psts_runs.append(avg_pst)
                         times_runs.append(metadata["layout_time"])
                         cx_runs.append(metadata["map_cx"])
                         depth_runs.append(metadata["total_time"])
 
-                all_pst[label].append(np.mean(psts_runs) if psts_runs else 0.0)
-                all_time[label].append(np.mean(times_runs) if times_runs else 0.0)
-                all_cx[label].append(np.mean(cx_runs) if cx_runs else 0.0)
-                all_depth[label].append(np.mean(depth_runs) if depth_runs else 0.0)
+                all_pst[label].append(np.nanmean(psts_runs) if psts_runs else 0.0)
+                all_time[label].append(np.nanmean(times_runs) if times_runs else 0.0)
+                all_cx[label].append(np.nanmean(cx_runs) if cx_runs else 0.0)
+                all_depth[label].append(np.nanmean(depth_runs) if depth_runs else 0.0)
 
         # Build MultiIndex DataFrame
         data = {}
@@ -239,100 +253,7 @@ def run_benchmark_single(
 
         results[backend_name] = df
 
-        # Print
         pd.options.display.float_format = "{:.2f}".format
-        print(f"\nResults for backend {backend_name}:")
-        print(df)
-        print()
-
-    return results
-
-
-def run_benchmark_comparison(
-    circuit_names: list[str] | None = None,
-    backend_names: list[str] | None = None,
-    reps: int = 1,
-    shots: int = 8192,
-    circuit_dir: str = BENCHMARK_CIRCUIT_DIR,
-) -> dict[str, pd.DataFrame]:
-    """Run simplified PST comparison (SABRE vs NASSC vs OURS+SABRE vs OURS+NASSC).
-
-    Similar to MQM's benchmark_single.py format.
-
-    Args:
-        circuit_names: Circuit names.
-        backend_names: Backend names.
-        reps: Repetitions.
-        shots: Simulation shots.
-        circuit_dir: Circuit directory.
-
-    Returns:
-        Dict mapping backend_name → DataFrame.
-    """
-    if circuit_names is None:
-        circuit_names = BENCHMARK_CIRCUITS
-    if backend_names is None:
-        backend_names = list(DEFAULT_BACKENDS.keys())
-
-    results = {}
-
-    for backend_name in backend_names:
-        logger.info("=== Backend: %s ===", backend_name)
-
-        if backend_name not in DEFAULT_BACKENDS:
-            continue
-
-        backend = DEFAULT_BACKENDS[backend_name]()
-        ideal_sim = create_ideal_simulator(backend)
-        noisy_sim = create_noisy_simulator(backend)
-
-        methods = ["SABRE", "NASSC", "OURS+SABRE", "OURS+NASSC"]
-        method_psts = {m: [] for m in methods}
-
-        for cname in circuit_names:
-            logger.info("  Circuit: %s", cname)
-            circuit = load_benchmark_circuit(cname, circuit_dir)
-
-            for method in methods:
-                # Determine routing and layout
-                if method == "SABRE":
-                    routing, layout = "sabre", "sabre"
-                elif method == "NASSC":
-                    routing, layout = "nassc", "sabre"
-                elif method == "OURS+SABRE":
-                    routing, layout = "sabre", "given"
-                elif method == "OURS+NASSC":
-                    routing, layout = "nassc", "given"
-
-                psts_runs = []
-                for rep in range(reps):
-                    # For 'given' layout, caller should set initial_layout.
-                    # Here we use sabre as placeholder (will be replaced when
-                    # integrated with GraphQMap model in evaluate.py).
-                    if layout == "given":
-                        # Placeholder: use sabre layout as stand-in
-                        layout = "sabre"
-                    pm = build_transpiler(
-                        backend,
-                        layout_method=layout,
-                        routing_method=routing,
-                    )
-                    tc = pm.run(circuit)
-                    avg_pst, _, _ = execute_on_simulators(
-                        tc, ideal_sim, noisy_sim, shots=shots
-                    )
-                    psts_runs.append(avg_pst)
-
-                method_psts[method].append(np.mean(psts_runs))
-
-        data = {("PST", m): method_psts[m] for m in methods}
-        df = pd.DataFrame(data, index=circuit_names)
-        df.columns = pd.MultiIndex.from_tuples(df.columns)
-        df.loc["Avg"] = df.mean(numeric_only=True, axis=0)
-
-        results[backend_name] = df
-
-        pd.options.display.float_format = "{:.1f}".format
         print(f"\nResults for backend {backend_name}:")
         print(df)
         print()
@@ -362,34 +283,19 @@ def main():
     parser.add_argument("--reps", type=int, default=1)
     parser.add_argument("--shots", type=int, default=8192)
     parser.add_argument(
-        "--mode",
-        choices=["full", "comparison"],
-        default="full",
-        help="Benchmark mode: 'full' for all combos, 'comparison' for PST comparison",
-    )
-    parser.add_argument(
         "--circuit-dir",
         default=BENCHMARK_CIRCUIT_DIR,
         help="Directory containing benchmark .qasm files",
     )
     args = parser.parse_args()
 
-    if args.mode == "full":
-        run_benchmark_single(
-            circuit_names=args.circuits,
-            backend_names=args.backend,
-            reps=args.reps,
-            shots=args.shots,
-            circuit_dir=args.circuit_dir,
-        )
-    else:
-        run_benchmark_comparison(
-            circuit_names=args.circuits,
-            backend_names=args.backend,
-            reps=args.reps,
-            shots=args.shots,
-            circuit_dir=args.circuit_dir,
-        )
+    run_benchmark_single(
+        circuit_names=args.circuits,
+        backend_names=args.backend,
+        reps=args.reps,
+        shots=args.shots,
+        circuit_dir=args.circuit_dir,
+    )
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from typing import Any
 from qiskit import QuantumCircuit, transpile
 
 from evaluation.pst import create_ideal_simulator, create_noisy_simulator, measure_pst
-from evaluation.transpiler import build_transpiler, transpile_with_timing
+from evaluation.transpiler import transpile_with_timing
 
 
 def sabre_layout(

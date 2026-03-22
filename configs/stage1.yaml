@@ -178,5 +178,6 @@ backends:
 seed: 42
 device: cuda
 num_workers: 4
-log_dir: logs/stage1
-checkpoint_dir: checkpoints/stage1
+# log_dir and checkpoint_dir are auto-set by train.py (runs/stage{N}/TIMESTAMP_NAME/)
+log_dir: logs/stage1           # fallback only; overridden at runtime
+checkpoint_dir: checkpoints/stage1  # fallback only; overridden at runtime
