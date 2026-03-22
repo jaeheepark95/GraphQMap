@@ -484,11 +484,11 @@ L_2 = L_surr + α · L_node + λ · L_sep
 
 | Dataset | Volume | Stage | Label Source | Notes |
 |---------|--------|-------|--------------|-------|
-| **MQT Bench** | 1,448 circuits | Stage 2 (Unsupervised) | None | 29 algorithm types, 2-127Q. No mapped labels available. Generated via `scripts/generate_mqt_bench.py` |
+| **MQT Bench** | 1,219 circuits | Stage 2 (Unsupervised) | None | 29 algorithm types, 2-127Q. No mapped labels available. Generated via `scripts/generate_mqt_bench.py` |
 | **MLQD** | 4,443 circuits (3,729 labeled) | Stage 1 (Supervised) | OLSQ2 solver labels (extracted) | 5 backends: Aspen-4, Grid5x5, Melbourne, Rochester, Sycamore |
 | **QUEKO** | 900 circuits (540 labeled) | Stage 1 (Supervised, fine-tuning) | τ⁻¹ (true optimal) | 3 categories: BNTF (180), BSS (360, labeled), BIGD (360, no labels). 4 hardware topologies |
-| **QASMBench** | 111 circuits | Stage 2 (Unsupervised) | None | 2Q-127Q filtered. No labels. Surrogate loss training |
-| **RevLib** | 263 circuits | Stage 2 (Unsupervised) | None | Reversible circuits, 3Q-127Q. Converted from .real via Real2QASM |
+| **QASMBench** | 94 circuits | Stage 2 (Unsupervised) | None | 2Q-127Q filtered. No labels. Surrogate loss training |
+| **RevLib** | 231 circuits | Stage 2 (Unsupervised) | None | Reversible circuits, 3Q-127Q. Converted from .real via Real2QASM |
 
 ### Dataset Directory Structure
 
@@ -497,11 +497,11 @@ All circuit data is stored under `data/circuits/` with circuits, labels, and spl
 ```
 data/circuits/
 ├── qasm/                        # Raw .qasm files organized by source dataset
-│   ├── mqt_bench/               # 1,448 circuits (29 algorithms, 2-127Q, no labels yet)
+│   ├── mqt_bench/               # 1,219 circuits (29 algorithms, 2-127Q, no labels yet)
 │   ├── mlqd/                    # 4,443 circuits (3,729 with OLSQ2 labels)
 │   ├── queko/                   # 900 circuits (540 with τ⁻¹ labels, 360 without)
-│   ├── qasmbench/               # 111 circuits (2Q-127Q, label-free)
-│   └── revlib/                  # 263 circuits (3Q-127Q, converted from .real)
+│   ├── qasmbench/               # 94 circuits (2Q-127Q, label-free)
+│   └── revlib/                  # 231 circuits (3Q-127Q, converted from .real)
 ├── labels/                      # Label files — only for circuits with usable labels
 │   ├── mqt_bench/               # (no labels — Stage 2 unsupervised only)
 │   ├── mlqd/labels.json         # OLSQ2 solver labels (3,729 circuits)
@@ -515,8 +515,8 @@ data/circuits/
 └── splits/                          # Defines which circuits are used in each stage
     ├── stage1_supervised.json       # 3,846 labeled circuits → Stage 1 training
     ├── stage1_queko_only.json       # 486 QUEKO circuits → Stage 1 fine-tuning phase
-    ├── stage1_unsupervised.json     # 2,896 unlabeled circuits → Stage 2 only
-    ├── stage2_all.json              # 7,165 all circuits → Stage 2 surrogate loss
+    ├── stage1_unsupervised.json     # 2,618 unlabeled circuits → Stage 2 only
+    ├── stage2_all.json              # 6,887 all circuits → Stage 2 surrogate loss
     ├── val.json                     # 423 labeled validation
     └── val_queko_only.json          # 54 QUEKO validation
 ```
@@ -526,6 +526,51 @@ data/circuits/
 - **Label format:** JSON mapping from circuit filename to layout: `{"circuit.qasm": {"backend": "manila", "layout": [0, 1, 3, 2, 4]}, ...}`
 - **Split files control training behavior.** Adding new labels or circuits only requires updating `labels/*.json` and `splits/*.json` — no reorganization of circuit files.
 - **QASMBench and RevLib** have no `labels/` directory entry (always unsupervised, Stage 2 only).
+#### Dataset Preprocessing Pipeline
+
+All raw circuit datasets undergo the following preprocessing before use in training. Each step is applied once and the results are stored in place.
+
+**Step 1: Gate Normalization** (`scripts/normalize_gates.py`)
+- All QASM files are transpiled to Qiskit standard basis gates `{cx, id, rz, sx, x}` via `transpile(circuit, basis_gates=..., optimization_level=0)` (pure decomposition, no gate optimization/merging)
+- **Why:** Original datasets use incompatible gate sets — QUEKO uses only `x`/`cx`, MLQD uses `h`/`cx`/`sx`, while MQT Bench/RevLib contain 3+ qubit gates (`ccx`, `mcx`, `cswap`) that are invisible to the 2-qubit-only feature extraction in `circuit_graph.py` (`len(qubit_indices) == 2` condition). Without decomposition, multi-qubit gate interactions are completely missing from the circuit graph.
+- Qubit counts are preserved (transpile does not add ancillas at optimization_level=0)
+
+**Step 2: Untranspilable Circuit Removal**
+- Circuits that cannot be transpiled within reasonable time/memory are removed
+- Removed: `grover_n26.qasm`, `grover_n28.qasm` (MQT Bench) — 26/28-qubit custom gate wrapping entire circuit, transpile exceeds 10 min
+- Removed: 32 circuits with QASM file size > 10 MB (24 from MQT Bench, 8 from RevLib) — Qiskit DAG parsing requires tens of GB memory, causing OOM
+
+**Step 3: Evaluation Benchmark Deduplication**
+- Circuits in `data/circuits/qasm/benchmarks/` (23 evaluation circuits) are checked against all training datasets for filename overlap
+- Removed from training sets: 17 RevLib circuits + 2 MQT Bench circuits (`bv_n3`, `bv_n4`) that duplicate benchmark circuits
+- **Why:** Training on evaluation circuits would make PST benchmarks unfair
+
+**Step 4: Extreme Circuit Filtering** (edges > 1,000)
+- Circuits with more than 1,000 unique 2Q qubit pairs (edges in the circuit interaction graph) are removed
+- Removed: 182 MQT Bench + 1 QASMBench = 183 circuits
+- **Why:** These are fully-connected circuits (QFT, QPE at 60-127Q with up to 8,001 edges) that cause GNN message passing memory/compute explosion and batch size imbalance. The labeled datasets (QUEKO/MLQD) have max 88/24 edges respectively — 1,000 provides 11× headroom while filtering extreme outliers.
+- After filtering, max edges = 996
+
+**Preprocessing summary:**
+
+| Step | Circuits Removed | Reason |
+|------|:----------------:|--------|
+| Gate normalization | 0 (in-place) | Standardize gate representation |
+| Untranspilable | 34 | OOM / timeout during transpile |
+| Benchmark dedup | 19 | Evaluation fairness |
+| Extreme filtering | 183 | edges > 1,000, GNN scalability |
+| **Total removed** | **236** | |
+
+**Original → Final circuit counts:**
+
+| Dataset | Original | Final | Removed |
+|---------|:--------:|:-----:|:-------:|
+| QUEKO | 900 | 900 | 0 |
+| MLQD | 4,443 | 4,443 | 0 |
+| MQT Bench | 1,448 | 1,219 | 229 |
+| QASMBench | 111 | 94 | 17 |
+| RevLib | 263 | 231 | 32 |
+| **Total** | **7,165** | **6,887** | **278** |
 
 #### QUEKO Backend Handling
 
