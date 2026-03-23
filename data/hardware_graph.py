@@ -146,7 +146,8 @@ def extract_qubit_properties(backend: Any) -> dict[str, np.ndarray]:
         backend: A FakeBackendV2 instance.
 
     Returns:
-        Dict with keys: t1, t2, frequency, readout_error, single_qubit_error, degree.
+        Dict with keys: t1, t2, readout_error, single_qubit_error, degree,
+        t1_cx_ratio, t2_cx_ratio.
         Each value is a 1D numpy array of shape (num_qubits,).
     """
     target = backend.target
@@ -154,7 +155,6 @@ def extract_qubit_properties(backend: Any) -> dict[str, np.ndarray]:
 
     t1 = np.zeros(num_qubits)
     t2 = np.zeros(num_qubits)
-    frequency = np.zeros(num_qubits)
     readout_error = np.zeros(num_qubits)
     single_qubit_error = np.zeros(num_qubits)
 
@@ -162,7 +162,6 @@ def extract_qubit_properties(backend: Any) -> dict[str, np.ndarray]:
         qp = target.qubit_properties[q]
         t1[q] = qp.t1 if qp.t1 is not None else 0.0
         t2[q] = qp.t2 if qp.t2 is not None else 0.0
-        frequency[q] = qp.frequency if qp.frequency is not None else 0.0
 
         # Readout error from measure gate
         if "measure" in target.operation_names:
@@ -184,23 +183,44 @@ def extract_qubit_properties(backend: Any) -> dict[str, np.ndarray]:
     # Degree from coupling map
     coupling_map = backend.coupling_map
     degree = np.zeros(num_qubits)
+    neighbor_map: list[set[int]] = [set() for _ in range(num_qubits)]
+    for edge in coupling_map.get_edges():
+        neighbor_map[edge[0]].add(edge[1])
+        neighbor_map[edge[1]].add(edge[0])
     for q in range(num_qubits):
-        # Count unique neighbors (undirected)
-        neighbors = set()
-        for edge in coupling_map.get_edges():
-            if edge[0] == q:
-                neighbors.add(edge[1])
-            elif edge[1] == q:
-                neighbors.add(edge[0])
-        degree[q] = len(neighbors)
+        degree[q] = len(neighbor_map[q])
+
+    # Per-qubit mean cx_duration (average over all connected edges)
+    gate_name = _get_two_qubit_gate_name(backend)
+    cx_props = target[gate_name]
+    cx_duration_sum = np.zeros(num_qubits)
+    cx_duration_count = np.zeros(num_qubits)
+    for qargs, props in cx_props.items():
+        if props is None or props.duration is None:
+            continue
+        p, q = qargs
+        cx_duration_sum[p] += props.duration
+        cx_duration_sum[q] += props.duration
+        cx_duration_count[p] += 1
+        cx_duration_count[q] += 1
+    mean_cx_duration = np.where(
+        cx_duration_count > 0,
+        cx_duration_sum / cx_duration_count,
+        1.0,  # fallback: avoid division by zero
+    )
+
+    # T1/cx_duration and T2/cx_duration: how many 2Q gates fit before decoherence
+    t1_cx_ratio = np.where(mean_cx_duration > 0, t1 / mean_cx_duration, 0.0)
+    t2_cx_ratio = np.where(mean_cx_duration > 0, t2 / mean_cx_duration, 0.0)
 
     return {
         "t1": t1,
         "t2": t2,
-        "frequency": frequency,
         "readout_error": readout_error,
         "single_qubit_error": single_qubit_error,
         "degree": degree,
+        "t1_cx_ratio": t1_cx_ratio,
+        "t2_cx_ratio": t2_cx_ratio,
     }
 
 
@@ -253,16 +273,16 @@ def extract_edge_properties(backend: Any) -> tuple[list[tuple[int, int]], np.nda
         a, b = qargs
         key = (min(a, b), max(a, b))
         cx_error = props.error if props.error is not None else 0.0
-        cx_duration = props.duration if props.duration is not None else 0.0
         if key not in edge_dict:
-            edge_dict[key] = [cx_error, cx_duration]
+            edge_dict[key] = [cx_error]
         else:
             # Average the two directions
             edge_dict[key][0] = (edge_dict[key][0] + cx_error) / 2
-            edge_dict[key][1] = (edge_dict[key][1] + cx_duration) / 2
 
     edge_list = sorted(edge_dict.keys())
     edge_features = np.array([edge_dict[e] for e in edge_list], dtype=np.float32)
+    if edge_features.ndim == 1:
+        edge_features = edge_features.reshape(-1, 1)
 
     return edge_list, edge_features
 
@@ -270,8 +290,9 @@ def extract_edge_properties(backend: Any) -> tuple[list[tuple[int, int]], np.nda
 def build_hardware_graph(backend: Any, eps: float = 1e-8) -> Data:
     """Build a PyG Data object for a hardware backend.
 
-    Node features (6): T1, T2, frequency, readout_error, single_qubit_error, degree
-    Edge features (2): cx_error, cx_duration
+    Node features (7): T1, T2, readout_error, single_qubit_error, degree,
+                       t1_cx_ratio, t2_cx_ratio
+    Edge features (1): cx_error
     All features z-score normalized within the backend.
 
     Args:
@@ -284,14 +305,15 @@ def build_hardware_graph(backend: Any, eps: float = 1e-8) -> Data:
     qubit_props = extract_qubit_properties(backend)
     edge_list, edge_feats = extract_edge_properties(backend)
 
-    # Stack node features: (num_qubits, 6)
+    # Stack node features: (num_qubits, 7)
     node_features = np.stack([
         qubit_props["t1"],
         qubit_props["t2"],
-        qubit_props["frequency"],
         qubit_props["readout_error"],
         qubit_props["single_qubit_error"],
         qubit_props["degree"],
+        qubit_props["t1_cx_ratio"],
+        qubit_props["t2_cx_ratio"],
     ], axis=1).astype(np.float32)
 
     x = torch.from_numpy(node_features)
@@ -311,7 +333,7 @@ def build_hardware_graph(backend: Any, eps: float = 1e-8) -> Data:
         edge_attr = zscore_normalize(edge_attr, dim=0, eps=eps)
     else:
         edge_index = torch.zeros((2, 0), dtype=torch.long)
-        edge_attr = torch.zeros((0, 2), dtype=torch.float32)
+        edge_attr = torch.zeros((0, 1), dtype=torch.float32)
 
     num_qubits = backend.target.num_qubits
 
@@ -379,23 +401,26 @@ def precompute_hop_distance(backend: Any) -> np.ndarray:
 def get_hw_node_features(backend: Any) -> np.ndarray:
     """Get quality-score input features for a Qiskit FakeBackendV2.
 
-    Returns (h, 5) array: [T1_norm, T2_norm, (1-readout_err), (1-sq_err), freq_norm].
+    Returns (h, 7) array: [T1, T2, readout_error, single_qubit_error, degree,
+                           t1_cx_ratio, t2_cx_ratio].
     Values are z-score normalized within the backend.
 
     Args:
         backend: A FakeBackendV2 instance.
 
     Returns:
-        (h, 5) numpy array for QualityScore module input.
+        (h, 7) numpy array for QualityScore module input.
     """
     props = extract_qubit_properties(backend)
-    n = backend.target.num_qubits
-    raw = np.zeros((n, 5), dtype=np.float32)
-    raw[:, 0] = props["t1"]
-    raw[:, 1] = props["t2"]
-    raw[:, 2] = 1.0 - props["readout_error"]
-    raw[:, 3] = 1.0 - props["single_qubit_error"]
-    raw[:, 4] = props["frequency"]
+    raw = np.stack([
+        props["t1"],
+        props["t2"],
+        props["readout_error"],
+        props["single_qubit_error"],
+        props["degree"],
+        props["t1_cx_ratio"],
+        props["t2_cx_ratio"],
+    ], axis=1).astype(np.float32)
 
     mean = raw.mean(axis=0, keepdims=True)
     std = raw.std(axis=0, keepdims=True) + 1e-8
@@ -425,24 +450,47 @@ def build_hardware_graph_from_synthetic(name: str, eps: float = 1e-8) -> Data:
     qprops = profile["qubit_properties"]
     eprops = profile["edge_properties"]
 
-    # Node features: (n, 6) — t1, t2, frequency, readout_error, sq_gate_error, degree
+    # Node features: (n, 7) — t1, t2, readout_error, sq_gate_error, degree,
+    #                           t1_cx_ratio, t2_cx_ratio
     degree = np.zeros(n)
+    neighbor_map: list[set[int]] = [set() for _ in range(n)]
     for p, q in coupling_map:
-        degree[p] += 1
-        degree[q] += 1
+        neighbor_map[p].add(q)
+        neighbor_map[q].add(p)
+    for i in range(n):
+        degree[i] = len(neighbor_map[i])
 
-    node_features = np.zeros((n, 6), dtype=np.float32)
+    # Per-qubit mean cx_duration for ratio features
+    cx_duration_sum = np.zeros(n)
+    cx_duration_count = np.zeros(n)
+    for p, q in coupling_map:
+        key = f"({p}, {q})"
+        ep = eprops.get(key) or eprops.get(f"({q}, {p})")
+        if ep and ep.get("cx_duration"):
+            cx_duration_sum[p] += ep["cx_duration"]
+            cx_duration_sum[q] += ep["cx_duration"]
+            cx_duration_count[p] += 1
+            cx_duration_count[q] += 1
+    mean_cx_duration = np.where(cx_duration_count > 0, cx_duration_sum / cx_duration_count, 1.0)
+
+    t1_arr = np.array([qprops[str(i)]["t1"] for i in range(n)], dtype=np.float32)
+    t2_arr = np.array([qprops[str(i)]["t2"] for i in range(n)], dtype=np.float32)
+    t1_cx_ratio = np.where(mean_cx_duration > 0, t1_arr / mean_cx_duration, 0.0)
+    t2_cx_ratio = np.where(mean_cx_duration > 0, t2_arr / mean_cx_duration, 0.0)
+
+    node_features = np.zeros((n, 7), dtype=np.float32)
     for i in range(n):
         qp = qprops[str(i)]
         node_features[i] = [
-            qp["t1"], qp["t2"], qp["frequency"],
+            qp["t1"], qp["t2"],
             qp["readout_error"], qp["sq_gate_error"], degree[i],
+            t1_cx_ratio[i], t2_cx_ratio[i],
         ]
 
     x = torch.from_numpy(node_features)
     x = zscore_normalize(x, dim=0, eps=eps)
 
-    # Edge features: (num_edges*2, 2) — cx_error, cx_duration (both directions)
+    # Edge features: (num_edges*2, 1) — cx_error only
     edge_list = coupling_map
     if len(edge_list) > 0:
         src = [e[0] for e in edge_list] + [e[1] for e in edge_list]
@@ -453,13 +501,13 @@ def build_hardware_graph_from_synthetic(name: str, eps: float = 1e-8) -> Data:
         for p, q in edge_list:
             key = f"({p}, {q})"
             ep = eprops[key]
-            edge_feats.append([ep["cx_error"], ep["cx_duration"]])
+            edge_feats.append([ep["cx_error"]])
         edge_attr = torch.tensor(edge_feats, dtype=torch.float32)
         edge_attr = torch.cat([edge_attr, edge_attr], dim=0)
         edge_attr = zscore_normalize(edge_attr, dim=0, eps=eps)
     else:
         edge_index = torch.zeros((2, 0), dtype=torch.long)
-        edge_attr = torch.zeros((0, 2), dtype=torch.float32)
+        edge_attr = torch.zeros((0, 1), dtype=torch.float32)
 
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, num_qubits=n)
 
@@ -513,26 +561,56 @@ def precompute_hop_distance_synthetic(name: str) -> np.ndarray:
 def get_hw_node_features_synthetic(name: str) -> np.ndarray:
     """Get quality-score input features for a synthetic backend.
 
-    Returns (h, 5) array: [T1_norm, T2_norm, (1-readout_err), (1-sq_err), freq_norm].
+    Returns (h, 7) array: [T1, T2, readout_error, single_qubit_error, degree,
+                           t1_cx_ratio, t2_cx_ratio].
     Values are z-score normalized within the backend.
 
     Args:
         name: Synthetic backend name.
 
     Returns:
-        (h, 5) numpy array for QualityScore module input.
+        (h, 7) numpy array for QualityScore module input.
     """
     profile = _load_synthetic_backend(name)
     n = profile["num_qubits"]
     qprops = profile["qubit_properties"]
+    coupling_map = [tuple(e) for e in profile["coupling_map"]]
+    eprops = profile["edge_properties"]
 
-    raw = np.zeros((n, 5), dtype=np.float32)
+    # Degree from coupling map
+    degree = np.zeros(n)
+    neighbor_map: list[set[int]] = [set() for _ in range(n)]
+    for p, q in coupling_map:
+        neighbor_map[p].add(q)
+        neighbor_map[q].add(p)
+    for i in range(n):
+        degree[i] = len(neighbor_map[i])
+
+    # Per-qubit mean cx_duration for ratio features
+    cx_duration_sum = np.zeros(n)
+    cx_duration_count = np.zeros(n)
+    for p, q in coupling_map:
+        key = f"({p}, {q})"
+        ep = eprops.get(key) or eprops.get(f"({q}, {p})")
+        if ep and ep.get("cx_duration"):
+            cx_duration_sum[p] += ep["cx_duration"]
+            cx_duration_sum[q] += ep["cx_duration"]
+            cx_duration_count[p] += 1
+            cx_duration_count[q] += 1
+    mean_cx_duration = np.where(cx_duration_count > 0, cx_duration_sum / cx_duration_count, 1.0)
+
+    t1_arr = np.array([qprops[str(i)]["t1"] for i in range(n)], dtype=np.float32)
+    t2_arr = np.array([qprops[str(i)]["t2"] for i in range(n)], dtype=np.float32)
+    t1_cx_ratio = np.where(mean_cx_duration > 0, t1_arr / mean_cx_duration, 0.0)
+    t2_cx_ratio = np.where(mean_cx_duration > 0, t2_arr / mean_cx_duration, 0.0)
+
+    raw = np.zeros((n, 7), dtype=np.float32)
     for i in range(n):
         qp = qprops[str(i)]
         raw[i] = [
             qp["t1"], qp["t2"],
-            1.0 - qp["readout_error"], 1.0 - qp["sq_gate_error"],
-            qp["frequency"],
+            qp["readout_error"], qp["sq_gate_error"], degree[i],
+            t1_cx_ratio[i], t2_cx_ratio[i],
         ]
 
     # Z-score normalize within backend

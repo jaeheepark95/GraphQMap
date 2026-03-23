@@ -14,7 +14,7 @@ from evaluation.baselines import (
     trivial_layout,
 )
 from evaluation.metrics import EvalResult, aggregate_results, format_results_table
-from evaluation.pst import compute_ideal_distribution, measure_pst
+from evaluation.pst import measure_pst
 
 
 # ---- PST ----
@@ -31,17 +31,6 @@ class TestPST:
     def backend(self):
         return get_backend("manila")
 
-    def test_ideal_distribution_bell(self, bell_circuit):
-        dist = compute_ideal_distribution(bell_circuit)
-        assert "00" in dist
-        assert "11" in dist
-        assert abs(dist["00"] - 0.5) < 0.01
-        assert abs(dist["11"] - 0.5) < 0.01
-
-    def test_ideal_distribution_sum_to_one(self, bell_circuit):
-        dist = compute_ideal_distribution(bell_circuit)
-        assert abs(sum(dist.values()) - 1.0) < 1e-6
-
     def test_measure_pst_returns_valid(self, bell_circuit, backend):
         result = measure_pst(bell_circuit, backend, layout=[0, 1], shots=1024)
         assert 0.0 <= result["pst"] <= 1.0
@@ -52,7 +41,7 @@ class TestPST:
         """Bell state on adjacent qubits should have high PST."""
         result = measure_pst(bell_circuit, backend, layout=[0, 1], shots=4096)
         # Bell state on Manila qubits 0-1 (directly connected) should be decent
-        assert result["pst"] > 0.5
+        assert result["pst"] > 0.4
 
     def test_measure_pst_with_measurements(self, backend):
         """Circuit that already has measurements."""

@@ -6,10 +6,9 @@ Pipeline:
   → noise simulation on FakeBackendV2
   → PST computation
 
-Two PST metrics:
+PST metric:
   - pst: P(correct output) — probability of the ideal most-probable bitstring
     appearing in noisy execution (standard definition, used in QUEKO/multi-prog papers)
-  - hellinger: Hellinger fidelity between ideal and noisy distributions (secondary)
 
 Simulation strategy (following MQM pattern):
   - tensor_network + GPU (cuQuantum) as default — handles any circuit size
@@ -22,7 +21,6 @@ import logging
 from typing import Any
 
 from qiskit import QuantumCircuit, transpile
-from qiskit.quantum_info import hellinger_fidelity
 from qiskit_aer import AerSimulator
 
 logger = logging.getLogger(__name__)
@@ -101,25 +99,6 @@ def create_noisy_simulator(backend: Any) -> AerSimulator:
     sim_config = _detect_sim_config()
     return AerSimulator.from_backend(backend, **sim_config)
 
-
-def compute_ideal_distribution(circuit: QuantumCircuit) -> dict[str, float]:
-    """Compute ideal output distribution for a circuit using statevector.
-
-    Args:
-        circuit: Quantum circuit (measurements optional).
-
-    Returns:
-        Dict mapping bitstring → probability.
-    """
-    from qiskit.quantum_info import Statevector
-
-    if circuit.num_clbits > 0:
-        qc = circuit.remove_final_measurements(inplace=False)
-    else:
-        qc = circuit
-    sv = Statevector.from_instruction(qc)
-    probs = sv.probabilities_dict()
-    return {k: v for k, v in probs.items() if v > 1e-10}
 
 
 def _count_2q_gates(circuit: QuantumCircuit, backend: Any = None) -> int:
@@ -201,8 +180,7 @@ def measure_pst(
 
     Returns:
         Dict with:
-        - pst: P(correct output) (float in [0, 1]) — primary metric
-        - hellinger: Hellinger fidelity (float in [0, 1]) — secondary metric
+        - pst: P(correct output) (float in [0, 1])
         - swap_count: estimated SWAP count
         - depth: compiled circuit depth
         - compiled_2q: total native 2Q gates in compiled circuit
@@ -238,25 +216,17 @@ def measure_pst(
 
     # Ideal simulation
     ideal_counts = ideal_sim.run(compiled, shots=shots).result().get_counts()
-    ideal_total = sum(ideal_counts.values())
-    ideal_dist = {k: v / ideal_total for k, v in ideal_counts.items() if v > 0}
 
     # Noisy simulation
     noisy_counts = noisy_sim.run(compiled, shots=shots).result().get_counts()
-    noisy_total = sum(noisy_counts.values())
-    noisy_dist = {k: v / noisy_total for k, v in noisy_counts.items()}
 
-    # Primary metric: PST = P(correct output)
+    # PST = P(correct output)
     pst = compute_pst(noisy_counts, ideal_counts)
     if isinstance(pst, list):
         pst = sum(pst) / len(pst)
 
-    # Secondary metric: Hellinger fidelity
-    hellinger = hellinger_fidelity(ideal_dist, noisy_dist)
-
     return {
         "pst": pst,
-        "hellinger": hellinger,
         "swap_count": swap_count,
         "depth": depth,
         "compiled_2q": compiled_2q,

@@ -3,7 +3,7 @@
 ## Project Overview
 **GraphQMap** — Hardware-agnostic quantum qubit mapping ML model.
 A single GNN-based model that outputs initial layouts for quantum circuit compilation on NISQ hardware.
-Currently focused on single-circuit mapping; multi-programming (2, 4 circuits) deferred to future work.
+Supports arbitrary multi-programming (any number of co-located circuits, total logical qubits ≤ physical qubits).
 
 ## Tech Stack
 - Python 3.10+, PyTorch, PyTorch Geometric (PyG)
@@ -184,14 +184,14 @@ Plots are saved to `<first_run_dir>/plots/` (or `--save-dir`).
 - Dummy padding for rectangular l×h → h×h before Sinkhorn
 - All hyperparameters configurable via YAML
 - Batching groups samples by (backend, num_logical) for uniform tensor shapes
-- PST measurement: P(correct output) = primary metric, Hellinger fidelity = secondary
+- PST measurement: P(correct output) = primary metric
 - PST simulation: tensor_network + GPU (cuQuantum) as default; simulators created once per backend, reused for all circuits
 - PST simulation: on tensor_network failure (large/deep circuits on 100Q+ backends), simulators are recreated to recover GPU state
 - Evaluation order: baselines run before model to prevent GPU state corruption from model-generated deep circuits
 - PST measurement: optimization_level configurable (default 3), 8192 shots
 - Transpilation: custom PassManager builder supporting layout×routing combinations (sabre, nassc, dense, noise_adaptive, trivial, qap)
 - Benchmark circuits: 8 standard circuits (toffoli_3, fredkin_3, 3_17_13, 4mod5-v1_22, mod5mils_65, alu-v0_27, decod24-v2_43, 4gt13_92)
-- Currently single-circuit only; multi-programming deferred
+- Multi-programming: model handles arbitrary circuit count; training scenarios configured via YAML (no fixed limit on circuit count)
 
 ## Dependencies
 - torch >= 2.0

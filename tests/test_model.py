@@ -18,14 +18,14 @@ class TestGNNEncoder:
     @pytest.fixture
     def encoder(self):
         return GNNEncoder(
-            node_input_dim=6, edge_input_dim=2, embedding_dim=64,
+            node_input_dim=7, edge_input_dim=1, embedding_dim=64,
             num_layers=3, num_heads=4, dropout=0.0,
         )
 
     def test_output_shape(self, encoder):
-        x = torch.randn(5, 6)
+        x = torch.randn(5, 7)
         edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]])
-        edge_attr = torch.randn(4, 2)
+        edge_attr = torch.randn(4, 1)
         out = encoder(x, edge_index, edge_attr)
         assert out.shape == (5, 64)
 
@@ -39,23 +39,23 @@ class TestGNNEncoder:
         assert out.shape == (3, 32)
 
     def test_no_edges(self):
-        enc = GNNEncoder(node_input_dim=6, edge_input_dim=2, embedding_dim=64,
+        enc = GNNEncoder(node_input_dim=7, edge_input_dim=1, embedding_dim=64,
                          num_layers=3, num_heads=4, dropout=0.0)
-        x = torch.randn(3, 6)
+        x = torch.randn(3, 7)
         edge_index = torch.zeros((2, 0), dtype=torch.long)
-        edge_attr = torch.zeros((0, 2))
+        edge_attr = torch.zeros((0, 1))
         out = enc(x, edge_index, edge_attr)
         assert out.shape == (3, 64)
 
     def test_gradient_flow(self, encoder):
-        x = torch.randn(5, 6, requires_grad=True)
+        x = torch.randn(5, 7, requires_grad=True)
         edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]])
-        edge_attr = torch.randn(4, 2)
+        edge_attr = torch.randn(4, 1)
         out = encoder(x, edge_index, edge_attr)
         loss = out.sum()
         loss.backward()
         assert x.grad is not None
-        assert x.grad.shape == (5, 6)
+        assert x.grad.shape == (5, 7)
 
 
 # ---- Cross-Attention ----
@@ -185,8 +185,8 @@ class TestGraphQMap:
     @pytest.fixture
     def model(self):
         return GraphQMap(
-            circuit_node_dim=8, circuit_edge_dim=3,
-            hardware_node_dim=6, hardware_edge_dim=2,
+            circuit_node_dim=4, circuit_edge_dim=3,
+            hardware_node_dim=7, hardware_edge_dim=1,
             embedding_dim=32, gnn_layers=2, gnn_heads=4,
             gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
             cross_attn_ffn_dim=64, cross_attn_dropout=0.0,
@@ -197,7 +197,7 @@ class TestGraphQMap:
         """Create dummy batched PyG data."""
         circuit_graphs = []
         for _ in range(batch_size):
-            x = torch.randn(num_logical, 8)
+            x = torch.randn(num_logical, 4)
             # Simple chain topology
             src = list(range(num_logical - 1))
             dst = list(range(1, num_logical))
@@ -207,11 +207,11 @@ class TestGraphQMap:
 
         hw_graphs = []
         for _ in range(batch_size):
-            x = torch.randn(num_physical, 6)
+            x = torch.randn(num_physical, 7)
             src = list(range(num_physical - 1))
             dst = list(range(1, num_physical))
             edge_index = torch.tensor([src + dst, dst + src], dtype=torch.long)
-            edge_attr = torch.randn(len(src) * 2, 2)
+            edge_attr = torch.randn(len(src) * 2, 1)
             hw_graphs.append(Data(x=x, edge_index=edge_index, edge_attr=edge_attr))
 
         circuit_batch = Batch.from_data_list(circuit_graphs)

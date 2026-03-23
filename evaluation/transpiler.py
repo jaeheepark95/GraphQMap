@@ -197,7 +197,6 @@ def build_transpiler(
             basis_gates,
             approximation_degree=1.0,
             coupling_map=coupling_map,
-            backend_props=backend.properties(),
         ),
         passes.Optimize1qGatesDecomposition(basis_gates),
         passes.CommutativeCancellation(),
@@ -210,7 +209,6 @@ def build_transpiler(
             basis_gates,
             approximation_degree=1.0,
             coupling_map=coupling_map,
-            backend_props=backend.properties(),
         ),
         passes.Optimize1qGatesDecomposition(basis_gates),
     ]
@@ -227,25 +225,8 @@ def build_transpiler(
         if hasattr(target, "_instruction_durations")
         else None
     )
-    granularity = (
-        target.timing_constraints().granularity
-        if hasattr(target, "timing_constraints")
-        else 1
-    )
-    min_length = (
-        target.timing_constraints().min_length
-        if hasattr(target, "timing_constraints")
-        else 1
-    )
-    acquire_alignment = (
-        target.timing_constraints().acquire_alignment
-        if hasattr(target, "timing_constraints")
-        else 1
-    )
     _sched = [
         passes.TimeUnitConversion(instruction_durations),
-        passes.ValidatePulseGates(granularity=granularity, min_length=min_length),
-        passes.AlignMeasures(alignment=acquire_alignment),
     ]
 
     # --- Build PassManager ---
@@ -270,10 +251,7 @@ def build_transpiler(
         )
     elif layout_method == "noise_adaptive":
         pm.append(
-            NoiseAdaptiveLayout(
-                backend.properties(),
-                coupling_map,
-            )
+            NoiseAdaptiveLayout(backend.target)
         )
     elif layout_method == "qap":
         pm.append(QAPLayout(backend))
@@ -281,7 +259,6 @@ def build_transpiler(
         pm.append(
             passes.DenseLayout(
                 coupling_map,
-                backend_prop=backend.properties(),
                 target=target,
             )
         )
@@ -431,7 +408,7 @@ def transpile_with_timing(
         )
     elif layout_method == "noise_adaptive":
         layout_pm.append(
-            NoiseAdaptiveLayout(backend.properties(), coupling_map)
+            NoiseAdaptiveLayout(backend.target)
         )
     elif layout_method == "qap":
         layout_pm.append(QAPLayout(backend))
@@ -439,7 +416,6 @@ def transpile_with_timing(
         layout_pm.append(
             passes.DenseLayout(
                 coupling_map,
-                backend_prop=backend.properties(),
                 target=target,
             )
         )
@@ -476,7 +452,6 @@ def transpile_with_timing(
                 basis_gates,
                 approximation_degree=1.0,
                 coupling_map=coupling_map,
-                backend_props=backend.properties(),
             ),
             passes.Optimize1qGatesDecomposition(basis_gates),
         ]
@@ -540,7 +515,6 @@ def transpile_with_timing(
             basis_gates,
             approximation_degree=1.0,
             coupling_map=coupling_map,
-            backend_props=backend.properties(),
         ),
         passes.Optimize1qGatesDecomposition(basis_gates),
         passes.CommutativeCancellation(),
@@ -555,28 +529,9 @@ def transpile_with_timing(
         if hasattr(target, "_instruction_durations")
         else None
     )
-    granularity = (
-        target.timing_constraints().granularity
-        if hasattr(target, "timing_constraints")
-        else 1
-    )
-    min_length = (
-        target.timing_constraints().min_length
-        if hasattr(target, "timing_constraints")
-        else 1
-    )
-    acquire_alignment = (
-        target.timing_constraints().acquire_alignment
-        if hasattr(target, "timing_constraints")
-        else 1
-    )
     scheduling_pm.append(
         [
             passes.TimeUnitConversion(instruction_durations),
-            passes.ValidatePulseGates(
-                granularity=granularity, min_length=min_length
-            ),
-            passes.AlignMeasures(alignment=acquire_alignment),
         ]
     )
 

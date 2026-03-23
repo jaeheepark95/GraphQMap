@@ -56,35 +56,37 @@ class TestHardwareGraph:
         props = extract_qubit_properties(manila_backend)
         assert props["t1"].shape == (5,)
         assert props["t2"].shape == (5,)
-        assert props["frequency"].shape == (5,)
         assert props["readout_error"].shape == (5,)
         assert props["single_qubit_error"].shape == (5,)
         assert props["degree"].shape == (5,)
-        # All should be positive
+        assert props["t1_cx_ratio"].shape == (5,)
+        assert props["t2_cx_ratio"].shape == (5,)
+        # T1, T2 should be positive; ratios non-negative
         assert (props["t1"] > 0).all()
         assert (props["t2"] > 0).all()
+        assert (props["t1_cx_ratio"] >= 0).all()
+        assert (props["t2_cx_ratio"] >= 0).all()
 
     def test_extract_edge_properties(self, manila_backend):
         edge_list, edge_feats = extract_edge_properties(manila_backend)
         # Manila has 4 undirected edges: 0-1, 1-2, 2-3, 3-4
         assert len(edge_list) == 4
-        assert edge_feats.shape == (4, 2)
-        # cx_error and cx_duration should be positive
+        assert edge_feats.shape == (4, 1)  # cx_error only
         assert (edge_feats > 0).all()
 
     def test_build_hardware_graph_shape(self, manila_backend):
         data = build_hardware_graph(manila_backend)
-        assert data.x.shape == (5, 6)  # 5 qubits, 6 features
+        assert data.x.shape == (5, 7)  # 5 qubits, 7 features
         assert data.edge_index.shape[0] == 2
         assert data.edge_index.shape[1] == 8  # 4 undirected edges * 2 directions
         assert data.edge_attr.shape[0] == 8
-        assert data.edge_attr.shape[1] == 2  # cx_error, cx_duration
+        assert data.edge_attr.shape[1] == 1  # cx_error only
         assert data.num_qubits == 5
 
     def test_build_hardware_graph_normalized(self, manila_backend):
         data = build_hardware_graph(manila_backend)
         # Z-score normalized: mean ~0
-        assert torch.allclose(data.x.mean(dim=0), torch.zeros(6), atol=0.1)
+        assert torch.allclose(data.x.mean(dim=0), torch.zeros(7), atol=0.1)
 
     def test_precompute_error_distance(self, manila_backend):
         d_error = precompute_error_distance(manila_backend)
@@ -138,26 +140,13 @@ class TestCircuitGraph:
         assert edge_dict[(0, 1)][0] == 2  # interaction_count
         assert edge_dict[(1, 2)][0] == 1
 
-    def test_extract_features_global_summary(self, circuit):
-        feats = extract_circuit_features(circuit)
-        summary = feats["global_summary"]
-        assert summary.shape == (4,)
-        assert summary[0] == 3  # total_qubits
-        assert summary[1] == 3  # total_2q_gates (2 cx(0,1) + 1 cx(1,2))
-        assert summary[2] > 0  # total_depth
-
     def test_build_circuit_graph_shape(self, circuit):
         data = build_circuit_graph(circuit)
-        assert data.x.shape == (3, 4)  # 3 qubits, 4 features (no global summary)
+        assert data.x.shape == (3, 4)  # 3 qubits, 4 features
         assert data.edge_index.shape[0] == 2
         assert data.edge_index.shape[1] == 4  # 2 edges * 2 directions
         assert data.edge_attr.shape == (4, 3)
         assert data.num_qubits == 3
-
-    def test_build_circuit_graph_with_summary(self, circuit):
-        summary = torch.tensor([3.0, 3.0, 4.0, 0.5])
-        data = build_circuit_graph(circuit, global_summary=summary)
-        assert data.x.shape == (3, 8)  # 4 local + 4 global
 
     def test_build_circuit_graph_normalized(self, circuit):
         data = build_circuit_graph(circuit)
@@ -186,7 +175,7 @@ class TestMultiProgramming:
     def test_validate_too_many_qubits(self):
         c1 = QuantumCircuit(3)
         c2 = QuantumCircuit(3)
-        # total=6, need strictly less than 6
+        # total=6/6=100% > 75% occupancy limit
         assert validate_multi_programming([c1, c2], num_physical_qubits=6) is False
 
     def test_validate_occupancy_exceeded(self):
@@ -205,7 +194,7 @@ class TestMultiProgramming:
         merged = merge_circuits([c1, c2])
         assert merged.num_qubits == 5  # 2 + 3
         assert merged.x.shape[0] == 5
-        assert merged.x.shape[1] == 8  # 4 local + 4 global summary
+        assert merged.x.shape[1] == 4  # same 4-dim as single-circuit
         assert merged.circuit_sizes == [2, 3]
         assert merged.circuit_ids.shape == (5,)
         assert (merged.circuit_ids[:2] == 0).all()
@@ -226,17 +215,14 @@ class TestMultiProgramming:
         for s, d in zip(src.tolist(), dst.tolist()):
             assert merged.circuit_ids[s] == merged.circuit_ids[d]
 
-    def test_merge_with_summary_stats(self):
-        c1 = QuantumCircuit(2)
+    def test_merge_single_circuit(self):
+        """Merging a single circuit should produce the same result as single-circuit graph."""
+        c1 = QuantumCircuit(3)
         c1.cx(0, 1)
-        c2 = QuantumCircuit(3)
-        c2.cx(0, 1)
+        c1.cx(1, 2)
 
-        stats = {
-            "total_qubits": (5.0, 2.0),
-            "total_2q_gates": (3.0, 1.0),
-            "total_depth": (2.0, 1.0),
-            "gate_density": (0.5, 0.2),
-        }
-        merged = merge_circuits([c1, c2], summary_stats=stats)
-        assert merged.x.shape == (5, 8)
+        merged = merge_circuits([c1])
+        assert merged.num_qubits == 3
+        assert merged.x.shape == (3, 4)
+        assert merged.circuit_sizes == [3]
+        assert (merged.circuit_ids == 0).all()

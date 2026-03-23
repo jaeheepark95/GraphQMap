@@ -147,10 +147,24 @@ def plot_stage2(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.
     return figures
 
 
-def plot_eval(csv_path: Path, save_dir: Path | None = None) -> list[plt.Figure]:
-    """Plot evaluation results: PST bar chart + per-circuit heatmap."""
+def plot_eval(
+    csv_path: Path,
+    save_dir: Path | None = None,
+    backend_label: str | None = None,
+) -> list[plt.Figure]:
+    """Plot evaluation results: PST bar chart + per-circuit heatmap.
+
+    Args:
+        csv_path: Path to evaluation CSV.
+        save_dir: Directory to save PNG files.
+        backend_label: Backend name for file naming (e.g. 'toronto').
+            If None, uses the backend column from CSV.
+    """
     df = pd.read_csv(csv_path)
     figures = []
+
+    title_backend = backend_label or df["backend"].iloc[0]
+    file_suffix = f"_{backend_label}" if backend_label else ""
 
     # --- PST Bar Chart (mean per method) ---
     agg = df.groupby("method")["pst"].agg(["mean", "std"]).reset_index()
@@ -170,7 +184,7 @@ def plot_eval(csv_path: Path, save_dir: Path | None = None) -> list[plt.Figure]:
     bars = ax.bar(agg["method"], agg["mean"], yerr=agg["std"], capsize=4,
                   color=colors, edgecolor="black", linewidth=0.5)
     ax.set_ylabel("PST (mean)")
-    ax.set_title(f"PST Comparison — {df['backend'].iloc[0]}")
+    ax.set_title(f"PST Comparison — {title_backend}")
     ax.grid(True, axis="y", alpha=0.3)
 
     for bar, val in zip(bars, agg["mean"]):
@@ -181,7 +195,7 @@ def plot_eval(csv_path: Path, save_dir: Path | None = None) -> list[plt.Figure]:
     figures.append(fig)
 
     if save_dir:
-        fig.savefig(save_dir / "pst_comparison.png", dpi=150, bbox_inches="tight")
+        fig.savefig(save_dir / f"pst_comparison{file_suffix}.png", dpi=150, bbox_inches="tight")
 
     # --- Per-circuit Heatmap ---
     circuits = df["circuit"].unique()
@@ -206,12 +220,12 @@ def plot_eval(csv_path: Path, save_dir: Path | None = None) -> list[plt.Figure]:
                         color="white" if val < 0.4 else "black")
 
         plt.colorbar(im, ax=ax, label="PST")
-        ax.set_title(f"Per-Circuit PST — {df['backend'].iloc[0]}")
+        ax.set_title(f"Per-Circuit PST — {title_backend}")
         fig.tight_layout()
         figures.append(fig)
 
         if save_dir:
-            fig.savefig(save_dir / "pst_heatmap.png", dpi=150, bbox_inches="tight")
+            fig.savefig(save_dir / f"pst_heatmap{file_suffix}.png", dpi=150, bbox_inches="tight")
 
     return figures
 

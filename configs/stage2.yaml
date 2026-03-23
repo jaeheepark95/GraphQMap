@@ -17,8 +17,8 @@ model:
     residual_layers: [2, 3]
 
   hardware_gnn:
-    node_input_dim: 6
-    edge_input_dim: 2
+    node_input_dim: 7        # T1, T2, readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
+    edge_input_dim: 1        # cx_error
     num_layers: 3
     num_heads: 4
     activation: elu
@@ -84,10 +84,8 @@ data:
     val: data/circuits/splits/val.json
 
   multi_programming:
-    ratios:
-      single: 0.5
-      dual: 0.3
-      quad: 0.2
+    scenarios: [1, 2, 4]           # number of circuits per group (configurable)
+    proportions: [0.5, 0.3, 0.2]   # sampling ratio per scenario
     occupancy_min: 0.3
     occupancy_max: 0.75
 

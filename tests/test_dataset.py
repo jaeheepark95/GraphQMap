@@ -140,14 +140,14 @@ def _make_sample(backend_name: str, num_logical: int, num_physical: int,
     # Build minimal PyG data
     from torch_geometric.data import Data
     circuit_data = Data(
-        x=torch.randn(num_logical, 8),
+        x=torch.randn(num_logical, 4),
         edge_index=torch.zeros((2, 0), dtype=torch.long),
         edge_attr=torch.zeros((0, 3)),
     )
     hardware_data = Data(
-        x=torch.randn(num_physical, 6),
+        x=torch.randn(num_physical, 7),
         edge_index=torch.zeros((2, 0), dtype=torch.long),
-        edge_attr=torch.zeros((0, 2)),
+        edge_attr=torch.zeros((0, 1)),
     )
 
     label = None
@@ -291,7 +291,7 @@ class TestMultiProgrammingSampler:
         )
         for group in groups:
             total_qubits = sum(circuits[i].num_qubits for i in group)
-            assert total_qubits < 16  # strict less than
+            assert total_qubits <= 16  # must not exceed physical qubits
             assert total_qubits <= int(16 * 0.75)  # occupancy max
 
     def test_small_backend(self, circuits):

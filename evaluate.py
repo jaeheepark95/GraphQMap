@@ -162,13 +162,20 @@ def evaluate_model(args, cfg) -> None:
             )
 
             for rep in range(args.reps):
-                pm = build_transpiler(
-                    backend,
-                    layout_method=layout,
-                    routing_method=routing,
-                    seed=args.seed + rep,
-                )
-                tc = pm.run(circuit)
+                try:
+                    pm = build_transpiler(
+                        backend,
+                        layout_method=layout,
+                        routing_method=routing,
+                        seed=args.seed + rep,
+                    )
+                    tc = pm.run(circuit)
+                except Exception as e:
+                    logger.warning("  Transpile failed (%s): %s", label, e)
+                    baseline_result.pst_values.append(float("nan"))
+                    baseline_result.depths.append(0)
+                    continue
+
                 avg_pst, depth, _ = _safe_simulate(
                     tc, ideal_sim, noisy_sim, args.shots,
                 )
@@ -208,13 +215,21 @@ def evaluate_model(args, cfg) -> None:
             for rep in range(args.reps):
                 model_result.inference_times.append(model_inference_time)
 
-                tc, metadata = transpile_with_timing(
-                    circuit, backend,
-                    initial_layout=model_layout,
-                    layout_method="given",
-                    routing_method=model_routing,
-                    seed=args.seed + rep,
-                )
+                try:
+                    tc, metadata = transpile_with_timing(
+                        circuit, backend,
+                        initial_layout=model_layout,
+                        layout_method="given",
+                        routing_method=model_routing,
+                        seed=args.seed + rep,
+                    )
+                except Exception as e:
+                    logger.warning("  Transpile failed (%s): %s", model_label, e)
+                    model_result.pst_values.append(float("nan"))
+                    model_result.depths.append(0)
+                    model_result.swap_counts.append(0)
+                    continue
+
                 avg_pst, depth, _ = _safe_simulate(
                     tc, ideal_sim, noisy_sim, args.shots,
                 )
@@ -253,7 +268,7 @@ def evaluate_model(args, cfg) -> None:
             f"Depth={agg['depth_mean']:.1f} | n={agg['num_circuits']}"
         )
 
-    # Save results CSV if --output specified
+    # Save results CSV + PNG if --output specified
     if getattr(args, "output", None):
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -270,6 +285,16 @@ def evaluate_model(args, cfg) -> None:
                 })
         pd.DataFrame(rows).to_csv(output_path, index=False)
         logger.info("Results saved to %s", output_path)
+
+        # Auto-generate PST plots as PNG
+        import matplotlib
+        matplotlib.use("Agg")
+        from scripts.visualize import plot_eval
+        plot_dir = output_path.parent / "plots"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        backend_name = args.backend
+        plot_eval(output_path, save_dir=plot_dir, backend_label=backend_name)
+        logger.info("Plots saved to %s", plot_dir)
 
 
 def main() -> None:

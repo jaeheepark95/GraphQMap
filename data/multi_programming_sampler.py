@@ -1,12 +1,13 @@
 """Multi-programming data sampler for GraphQMap.
 
 Generates training samples by combining multiple circuits for
-multi-programming scenarios (1, 2, or 4 circuits per sample).
+multi-programming scenarios. Supports arbitrary circuit counts
+per group, configured via scenarios/proportions.
 
 Combination rules:
-  - Total logical qubits < physical qubit count
+  - Total logical qubits <= physical qubit count
   - Occupancy range: 30-75%
-  - Training ratio: 50% single / 30% dual / 20% quad
+  - Scenarios and proportions configured via YAML
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from qiskit import QuantumCircuit
 def sample_multi_programming_groups(
     circuits: list[QuantumCircuit],
     num_physical: int,
-    ratios: dict[str, float] | None = None,
+    scenarios: list[int] | None = None,
+    proportions: list[float] | None = None,
     occupancy_min: float = 0.30,
     occupancy_max: float = 0.75,
     num_samples: int | None = None,
@@ -30,8 +32,10 @@ def sample_multi_programming_groups(
     Args:
         circuits: Pool of available circuits.
         num_physical: Number of physical qubits on target backend.
-        ratios: Dict with keys 'single', 'dual', 'quad' and float ratios
-                summing to 1.0. Defaults to 50/30/20.
+        scenarios: List of group sizes (number of circuits per group).
+                   E.g. [1, 2, 4] or [1, 2, 3, 5]. Defaults to [1, 2, 4].
+        proportions: Sampling proportion for each scenario, must sum to 1.0.
+                     Must have the same length as scenarios. Defaults to [0.5, 0.3, 0.2].
         occupancy_min: Minimum occupancy ratio (total_logical / num_physical).
         occupancy_max: Maximum occupancy ratio.
         num_samples: Total number of groups to generate.
@@ -41,8 +45,16 @@ def sample_multi_programming_groups(
     Returns:
         List of groups, where each group is a list of circuit indices.
     """
-    if ratios is None:
-        ratios = {"single": 0.5, "dual": 0.3, "quad": 0.2}
+    if scenarios is None:
+        scenarios = [1, 2, 4]
+    if proportions is None:
+        proportions = [0.5, 0.3, 0.2]
+
+    if len(scenarios) != len(proportions):
+        raise ValueError(
+            f"scenarios ({len(scenarios)}) and proportions ({len(proportions)}) "
+            f"must have the same length"
+        )
 
     if num_samples is None:
         num_samples = len(circuits)
@@ -54,27 +66,24 @@ def sample_multi_programming_groups(
     max_logical = int(num_physical * occupancy_max)
     min_logical = max(1, int(num_physical * occupancy_min))
 
-    # Determine how many of each type
-    n_single = int(num_samples * ratios.get("single", 0.5))
-    n_dual = int(num_samples * ratios.get("dual", 0.3))
-    n_quad = num_samples - n_single - n_dual
+    # Determine how many groups for each scenario
+    counts = []
+    remaining = num_samples
+    for i, prop in enumerate(proportions):
+        if i == len(proportions) - 1:
+            counts.append(remaining)
+        else:
+            n = int(num_samples * prop)
+            counts.append(n)
+            remaining -= n
 
     groups: list[list[int]] = []
 
-    # Single circuit groups
-    groups.extend(_sample_groups(
-        qubit_counts, 1, n_single, min_logical, max_logical, num_physical, rng,
-    ))
-
-    # Dual circuit groups
-    groups.extend(_sample_groups(
-        qubit_counts, 2, n_dual, min_logical, max_logical, num_physical, rng,
-    ))
-
-    # Quad circuit groups
-    groups.extend(_sample_groups(
-        qubit_counts, 4, n_quad, min_logical, max_logical, num_physical, rng,
-    ))
+    for group_size, num_groups in zip(scenarios, counts):
+        groups.extend(_sample_groups(
+            qubit_counts, group_size, num_groups,
+            min_logical, max_logical, num_physical, rng,
+        ))
 
     rng.shuffle(groups)
     return groups
@@ -94,11 +103,11 @@ def _sample_groups(
 
     Args:
         qubit_counts: Per-circuit qubit counts.
-        group_size: Number of circuits per group (1, 2, or 4).
+        group_size: Number of circuits per group.
         num_groups: Number of groups to generate.
         min_logical: Minimum total logical qubits.
         max_logical: Maximum total logical qubits.
-        num_physical: Number of physical qubits (total must be < this).
+        num_physical: Number of physical qubits (total must not exceed this).
         rng: Random number generator.
         max_attempts_per_group: Max random sampling attempts per group.
 
@@ -121,7 +130,7 @@ def _sample_groups(
             selected = rng.choices(eligible, k=group_size)
             total = sum(qubit_counts[i] for i in selected)
 
-            if total < num_physical and min_logical <= total <= max_logical:
+            if total <= num_physical and min_logical <= total <= max_logical:
                 groups.append(selected)
                 break
 

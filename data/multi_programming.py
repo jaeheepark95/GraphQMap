@@ -1,7 +1,8 @@
 """Multi-programming circuit graph merging for GraphQMap.
 
-Merges multiple circuit graphs into a single disconnected PyG graph
-with global summary features for multi-programming scenarios.
+Merges multiple circuit graphs into a single disconnected PyG graph.
+Uses the same 4-dim node features as single-circuit (no global summary).
+The GNN naturally distinguishes circuits through disconnected components.
 """
 
 from __future__ import annotations
@@ -10,31 +11,25 @@ import torch
 from qiskit import QuantumCircuit
 from torch_geometric.data import Batch, Data
 
-from data.circuit_graph import build_circuit_graph, extract_circuit_features
-from data.normalization import zscore_normalize
+from data.circuit_graph import build_circuit_graph
 
 
 def merge_circuits(
     circuits: list[QuantumCircuit],
-    summary_stats: dict[str, tuple[float, float]] | None = None,
     eps: float = 1e-8,
 ) -> Data:
     """Merge multiple circuits into a single disconnected PyG graph.
 
-    Each node receives its circuit's global summary features (z-score normalized
-    across the training dataset if summary_stats are provided).
+    Node features remain 4-dimensional (same as single-circuit), keeping
+    the model architecture unified for both single and multi-programming.
 
     Args:
         circuits: List of QuantumCircuit objects to merge.
-        summary_stats: Optional dict mapping summary feature names to (mean, std)
-                       tuples for dataset-level z-score normalization.
-                       Keys: 'total_qubits', 'total_2q_gates', 'total_depth', 'gate_density'.
-                       If None, raw summary values are used (no cross-dataset normalization).
         eps: Epsilon for normalization.
 
     Returns:
         Merged PyG Data object with:
-        - x: (total_qubits, 8) node features (4 local + 4 global summary)
+        - x: (total_qubits, 4) node features (same as single-circuit)
         - edge_index, edge_attr: merged edges with adjusted indices
         - num_qubits: total logical qubit count
         - circuit_sizes: list of per-circuit qubit counts
@@ -44,19 +39,7 @@ def merge_circuits(
     circuit_sizes: list[int] = []
 
     for circuit in circuits:
-        feats = extract_circuit_features(circuit)
-        global_summary = feats["global_summary"]  # (4,)
-
-        # Normalize global summary across dataset if stats provided
-        if summary_stats is not None:
-            names = ["total_qubits", "total_2q_gates", "total_depth", "gate_density"]
-            normalized = []
-            for i, name in enumerate(names):
-                mean, std = summary_stats[name]
-                normalized.append((global_summary[i] - mean) / (std + eps))
-            global_summary = torch.tensor(normalized, dtype=torch.float32)
-
-        graph = build_circuit_graph(circuit, eps=eps, global_summary=global_summary)
+        graph = build_circuit_graph(circuit, eps=eps)
         graph_list.append(graph)
         circuit_sizes.append(circuit.num_qubits)
 
@@ -98,6 +81,6 @@ def validate_multi_programming(
         True if the combination is valid.
     """
     total_logical = sum(c.num_qubits for c in circuits)
-    return total_logical < num_physical_qubits and (
+    return total_logical <= num_physical_qubits and (
         total_logical / num_physical_qubits <= occupancy_max
     )

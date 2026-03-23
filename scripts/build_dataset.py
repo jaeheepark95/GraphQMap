@@ -1,7 +1,7 @@
 """Build GraphQMap training dataset from labels and circuits.
 
-Constructs PyG graph objects, computes dataset statistics,
-and saves everything as a pickle file for fast loading.
+Constructs PyG graph objects and saves everything as a pickle file
+for fast loading.
 
 Usage:
     python scripts/build_dataset.py --labels data/labels/labels.json \
@@ -20,11 +20,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import numpy as np
-import torch
 from qiskit import QuantumCircuit
 
-from data.circuit_graph import build_circuit_graph, extract_circuit_features
+from data.circuit_graph import build_circuit_graph
 from data.dataset import MappingDataset, MappingSample
 from data.hardware_graph import build_hardware_graph, get_backend, precompute_error_distance
 from data.label_generation import layout_to_permutation_matrix
@@ -36,55 +34,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def compute_global_summary_stats(
-    circuit_dir: Path,
-    qasm_stems: list[str],
-) -> dict[str, tuple[float, float]]:
-    """Compute dataset-level mean/std for global summary features.
-
-    Args:
-        circuit_dir: Directory with .qasm files.
-        qasm_stems: List of circuit stems to include.
-
-    Returns:
-        Dict mapping feature name to (mean, std).
-    """
-    summaries = []
-
-    for stem in qasm_stems:
-        qasm_path = circuit_dir / f"{stem}.qasm"
-        if not qasm_path.exists():
-            continue
-        try:
-            circuit = QuantumCircuit.from_qasm_file(str(qasm_path))
-            feats = extract_circuit_features(circuit)
-            summaries.append(feats["global_summary"].numpy())
-        except Exception:
-            continue
-
-    if not summaries:
-        return {
-            "total_qubits": (0.0, 1.0),
-            "total_2q_gates": (0.0, 1.0),
-            "total_depth": (0.0, 1.0),
-            "gate_density": (0.0, 1.0),
-        }
-
-    arr = np.stack(summaries)  # (N, 4)
-    names = ["total_qubits", "total_2q_gates", "total_depth", "gate_density"]
-    stats = {}
-    for i, name in enumerate(names):
-        mean = float(arr[:, i].mean())
-        std = float(arr[:, i].std())
-        stats[name] = (mean, max(std, 1e-8))
-
-    return stats
-
-
 def build_dataset_from_labels(
     labels: list[dict],
     circuit_dir: Path,
-    summary_stats: dict[str, tuple[float, float]],
     include_labels: bool = True,
 ) -> MappingDataset:
     """Build MappingDataset from label entries.
@@ -92,7 +44,6 @@ def build_dataset_from_labels(
     Args:
         labels: List of label dicts from generate_labels.py.
         circuit_dir: Directory with .qasm files.
-        summary_stats: Global summary normalization stats.
         include_labels: Whether to include label matrices (Stage 1).
 
     Returns:
@@ -130,19 +81,8 @@ def build_dataset_from_labels(
         num_physical = backend.target.num_qubits
         num_logical = circuit.num_qubits
 
-        # Circuit graph with normalized global summary
-        feats = extract_circuit_features(circuit)
-        global_summary = feats["global_summary"]
-
-        # Normalize global summary
-        names = ["total_qubits", "total_2q_gates", "total_depth", "gate_density"]
-        normalized_summary = []
-        for j, name in enumerate(names):
-            mean, std = summary_stats[name]
-            normalized_summary.append((global_summary[j].item() - mean) / std)
-        norm_summary = torch.tensor(normalized_summary, dtype=torch.float32)
-
-        circuit_graph = build_circuit_graph(circuit, global_summary=norm_summary)
+        # Circuit graph (4-dim node features, no global summary)
+        circuit_graph = build_circuit_graph(circuit)
 
         # Label
         label_matrix = None
@@ -188,49 +128,22 @@ def main() -> None:
         labels = json.load(f)
     logger.info(f"Loaded {len(labels)} label entries")
 
-    # Compute global summary stats
-    logger.info("Computing global summary statistics...")
-    qasm_stems = list(set(entry["circuit"] for entry in labels))
-    summary_stats = compute_global_summary_stats(circuit_dir, qasm_stems)
-    for name, (mean, std) in summary_stats.items():
-        logger.info(f"  {name}: mean={mean:.4f}, std={std:.4f}")
-
     # Build dataset
     logger.info("Building dataset...")
     t0 = time.time()
     dataset = build_dataset_from_labels(
-        labels, circuit_dir, summary_stats,
+        labels, circuit_dir,
         include_labels=not args.no_labels,
     )
     elapsed = time.time() - t0
-    logger.info(f"Dataset built: {len(dataset)} samples in {elapsed:.1f}s")
-
-    # Per-backend summary
-    for backend in dataset.backend_names:
-        count = len(dataset.indices_for_backend(backend))
-        logger.info(f"  {backend}: {count} samples")
-
-    # Precompute error distances for all backends
-    logger.info("Precomputing error distance matrices...")
-    error_distances = {}
-    for backend_name in dataset.backend_names:
-        backend = get_backend(backend_name)
-        error_distances[backend_name] = precompute_error_distance(backend)
+    logger.info(f"Built {len(dataset)} samples in {elapsed:.1f}s")
 
     # Save
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    save_data = {
-        "dataset": dataset,
-        "summary_stats": summary_stats,
-        "error_distances": error_distances,
-    }
-
     with open(output_path, "wb") as f:
-        pickle.dump(save_data, f)
-
-    logger.info(f"Saved to {output_path} ({output_path.stat().st_size / 1e6:.1f} MB)")
+        pickle.dump(dataset, f)
+    logger.info(f"Saved dataset to {output_path}")
 
 
 if __name__ == "__main__":

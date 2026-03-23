@@ -58,10 +58,10 @@ class TestEndToEnd:
     @pytest.fixture
     def model(self):
         return GraphQMap(
-            circuit_node_dim=4,  # no global summary for simplicity
+            circuit_node_dim=4,
             circuit_edge_dim=3,
-            hardware_node_dim=6,
-            hardware_edge_dim=2,
+            hardware_node_dim=7,
+            hardware_edge_dim=1,
             embedding_dim=32,
             gnn_layers=2,
             gnn_heads=4,
@@ -245,14 +245,14 @@ class TestEndToEnd:
         merged = merge_circuits([c1, c2])
         hw_graph = build_hardware_graph(backend)
 
-        # Merged has 4 logical qubits (2+2), 8 features (4 local + 4 summary)
+        # Merged has 4 logical qubits (2+2), same 4-dim features as single-circuit
         assert merged.x.shape[0] == 4
-        assert merged.x.shape[1] == 8
+        assert merged.x.shape[1] == 4
 
-        # Need model with 8 input dim for circuit
+        # Same model works for both single and multi-programming
         model_mp = GraphQMap(
-            circuit_node_dim=8, circuit_edge_dim=3,
-            hardware_node_dim=6, hardware_edge_dim=2,
+            circuit_node_dim=4, circuit_edge_dim=3,
+            hardware_node_dim=7, hardware_edge_dim=1,
             embedding_dim=32, gnn_layers=2, gnn_heads=4,
             gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
             cross_attn_ffn_dim=64, cross_attn_dropout=0.0,
@@ -279,8 +279,8 @@ class TestEndToEnd:
         hw_graph = build_hardware_graph(backend)
 
         model = GraphQMap(
-            circuit_node_dim=8, circuit_edge_dim=3,
-            hardware_node_dim=6, hardware_edge_dim=2,
+            circuit_node_dim=4, circuit_edge_dim=3,
+            hardware_node_dim=7, hardware_edge_dim=1,
             embedding_dim=32, gnn_layers=2, gnn_heads=4,
             gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
             cross_attn_ffn_dim=64, cross_attn_dropout=0.0,
@@ -338,7 +338,7 @@ class TestEndToEnd:
 
         model = GraphQMap(
             circuit_node_dim=4, circuit_edge_dim=3,
-            hardware_node_dim=6, hardware_edge_dim=2,
+            hardware_node_dim=7, hardware_edge_dim=1,
             embedding_dim=32, gnn_layers=2, gnn_heads=4,
             gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
             cross_attn_ffn_dim=64, cross_attn_dropout=0.0,

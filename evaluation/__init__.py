@@ -21,7 +21,6 @@ from evaluation.metrics import (
     format_results_table,
 )
 from evaluation.pst import (
-    compute_ideal_distribution,
     compute_pst,
     create_ideal_simulator,
     create_noisy_simulator,
@@ -39,7 +38,6 @@ __all__ = [
     "EvalResult",
     "aggregate_results",
     "build_transpiler",
-    "compute_ideal_distribution",
     "compute_pst",
     "create_ideal_simulator",
     "create_noisy_simulator",

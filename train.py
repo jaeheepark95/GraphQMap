@@ -12,6 +12,8 @@ import logging
 
 import torch
 
+import numpy as np
+
 from configs.config_loader import parse_args_with_config
 from data.dataset import create_dataloader, load_split
 from models.graphqmap import GraphQMap
@@ -39,6 +41,8 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def _get_training_backends(cfg) -> list[str]:
@@ -51,6 +55,93 @@ def _get_training_backends(cfg) -> list[str]:
         else:
             backends.append(name)
     return backends
+
+
+def _build_val_pst_fn(cfg, device: torch.device):
+    """Build a PST validation function for Stage 2.
+
+    Uses a subset of benchmark circuits on the first test backend to
+    measure actual PST during training. Simulators are created once
+    and reused across validation calls.
+    """
+    from torch_geometric.data import Batch
+
+    from data.circuit_graph import build_circuit_graph
+    from data.hardware_graph import build_hardware_graph, get_backend
+    from evaluation.benchmark import BENCHMARK_CIRCUITS, load_benchmark_circuit
+    from evaluation.pst import create_ideal_simulator, create_noisy_simulator
+    from evaluation.transpiler import transpile_with_timing
+
+    # Use first test backend for validation
+    val_backend_name = cfg.backends.test[0]
+    if val_backend_name.startswith("Fake"):
+        val_backend_name = val_backend_name[4:].lower()
+    backend = get_backend(val_backend_name)
+    num_physical = backend.target.num_qubits
+    hw_graph = build_hardware_graph(backend)
+    tau = getattr(cfg.sinkhorn, "tau", 0.05)
+
+    ideal_sim = create_ideal_simulator(backend)
+    noisy_sim = create_noisy_simulator(backend)
+
+    # Preload benchmark circuits that fit this backend
+    val_circuits = []
+    for cname in BENCHMARK_CIRCUITS:
+        try:
+            circ = load_benchmark_circuit(cname, measure=True)
+            if 2 <= circ.num_qubits <= num_physical:
+                val_circuits.append((cname, circ))
+        except Exception:
+            continue
+
+    logger.info("PST validation: %d circuits on %s (%dQ)",
+                len(val_circuits), val_backend_name, num_physical)
+
+    def val_pst_fn(model, epoch: int) -> float:
+        model.eval()
+        pst_values = []
+
+        for cname, circuit in val_circuits:
+            num_logical = circuit.num_qubits
+            circuit_graph = build_circuit_graph(circuit)
+            circuit_batch = Batch.from_data_list([circuit_graph]).to(device)
+            hw_batch = Batch.from_data_list([hw_graph]).to(device)
+
+            with torch.no_grad():
+                layouts = model.predict(
+                    circuit_batch, hw_batch,
+                    batch_size=1,
+                    num_logical=num_logical,
+                    num_physical=num_physical,
+                    tau=tau,
+                )
+            layout = list(layouts[0].values())
+
+            try:
+                tc, _ = transpile_with_timing(
+                    circuit, backend,
+                    initial_layout=layout,
+                    layout_method="given",
+                    routing_method="sabre",
+                    seed=cfg.seed,
+                )
+                ideal_result = ideal_sim.run(tc, shots=1024).result()
+                noisy_result = noisy_sim.run(tc, shots=1024).result()
+                ideal_counts = ideal_result.get_counts()
+                noisy_counts = noisy_result.get_counts()
+
+                # PST = probability of correct output
+                max_state = max(ideal_counts, key=ideal_counts.get)
+                pst = noisy_counts.get(max_state, 0) / 1024
+                pst_values.append(pst)
+            except Exception as e:
+                logger.warning("  PST val skip %s: %s", cname, e)
+
+        model.train()
+        avg_pst = float(np.mean(pst_values)) if pst_values else 0.0
+        return avg_pst
+
+    return val_pst_fn
 
 
 def main() -> None:
@@ -137,7 +228,9 @@ def main() -> None:
             num_workers=num_workers, seed=cfg.seed,
         )
 
-        trainer.run(train_loader)
+        # PST validation function using benchmark circuits on a test backend
+        val_pst_fn = _build_val_pst_fn(cfg, device)
+        trainer.run(train_loader, val_pst_fn=val_pst_fn)
 
     else:
         raise ValueError(f"Unknown stage: {stage}")

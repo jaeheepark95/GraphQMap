@@ -21,7 +21,7 @@ from copy import copy, deepcopy
 import numpy as np
 
 from qiskit.circuit.library.standard_gates import SwapGate
-from qiskit.circuit.quantumregister import Qubit
+from qiskit.circuit import Qubit
 from qiskit.transpiler.basepasses import TransformationPass
 from qiskit.transpiler.exceptions import TranspilerError
 from qiskit.transpiler.layout import Layout
@@ -288,7 +288,7 @@ class NASSCSwap(TransformationPass):
         if (
                 not isinstance(new_node.op, Gate)
                 or len(qids) > 2
-                or new_node.op.condition
+                or getattr(new_node.op, "condition", None)
                 or new_node.op.is_parameterized()
             ):
             for qid in qids:
@@ -438,7 +438,7 @@ class NASSCSwap(TransformationPass):
         if (
                 not isinstance(new_node.op, Gate)
                 or len(qids) > 2
-                or new_node.op.condition
+                or getattr(new_node.op, "condition", None)
                 or new_node.op.is_parameterized()
             ):
             for qid in qids:
@@ -731,7 +731,7 @@ def _commute(node1, node2, cache):
         if nd.op._directive or nd.name in {"measure", "reset", "delay"}:
             return False
 
-    if node1.op.condition or node2.op.condition:
+    if getattr(node1.op, "condition", None) or getattr(node2.op, "condition", None):
         return False
 
     if node1.op.is_parameterized() or node2.op.is_parameterized():

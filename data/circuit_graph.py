@@ -49,7 +49,7 @@ def extract_circuit_features(circuit: QuantumCircuit) -> dict[str, Any]:
 
     Returns:
         Dict with keys: node_features, edge_list, edge_features,
-        num_qubits, global_summary.
+        num_qubits.
     """
     dag = circuit_to_dag(circuit)
     num_qubits = circuit.num_qubits
@@ -111,53 +111,35 @@ def extract_circuit_features(circuit: QuantumCircuit) -> dict[str, Any]:
         else torch.zeros((0, 3), dtype=torch.float32)
     )
 
-    # Global summary features for multi-programming
-    total_2q_gates = sum(two_qubit_gate_count) // 2  # each gate counted on 2 qubits
-    total_gates = sum(gate_count)
-    gate_density = total_gates / (num_qubits * total_depth) if num_qubits > 0 else 0.0
-    global_summary = torch.tensor(
-        [num_qubits, total_2q_gates, total_depth, gate_density],
-        dtype=torch.float32,
-    )
-
     return {
         "node_features": node_features,
         "edge_list": edge_list,
         "edge_features": edge_features,
         "num_qubits": num_qubits,
-        "global_summary": global_summary,
     }
 
 
 def build_circuit_graph(
     circuit: QuantumCircuit,
     eps: float = 1e-8,
-    global_summary: torch.Tensor | None = None,
 ) -> Data:
     """Build a PyG Data object for a quantum circuit.
 
-    Node features are z-score normalized within the circuit.
-    If global_summary is provided, it is concatenated to each node's features.
+    Node features (4-dim) are z-score normalized within the circuit.
+    Same dimensions for both single-circuit and multi-programming.
 
     Args:
         circuit: A QuantumCircuit instance.
         eps: Epsilon for z-score normalization.
-        global_summary: Optional (4,) tensor of circuit-level summary features
-                        (pre-normalized across dataset).
 
     Returns:
-        PyG Data with x, edge_index, edge_attr, num_qubits, raw_global_summary.
+        PyG Data with x, edge_index, edge_attr, num_qubits.
     """
     feats = extract_circuit_features(circuit)
     x = feats["node_features"]  # (num_qubits, 4)
 
     # Z-score normalize node features within circuit (across qubits, dim=0)
     x = zscore_normalize(x, dim=0, eps=eps)
-
-    # Append global summary features if provided
-    if global_summary is not None:
-        summary_expanded = global_summary.unsqueeze(0).expand(x.shape[0], -1)
-        x = torch.cat([x, summary_expanded], dim=-1)  # (num_qubits, 8)
 
     # Build edge_index: undirected -> both directions
     edge_list = feats["edge_list"]
@@ -177,5 +159,4 @@ def build_circuit_graph(
         edge_index=edge_index,
         edge_attr=edge_attr,
         num_qubits=feats["num_qubits"],
-        raw_global_summary=feats["global_summary"],
     )

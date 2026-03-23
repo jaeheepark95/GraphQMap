@@ -29,23 +29,23 @@
 **GraphQMap** is a single ML model that outputs initial qubit layouts (mappings from logical qubits to physical qubits) for quantum circuit compilation. The model must:
 
 - Work across **multiple quantum hardware backends** without hardware-specific fine-tuning (hardware-agnostic)
-- Handle **multi-programming** scenarios: compiling 1, 2, or 4 quantum circuits simultaneously onto a single backend
+- Handle **multi-programming** scenarios: compiling an arbitrary number of quantum circuits simultaneously onto a single backend (constrained only by total logical qubits ≤ physical qubits)
 - Achieve high **PST (Probability of Successful Trials)** on NISQ hardware
 - Run with **fast inference speed**
 
 ### What the Model Does NOT Do
 
-GraphQMap outputs **only the initial layout**. All subsequent compilation stages — routing, optimization, scheduling — are handled by `qiskit.transpile()` with `routing_method='sabre'`. The model does not perform routing or scheduling.
+GraphQMap outputs **only the initial layout**. All subsequent compilation stages — routing, optimization, scheduling — are handled by the transpiler (via custom PassManager). The model does not perform routing or scheduling; routing method is configurable at evaluation time (e.g., SABRE, NASSC). The unsupervised training (Stage 2) uses surrogate losses that evaluate layout quality **without routing**, making the model routing-agnostic by design.
 
 ### The Non-Differentiability Problem
 
 The pipeline has a non-differentiable barrier:
 
 ```
-GraphQMap → Initial Layout (A) → [qiskit transpile / SABRE — NON-DIFFERENTIABLE] → Compiled Circuit (B) → PST Evaluation
+GraphQMap → Initial Layout (A) → [Transpile (routing + optimization) — NON-DIFFERENTIABLE] → Transpiled Circuit (B) → PST Evaluation
 ```
 
-The model cannot receive gradients through SABRE routing. This constraint shapes the entire training strategy.
+The model cannot receive gradients through routing. This constraint shapes the entire training strategy — Stage 2's surrogate losses bypass routing entirely, evaluating layout quality directly from the circuit-hardware graph structure.
 
 ### Key Environment
 
@@ -81,9 +81,9 @@ Input: Quantum circuit (.qasm) + Target hardware (FakeBackendV2)
   ↓
 Output: Initial layout (logical qubit → physical qubit mapping)
   ↓
-[qiskit.transpile(initial_layout=output, routing_method='sabre')] → Compiled circuit
+[Transpile(initial_layout=output, routing_method=configurable)] → Transpiled circuit
   ↓
-[Noise simulation / hardware execution] → PST measurement
+[Noise simulation (AerSimulator)] → PST measurement
 ```
 
 ### Training Pipeline
@@ -95,10 +95,10 @@ Same as above except:
 ### Multi-Programming Pipeline
 
 For multiple circuits (e.g., C₁ with l₁ qubits, C₂ with l₂ qubits):
-1. Merge circuit graphs into a single **disconnected graph**
+1. Merge circuit graphs into a single **disconnected graph** (no edges between circuits) — node features stay at **4 dimensions** (same as single-circuit)
 2. Circuit GNN output becomes (l₁+l₂)×d
 3. Rest of pipeline is identical — Sinkhorn's doubly stochastic constraint automatically prevents mapping conflicts
-4. **No architectural modifications required**
+4. **No architectural modifications required** — single-circuit is simply a special case of multi-programming with one circuit
 
 ---
 
@@ -114,10 +114,16 @@ For multiple circuits (e.g., C₁ with l₁ qubits, C₂ with l₂ qubits):
 
 | Feature | Description |
 |---------|-------------|
-| `gate_count` | Total number of gates on this qubit |
-| `two_qubit_gate_count` | Number of 2-qubit gates involving this qubit |
+| `gate_count` | Total number of gates on this qubit (includes both 1Q and 2Q gates) |
+| `two_qubit_gate_count` | Number of 2-qubit gates involving this qubit (each gate counted on both qubits symmetrically) |
 | `degree` | Number of distinct qubits this qubit interacts with via 2-qubit gates |
 | `circuit_depth_participation` | Fraction of circuit depth in which this qubit is active (not idle) |
+
+**Node feature design notes:**
+- `gate_count` includes `two_qubit_gate_count` (i.e., `gate_count` ≥ `two_qubit_gate_count`), so the two features are correlated. The incremental information from `gate_count` is the single-qubit gate count, which partially overlaps with `circuit_depth_participation`. This redundancy is tolerated — the GNN learns which combinations are informative, and 4 features is a small enough dimension that overfitting is not a concern.
+- `degree` and `two_qubit_gate_count` are also correlated (more interactions → more unique neighbors), but degree specifically captures "hub" structure (fan-out) while `two_qubit_gate_count` captures total interaction load.
+- 2-qubit gate counts are applied **symmetrically** to both control and target qubits. For initial layout, the interaction frequency (not the control/target role) is what drives placement decisions — both qubits experience the same decoherence during the gate.
+- **Ablation candidate:** whether `gate_count` adds value beyond `two_qubit_gate_count` + `circuit_depth_participation`.
 
 **Edge Features (per qubit pair):**
 
@@ -127,22 +133,27 @@ For multiple circuits (e.g., C₁ with l₁ qubits, C₂ with l₂ qubits):
 | `earliest_interaction` | Normalized time (0~1) of the first 2-qubit gate between this pair |
 | `latest_interaction` | Normalized time (0~1) of the last 2-qubit gate between this pair |
 
-**Multi-Programming Global Summary Features:**
+**Edge feature design notes:**
+- `interaction_count` is the primary feature: pairs with high counts must be placed close on the hardware to minimize SWAP overhead.
+- `earliest_interaction` and `latest_interaction` together encode the temporal span of interactions (span = latest − earliest). Temporal features are less critical for *static* initial layout (which is fixed before execution) than for routing, but provide circuit structure context. The GNN can implicitly derive interaction density (`interaction_count / span`) from these three features.
+- **Ablation candidate:** whether temporal features (`earliest`, `latest`) contribute beyond `interaction_count` alone.
 
-When multiple circuits are merged, each node additionally receives a **circuit-level global summary vector** concatenated to its local features. All nodes from the same circuit share identical summary values.
+**Multi-Programming Note:**
 
-| Summary Feature | Description |
-|----------------|-------------|
-| `total_qubits` | Total logical qubit count of the circuit this node belongs to |
-| `total_2q_gates` | Total 2-qubit gate count of the circuit |
-| `total_depth` | Total circuit depth |
-| `gate_density` | Gate density of the circuit |
+Multi-programming uses the same 4 node features as single-circuit. Circuit graphs are merged into a disconnected graph without additional features. The GNN naturally distinguishes circuits through disconnected components, and Sinkhorn prevents mapping conflicts. No per-circuit global summary features are used — this keeps single-circuit and multi-programming unified under the same input dimensions.
 
-These summary values are z-score normalized across the **entire training dataset** (not per-circuit).
+**Circuit Node Feature Normalization:** Z-score normalized **within each circuit** (across qubits, dim=0). This captures *relative* qubit importance within the circuit — which qubit is busier than others — rather than absolute counts. This is intentional: hardware features are also normalized within-backend, so the model learns to match "relatively busy logical qubit → relatively good physical qubit" in a consistent scale.
 
-**Circuit Node Feature Normalization:** Z-score normalized **within each circuit** (so "gate_count" reflects relative busyness within that circuit, not absolute count).
+**Circuit Edge Feature Normalization:** Edge features (`interaction_count`, `earliest_interaction`, `latest_interaction`) are **not normalized**. They retain absolute values, providing the GNN with absolute-scale circuit complexity information that is lost from node features after within-circuit normalization.
 
-**Exception handling:** If standard deviation = 0 (all qubits identical), add ε = 1e-8 to denominator.
+**Trade-off:** Within-circuit normalization loses absolute circuit complexity. A 3-gate circuit and a 300-gate circuit look similar in node features if qubit busyness ratios are the same. However, `interaction_count` in edge features compensates partially — larger circuits naturally have higher interaction counts.
+
+**Exception handling:** If standard deviation = 0 (all qubits identical), add ε = 1e-8 to denominator — node features become all-zero, which is uninformative but acceptable (uniform circuits have no strong placement preference).
+
+**Known limitation — multi-programming cross-circuit scale mismatch:** In multi-programming, each circuit is normalized independently before merging. This means a qubit that is "relatively the busiest" in a simple 3-gate circuit and one that is "relatively the busiest" in a complex 300-gate circuit will have similar node feature values after normalization, even though the latter should receive higher-priority physical placement. The Score Head (cross-attention) cannot distinguish their true absolute importance. Edge features (`interaction_count`) partially compensate, but do not fully resolve the issue. Possible mitigations to consider if this proves impactful in practice:
+- **Group-level normalization**: normalize node features jointly across all circuits in a multi-programming group (instead of per-circuit). Consistent scale across circuits, but requires online normalization at batch creation time and breaks the unified single/multi pipeline.
+- **Log transform**: apply log(1+x) before z-score to compress scale differences while retaining some absolute information.
+- **Global summary re-introduction**: add circuit-level complexity features as a context signal (reverts the 4-dim unification decision).
 
 ### 3.2 Hardware Graph
 
@@ -156,23 +167,25 @@ These summary values are z-score normalized across the **entire training dataset
 |---------|-------------|-----------|
 | `T1` | Energy relaxation time | Higher = better |
 | `T2` | Phase relaxation time | Higher = better |
-| `frequency` | Qubit frequency | Not directly good/bad |
 | `readout_error` | Measurement error rate | Lower = better |
-| `single_qubit_error` | Average single-qubit gate error rate | Lower = better |
+| `single_qubit_error` | Average single-qubit gate error rate (sx, x) | Lower = better |
 | `degree` | Coupling map connectivity degree | Structural info |
+| `t1_cx_ratio` | T1 / mean_cx_duration — number of 2Q gates fitting within T1 | Higher = better |
+| `t2_cx_ratio` | T2 / mean_cx_duration — number of 2Q gates fitting within T2 | Higher = better |
+
+`t1_cx_ratio` and `t2_cx_ratio` are computed per qubit as T1 (or T2) divided by the mean cx_duration across all edges connected to that qubit. These composite features capture the **physically meaningful** quantity for layout: how many 2-qubit gate cycles the qubit can sustain before decoherence. Raw T1/T2 and cx_duration alone require the model to learn this division implicitly.
 
 **Edge Features (per physical connection):**
 
 | Feature | Description |
 |---------|-------------|
 | `cx_error` | 2-qubit gate error rate on this connection |
-| `cx_duration` | 2-qubit gate execution time on this connection |
 
-**Hardware Feature Normalization:** All noise-related features (T1, T2, frequency, readout_error, single_qubit_error, cx_error, cx_duration) are **z-score normalized within each backend independently**. This ensures the model learns relative quality rankings within a hardware, enabling cross-hardware generalization.
+`cx_duration` removed: it is correlated with `cx_error` (slower gates tend to have higher error) and its information is absorbed into node-level `t1_cx_ratio` / `t2_cx_ratio`.
 
-`degree` (structural) is also z-score normalized within each backend.
+**Hardware Feature Normalization:** All features are **z-score normalized within each backend independently**. This ensures the model learns relative quality rankings within a hardware, enabling cross-hardware generalization.
 
-**Exception handling:** Same ε = 1e-8 for zero standard deviation.
+**Exception handling:** Same ε = 1e-8 for zero standard deviation. If a qubit has no connected edges (isolated), mean_cx_duration defaults to 1.0 to avoid division by zero in ratio features.
 
 ---
 
@@ -249,10 +262,10 @@ h_out = GATv2Layer(h_in) + h_in  # Applied on layers 2, 3
 | Residual Connections | Layers 2, 3 | |
 
 **Input dimensions:**
-- Circuit GNN input: `num_circuit_node_features` (4 local + 4 global summary for multi-prog = 8 max)
-- Hardware GNN input: `num_hardware_node_features` (6: T1, T2, freq, readout_err, sq_err, degree)
+- Circuit GNN input: `num_circuit_node_features` (4: gate_count, 2q_count, degree, depth_participation — same for single and multi-programming)
+- Hardware GNN input: `num_hardware_node_features` (7: T1, T2, readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio)
 - Circuit edge features: 3 (interaction_count, earliest, latest)
-- Hardware edge features: 2 (cx_error, cx_duration)
+- Hardware edge features: 1 (cx_error)
 
 ### 4.3 Cross-Attention Interaction Module
 
@@ -472,7 +485,7 @@ L_2 = L_surr + α · L_node + λ · L_sep
 **Validation PST measurement procedure:**
 1. Take P matrix from model
 2. Apply Hungarian → discrete layout
-3. Run `qiskit.transpile(initial_layout=layout, routing_method='sabre')`
+3. Run `qiskit.transpile(initial_layout=layout, routing_method=configurable)`
 4. Run noise simulation on FakeBackendV2
 5. Compute PST
 
@@ -576,7 +589,7 @@ All raw circuit datasets undergo the following preprocessing before use in train
 
 QUEKO circuits are designed for 4 specific hardware topologies (Aspen-4, Tokyo, Rochester, Sycamore) that are not available as Qiskit FakeBackendV2. Since QUEKO only provides coupling maps without noise data, we generate **synthetic noise profiles** by sampling from distributions observed across real FakeBackendV2 hardware:
 
-- Noise values (T1, T2, frequency, readout_error, sq_gate_error, cx_error, cx_duration) are sampled from clipped normal distributions fitted to 11 real FakeBackends
+- Noise values (T1, T2, readout_error, sq_gate_error, cx_error, cx_duration) are sampled from clipped normal distributions fitted to 11 real FakeBackends. The JSON files also include `frequency`, but it is not used as a model feature.
 - Generated once with fixed seed (42) for reproducibility, stored in `data/circuits/backends/`
 - QUEKO's optimal layouts are topology-based (zero-SWAP), so synthetic noise does not affect label correctness
 - The model learns topology-aware mapping from QUEKO in Stage 1; noise-aware optimization follows in Stage 2
@@ -616,27 +629,34 @@ See `scripts/process_mlqd.py` for the extraction script.
 
 ## 7. Multi-Programming Training Data
 
+### Design Principle
+
+The model itself is designed to handle **any number of co-located circuits** without a fixed upper bound. The only hard constraint is that the total logical qubit count must not exceed the physical qubit count of the target backend. However, training on all possible circuit combinations is computationally infeasible, so multi-programming combinations are **pre-configured** for each training run.
+
 ### Circuit Combination Rules
 
-- **Hard constraint:** Total logical qubits of combined circuits **must be less than** physical qubit count of target backend
+- **Hard constraint:** Total logical qubits of combined circuits **must not exceed** physical qubit count of target backend
 - **Occupancy limit:** Maximum **75%** of physical qubits
 - **Occupancy range:** **30–75%** uniformly sampled for diversity
 - **Combination method:** Random pairing with diverse circuit sizes
 
-### Training Data Ratio
+### Training Data Configuration
 
-| Scenario | Proportion |
-|----------|------------|
-| Single circuit | 50% |
-| 2-circuit | 30% |
-| 4-circuit | 20% |
+Multi-programming scenarios and their proportions are specified in the training config (YAML). Example:
+
+```yaml
+multi_programming:
+  scenarios: [1, 2, 4]       # Number of circuits per scenario
+  proportions: [0.5, 0.3, 0.2]  # Sampling ratio per scenario
+```
+
+The scenarios and proportions are fully configurable — not restricted to specific values. Users can add higher circuit counts (e.g., 3, 5, 8) or adjust proportions as needed. The model architecture imposes no limit on the number of co-located circuits.
 
 ### Multi-Programming Circuit Graph Construction
 
-1. Construct individual circuit graphs for each circuit
+1. Construct individual circuit graphs for each circuit (4-dim node features, same as single-circuit)
 2. Merge into a single disconnected graph (no edges between circuits)
-3. Each node gets its circuit's global summary features concatenated
-4. Total node count = l₁ + l₂ + ... (sum of all circuits' logical qubits)
+3. Total node count = l₁ + l₂ + ... (sum of all circuits' logical qubits)
 
 ---
 
@@ -687,14 +707,13 @@ This split enables rigorous evaluation of **hardware-agnostic generalization**.
 
 ### Test Scenarios
 
-Following baseline research: **1-circuit, 2-circuit, 4-circuit** multi-programming scenarios.
+The model supports **arbitrary multi-programming** — any number of circuits can be compiled simultaneously, as long as the total logical qubit count does not exceed the physical qubit count of the target backend. Evaluation covers single-circuit and multi-circuit scenarios as configured.
 
 ### Metrics
 
 | Type | Metric | Definition |
 |------|--------|------------|
 | **Primary** | PST (Probability of Successful Trials) | P(correct output) — probability of the ideal most-probable bitstring appearing in noisy execution. Standard definition used in QUEKO and multi-programming papers. |
-| **Secondary** | Hellinger Fidelity | Full distribution similarity between ideal and noisy outputs (more nuanced but less standard). |
 | **Secondary** | SWAP count, circuit depth | Compilation quality metrics. |
 | **Speed** | Inference latency (model forward + Hungarian), end-to-end time (+ transpile) | |
 
@@ -819,11 +838,11 @@ from qiskit_ibm_runtime.fake_provider import FakeBrisbane  # example (non-V2, us
 backend = FakeToronto()
 
 # Per-qubit properties:
-# T1, T2, frequency, readout_error, single-qubit gate errors
+# T1, T2, readout_error, single-qubit gate errors, t1_cx_ratio, t2_cx_ratio
 # Extract from backend.properties() or backend.target
 
 # Per-edge properties:
-# 2q_error, 2q_duration from backend.target
+# 2q_error (cx_error) from backend.target
 # Native 2-qubit gate varies by backend: cx, ecr, or cz
 # Use _get_two_qubit_gate_name() to detect automatically
 ```
@@ -887,20 +906,14 @@ def forward(self, S, l, h, tau):
 ```python
 from torch_geometric.data import Batch
 
-def merge_circuits_for_multi_programming(circuits, circuit_summaries):
+def merge_circuits_for_multi_programming(circuits):
     """
     circuits: list of PyG Data objects (one per circuit)
-    circuit_summaries: list of summary vectors (one per circuit)
     Returns: single merged PyG Data object
     """
-    # Add global summary features to each circuit's nodes
-    for i, (circuit, summary) in enumerate(zip(circuits, circuit_summaries)):
-        summary_expanded = summary.unsqueeze(0).expand(circuit.x.shape[0], -1)
-        circuit.x = torch.cat([circuit.x, summary_expanded], dim=-1)
-    
-    # Merge into disconnected graph
+    # Merge into disconnected graph (no summary features added — same 4-dim as single-circuit)
     merged = Batch.from_data_list(circuits)
-    # merged.x: (l1+l2+...+lk, feature_dim)
+    # merged.x: (l1+l2+...+lk, 4)
     # merged.edge_index: all edges with adjusted node indices
     # merged.batch: tracks which node belongs to which original circuit
     return merged
@@ -954,7 +967,7 @@ def hungarian_decode(P, l):
 | | α (L_node) | 0.1 |
 | | λ (L_sep) | 0.1 |
 | **Batching** | Max total nodes | 512 (tune to GPU) |
-| **Multi-prog** | Status | Deferred to future work (single-circuit only) |
+| **Multi-prog** | Scenarios | Configurable (default: [1, 2, 4] with proportions [0.5, 0.3, 0.2]) |
 | **Labels** | Stage 1 sources | MLQD (OLSQ2, 3,729), QUEKO (τ⁻¹, 540) |
 | | Stage 2 (unsupervised) | MQT Bench, QASMBench, RevLib (+ all Stage 1 circuits) |
 | **Optimizer** | Type | AdamW |
