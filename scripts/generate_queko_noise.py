@@ -10,7 +10,6 @@ The noise is generated ONCE with a fixed seed for reproducibility.
 """
 
 import json
-import os
 import numpy as np
 from pathlib import Path
 

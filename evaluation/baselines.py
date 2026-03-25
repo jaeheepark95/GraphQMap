@@ -15,6 +15,7 @@ from typing import Any
 
 from qiskit import QuantumCircuit, transpile
 
+from evaluation.benchmark import execute_on_simulators
 from evaluation.pst import create_ideal_simulator, create_noisy_simulator, measure_pst
 from evaluation.transpiler import transpile_with_timing
 
@@ -87,7 +88,7 @@ def naive_multi_programming_layout(
         compiled = transpile(
             circuit, backend=backend,
             layout_method="sabre", routing_method="sabre",
-            optimization_level=1, seed_transpiler=seed + i,
+            optimization_level=3, seed_transpiler=seed + i,
         )
         layout = _extract_layout(compiled, circuit.num_qubits)
 
@@ -171,7 +172,6 @@ def evaluate_baseline(
         )
         ideal_sim = create_ideal_simulator(backend)
         noisy_sim = create_noisy_simulator(backend)
-        from evaluation.benchmark import execute_on_simulators
         avg_pst, depth, _ = execute_on_simulators(
             tc, ideal_sim, noisy_sim, shots=shots,
         )

@@ -45,22 +45,6 @@ BENCHMARK_CIRCUITS = [
     "4gt13_92",
 ]
 
-# Extended circuit set
-BENCHMARK_CIRCUITS_EXTENDED = [
-    "bv_n3",
-    "bv_n4",
-    "peres_3",
-    "toffoli_3",
-    "fredkin_3",
-    "xor5_254",
-    "3_17_13",
-    "4mod5-v1_22",
-    "mod5mils_65",
-    "alu-v0_27",
-    "decod24-v2_43",
-    "4gt13_92",
-]
-
 # Default method combinations: (routing_method, layout_method)
 DEFAULT_COMBINATIONS = [
     ("sabre", "sabre"),
@@ -198,7 +182,7 @@ def run_benchmark_single(
         all_pst = {label: [] for label in method_labels}
         all_time = {label: [] for label in method_labels}
         all_cx = {label: [] for label in method_labels}
-        all_depth = {label: [] for label in method_labels}
+        all_total_time = {label: [] for label in method_labels}
 
         for cname in circuit_names:
             logger.info("  Circuit: %s", cname)
@@ -208,7 +192,7 @@ def run_benchmark_single(
                 psts_runs = []
                 times_runs = []
                 cx_runs = []
-                depth_runs = []
+                total_time_runs = []
 
                 total_runs = warm_up + reps
                 for j in range(total_runs):
@@ -232,12 +216,12 @@ def run_benchmark_single(
                         psts_runs.append(avg_pst)
                         times_runs.append(metadata["layout_time"])
                         cx_runs.append(metadata["map_cx"])
-                        depth_runs.append(metadata["total_time"])
+                        total_time_runs.append(metadata["total_time"])
 
                 all_pst[label].append(np.nanmean(psts_runs) if psts_runs else 0.0)
                 all_time[label].append(np.nanmean(times_runs) if times_runs else 0.0)
                 all_cx[label].append(np.nanmean(cx_runs) if cx_runs else 0.0)
-                all_depth[label].append(np.nanmean(depth_runs) if depth_runs else 0.0)
+                all_total_time[label].append(np.nanmean(total_time_runs) if total_time_runs else 0.0)
 
         # Build MultiIndex DataFrame
         data = {}
@@ -245,7 +229,7 @@ def run_benchmark_single(
             data[("PST", label)] = all_pst[label]
             data[("TIME", label)] = all_time[label]
             data[("CX", label)] = all_cx[label]
-            data[("TOTAL_TIME", label)] = all_depth[label]
+            data[("TOTAL_TIME", label)] = all_total_time[label]
 
         df = pd.DataFrame(data, index=circuit_names)
         df.columns = pd.MultiIndex.from_tuples(df.columns)

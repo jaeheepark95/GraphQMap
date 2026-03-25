@@ -37,8 +37,8 @@ from data.dataset import (
 )
 from data.hardware_graph import (
     build_hardware_graph,
-    extract_qubit_properties,
     get_backend,
+    get_hw_node_features,
     precompute_error_distance,
 )
 from models.graphqmap import GraphQMap
@@ -61,32 +61,16 @@ logging.getLogger("qiskit").setLevel(logging.WARNING)
 # ---------------------------------------------------------------------------
 
 def prepare_hw_node_features_for_qscore(backend) -> np.ndarray:
-    """Prepare (h, 5) node features for QualityScore.
+    """Prepare (h, 7) node features for QualityScore.
 
-    Features: [T1_norm, T2_norm, (1-readout_err_norm), (1-sq_err_norm), freq_norm]
-    Z-score normalized within backend, errors inverted.
+    Features: [T1, T2, readout_error, single_qubit_error, degree, t1_cx_ratio, t2_cx_ratio]
+    Z-score normalized within backend.
     """
-    props = extract_qubit_properties(backend)
-    h = backend.target.num_qubits
-    eps = 1e-8
-
-    def znorm(arr: np.ndarray) -> np.ndarray:
-        m, s = arr.mean(), arr.std()
-        return (arr - m) / (s + eps)
-
-    t1_n = znorm(props["t1"])
-    t2_n = znorm(props["t2"])
-    freq_n = znorm(props["frequency"])
-    # Invert errors: (1 - error) then normalize
-    readout_inv = znorm(1.0 - props["readout_error"])
-    sq_inv = znorm(1.0 - props["single_qubit_error"])
-
-    features = np.stack([t1_n, t2_n, readout_inv, sq_inv, freq_n], axis=1)
-    return features.astype(np.float32)
+    return get_hw_node_features(backend)
 
 
 def precompute_hop_distance(backend) -> np.ndarray:
-    """Precompute hop-count shortest path distances for separation loss."""
+    """Precompute hop-count shortest path distances for L_hop loss."""
     h = backend.target.num_qubits
     adj = np.full((h, h), np.inf)
     np.fill_diagonal(adj, 0)
@@ -135,8 +119,8 @@ def build_stage2_sample(
     backend,
     backend_name: str,
     hw_graph,
-    d_error: np.ndarray,
     d_hw: np.ndarray,
+    d_error: np.ndarray,
     hw_node_features: np.ndarray,
 ) -> MappingSample | None:
     """Build a single Stage 2 training sample."""
@@ -149,9 +133,10 @@ def build_stage2_sample(
     # Build circuit graph (no global summary for single-circuit test)
     circuit_graph = build_circuit_graph(circuit)
 
-    # Extract circuit edge pairs and qubit importance
+    # Extract circuit edge pairs, weights, and qubit importance
     feats = extract_circuit_features(circuit)
     edge_pairs = list(feats["edge_list"])
+    edge_weights = feats["edge_features"][:, 0].tolist()
     # Qubit importance = number of 2-qubit gates per qubit
     importance = feats["node_features"][:, 1].numpy()  # two_qubit_gate_count column
 
@@ -165,7 +150,7 @@ def build_stage2_sample(
         d_hw=d_hw,
         hw_node_features=hw_node_features,
         circuit_edge_pairs=edge_pairs,
-        cross_circuit_pairs=[],  # single circuit, no cross pairs
+        circuit_edge_weights=edge_weights,
         qubit_importance=importance,
     )
 
@@ -204,7 +189,9 @@ def train_unsupervised(
             for pg in optimizer.param_groups:
                 pg["lr"] = lr * warmup_factor
 
-        accum = {"total": 0.0, "l_surr": 0.0, "l_node": 0.0, "l_sep": 0.0}
+        accum: dict[str, float] = {"total": 0.0}
+        for name in criterion.component_names:
+            accum[name] = 0.0
         num_batches = 0
 
         for batch in dataloader:
@@ -224,23 +211,28 @@ def train_unsupervised(
                 tau=tau,
             )
 
-            losses = criterion(
-                P=P,
-                d_error=batch["d_error"].to(device),
-                d_hw=batch["d_hw"].to(device),
-                hw_node_features=batch["hw_node_features"].to(device),
-                circuit_edge_pairs=batch["circuit_edge_pairs"],
-                cross_circuit_pairs=batch["cross_circuit_pairs"],
-                qubit_importance=batch["qubit_importance"].to(device),
-                num_logical=num_logical,
-            )
+            loss_kwargs: dict = {
+                "num_logical": num_logical,
+                "circuit_edge_pairs": batch["circuit_edge_pairs"],
+                "circuit_edge_weights": batch.get("circuit_edge_weights", []),
+                "qubit_importance": batch["qubit_importance"].to(device),
+                "hw_node_features": batch["hw_node_features"].to(device),
+                "cross_circuit_pairs": batch.get("cross_circuit_pairs", []),
+            }
+            if "d_hw" in batch:
+                loss_kwargs["d_hw"] = batch["d_hw"].to(device)
+            if "d_error" in batch:
+                loss_kwargs["d_error"] = batch["d_error"].to(device)
+
+            losses = criterion(P, **loss_kwargs)
 
             losses["total"].backward()
             torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
             optimizer.step()
 
             for k in accum:
-                accum[k] += losses[k].item()
+                if k in losses:
+                    accum[k] += losses[k].item()
             num_batches += 1
 
         if epoch >= warmup_epochs:
@@ -249,11 +241,10 @@ def train_unsupervised(
         avg = {k: v / max(num_batches, 1) for k, v in accum.items()}
         current_lr = optimizer.param_groups[0]["lr"]
 
-        logger.info(
-            f"Epoch {epoch:3d}/{num_epochs} | LR={current_lr:.6f} | "
-            f"L_total={avg['total']:+.6f} | L_surr={avg['l_surr']:+.6f} | "
-            f"L_node={avg['l_node']:+.6f} | L_sep={avg['l_sep']:+.6f}"
-        )
+        parts = [f"Epoch {epoch:3d}/{num_epochs} | LR={current_lr:.6f} | L_total={avg['total']:+.6f}"]
+        for name in criterion.component_names:
+            parts.append(f"{name}={avg[name]:+.6f}")
+        logger.info(" | ".join(parts))
         history.append(avg)
 
     return history
@@ -287,8 +278,8 @@ def main() -> None:
     backend_names = [b.replace("Fake", "").lower() for b in cfg.backends.training]
     backends = {}
     hw_graphs = {}
-    d_errors = {}
     d_hws = {}
+    d_errors = {}
     hw_features = {}
 
     logger.info(f"Loading {len(backend_names)} backends...")
@@ -297,8 +288,8 @@ def main() -> None:
             b = get_backend(name)
             backends[name] = b
             hw_graphs[name] = build_hardware_graph(b)
-            d_errors[name] = precompute_error_distance(b)
             d_hws[name] = precompute_hop_distance(b)
+            d_errors[name] = precompute_error_distance(b)
             hw_features[name] = prepare_hw_node_features_for_qscore(b)
             nq = b.target.num_qubits
             logger.info(f"  {name}: {nq}Q, {len(b.coupling_map.get_edges())//2} edges")
@@ -340,8 +331,8 @@ def main() -> None:
             sample = build_stage2_sample(
                 qc, backend, bname,
                 hw_graphs[bname],
-                d_errors[bname],
                 d_hws[bname],
+                d_errors[bname],
                 hw_features[bname],
             )
             if sample is not None:
@@ -379,10 +370,13 @@ def main() -> None:
     # ---- Step 4: Build model ----
     model = GraphQMap.from_config(cfg).to(device)
     quality_score = QualityScore().to(device)
+    components = [
+        {"name": c.name, "weight": c.weight}
+        for c in cfg.loss.components
+    ]
     criterion = Stage2Loss(
+        components=components,
         quality_score=quality_score,
-        alpha=cfg.loss.weights.alpha,
-        lambda_sep=cfg.loss.weights.lambda_sep,
     )
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -406,7 +400,7 @@ def main() -> None:
         lr=cfg.training.optimizer.lr,
         weight_decay=cfg.training.optimizer.weight_decay,
         warmup_epochs=cfg.training.warmup_epochs,
-        tau=cfg.sinkhorn.tau,
+        tau=getattr(cfg.sinkhorn, "tau", getattr(cfg.sinkhorn, "tau_min", 0.05)),
     )
     elapsed = time.time() - t0
 
@@ -419,21 +413,17 @@ def main() -> None:
     last = history[-1]
 
     logger.info(f"L_total: {first['total']:+.6f} → {last['total']:+.6f}")
-    logger.info(f"L_surr:  {first['l_surr']:+.6f} → {last['l_surr']:+.6f}")
-    logger.info(f"L_node:  {first['l_node']:+.6f} → {last['l_node']:+.6f}")
-    logger.info(f"L_sep:   {first['l_sep']:+.6f} → {last['l_sep']:+.6f}")
+    for name in criterion.component_names:
+        logger.info(f"  {name}: {first[name]:+.6f} → {last[name]:+.6f}")
 
     # Check if losses decreased
     decreased = last["total"] < first["total"]
     logger.info(f"\nSanity check {'PASSED' if decreased else 'FAILED'}: "
                 f"total loss {'decreased' if decreased else 'did NOT decrease'}")
 
-    # Log quality score weights
-    w = quality_score.weights.data.cpu().numpy()
-    b = quality_score.bias.data.cpu().item()
-    logger.info(f"\nLearned QualityScore weights:")
-    logger.info(f"  T1={w[0]:.4f}, T2={w[1]:.4f}, readout={w[2]:.4f}, "
-                f"sq_err={w[3]:.4f}, freq={w[4]:.4f}, bias={b:.4f}")
+    # Log quality score parameters
+    qs_params_count = sum(p.numel() for p in quality_score.parameters())
+    logger.info(f"\nQualityScore MLP: {qs_params_count} parameters")
 
 
 if __name__ == "__main__":

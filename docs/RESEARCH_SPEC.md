@@ -90,7 +90,7 @@ Output: Initial layout (logical qubit → physical qubit mapping)
 
 Same as above except:
 - **No Hungarian algorithm** during training — P matrix is used directly for loss computation
-- **Sinkhorn temperature τ** is annealed during Stage 1
+- **Sinkhorn temperature τ** is annealed during both Stage 1 and Stage 2
 
 ### Multi-Programming Pipeline
 
@@ -144,14 +144,16 @@ Multi-programming uses the same 4 node features as single-circuit. Circuit graph
 
 **Circuit Node Feature Normalization:** Z-score normalized **within each circuit** (across qubits, dim=0). This captures *relative* qubit importance within the circuit — which qubit is busier than others — rather than absolute counts. This is intentional: hardware features are also normalized within-backend, so the model learns to match "relatively busy logical qubit → relatively good physical qubit" in a consistent scale.
 
-**Circuit Edge Feature Normalization:** Edge features (`interaction_count`, `earliest_interaction`, `latest_interaction`) are **not normalized**. They retain absolute values, providing the GNN with absolute-scale circuit complexity information that is lost from node features after within-circuit normalization.
+**Circuit Edge Feature Normalization:** Edge features (`interaction_count`, `earliest_interaction`, `latest_interaction`) are **z-score normalized within each circuit** (across edges, dim=0), same as node features. This ensures all three edge features contribute equally to GNN message passing regardless of their original scales (`interaction_count` can be any positive integer while `earliest`/`latest` are in [0,1]).
 
-**Trade-off:** Within-circuit normalization loses absolute circuit complexity. A 3-gate circuit and a 300-gate circuit look similar in node features if qubit busyness ratios are the same. However, `interaction_count` in edge features compensates partially — larger circuits naturally have higher interaction counts.
+**Trade-off:** Within-circuit normalization loses absolute circuit complexity. A 3-gate circuit and a 300-gate circuit look similar in both node and edge features if qubit interaction ratios are the same. However, the GNN learns to use the relative structure (which pairs interact more than others) for placement decisions, which is the primary signal for initial layout quality.
 
 **Exception handling:** If standard deviation = 0 (all qubits identical), add ε = 1e-8 to denominator — node features become all-zero, which is uninformative but acceptable (uniform circuits have no strong placement preference).
 
-**Known limitation — multi-programming cross-circuit scale mismatch:** In multi-programming, each circuit is normalized independently before merging. This means a qubit that is "relatively the busiest" in a simple 3-gate circuit and one that is "relatively the busiest" in a complex 300-gate circuit will have similar node feature values after normalization, even though the latter should receive higher-priority physical placement. The Score Head (cross-attention) cannot distinguish their true absolute importance. Edge features (`interaction_count`) partially compensate, but do not fully resolve the issue. Possible mitigations to consider if this proves impactful in practice:
-- **Group-level normalization**: normalize node features jointly across all circuits in a multi-programming group (instead of per-circuit). Consistent scale across circuits, but requires online normalization at batch creation time and breaks the unified single/multi pipeline.
+**Multi-programming edge renormalization:** In multi-programming, each circuit's edge features are initially z-score normalized per-circuit. When merging multiple circuits, edge features are **re-normalized at the group level** (across all edges in all circuits) via `renormalize_group_edges()`. This ensures consistent edge feature scales across circuits in the group while node features remain per-circuit normalized.
+
+**Known limitation — multi-programming cross-circuit node scale mismatch:** In multi-programming, node features remain per-circuit normalized (not group-level). This means a qubit that is "relatively the busiest" in a simple 3-gate circuit and one that is "relatively the busiest" in a complex 300-gate circuit will have similar node feature values after normalization, even though the latter should receive higher-priority physical placement. The Score Head (cross-attention) cannot distinguish their true absolute importance. Possible mitigations to consider if this proves impactful in practice:
+- **Group-level node normalization**: normalize node features jointly across all circuits in a multi-programming group. Consistent scale across circuits, but breaks the unified single/multi pipeline.
 - **Log transform**: apply log(1+x) before z-score to compress scale differences while retaining some absolute information.
 - **Global summary re-introduction**: add circuit-level complexity features as a context signal (reverts the 4-dim unification decision).
 
@@ -297,15 +299,18 @@ After 2 layers, output is C' (l×d) and H' (h×d).
 
 ### 4.4 Score Head
 
-Learned projection from cross-attention output to mapping compatibility scores:
+Learned projection from cross-attention output to mapping compatibility scores, with noise-aware bias:
 
 ```
-S_ij = (C'_i · W_q)^T · (H'_j · W_k) / √d_k
+S_ij = (C'_i · W_q)^T · (H'_j · W_k) / √d_k + bias_j
+bias_j = Linear(hw_node_features_j)
 ```
 
 - `W_q`: learnable matrix d → d_k (d_k = 64)
 - `W_k`: learnable matrix d → d_k (d_k = 64)
 - Scaled by `√d_k` for numerical stability before Sinkhorn
+- `bias_j`: per-physical-qubit bias learned from hardware noise features (7-dim → 1), encourages mapping to low-error qubits (similar to QAP's readout/gate error cost terms)
+- `noise_bias_dim`: configurable (0 to disable, 7 to enable with all hardware features)
 
 **Output:** S matrix of shape (l × h)
 
@@ -347,11 +352,11 @@ def log_sinkhorn(log_alpha, max_iter=20, tol=1e-6):
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| τ_max (initial) | 1.0 | Soft distribution at Stage 1 start |
+| τ_max (initial) | 1.0 (Stage 1), 0.5 (Stage 2) | Soft distribution at training start |
 | τ_min (final) | 0.05 | Near one-hot; minimizes train-inference gap |
 | τ Schedule | Exponential decay | `τ(epoch) = τ_max · (τ_min/τ_max)^(epoch/total_epochs)` |
-| Stage 1 | Annealing from τ_max to τ_min | |
-| Stage 2 | Fixed at τ_min = 0.05 | |
+| Stage 1 | Annealing from 1.0 to 0.05 | Full range for learning basic mappings |
+| Stage 2 | Annealing from 1.0 to 0.05 | Starts softer for gradient flow with surrogate losses |
 | Max Iterations | 20 | |
 | Early Stop Tolerance | 1e-6 | |
 | Implementation | Log-domain | Prevents overflow at low τ |
@@ -390,9 +395,9 @@ L_sup = -Σ_i Σ_j Y_ij · log(P_ij)
 **Sinkhorn τ:** Annealed from τ_max=1.0 to τ_min=0.05 via exponential decay.
 
 **MLQD + QUEKO → QUEKO-only Transition:**
-- Criterion: Validation cross-entropy loss early stopping (patience = 5–10 epochs)
-- When switching to QUEKO: reduce learning rate to 1/5–1/10 of previous LR
-- QUEKO termination: same validation CE loss early stopping
+- Criterion: Validation cross-entropy loss early stopping (patience = 15 epochs main, 10 epochs QUEKO)
+- When switching to QUEKO: reduce learning rate to 1/10 of previous LR (lr_factor=0.1)
+- QUEKO termination: same validation CE loss early stopping (patience = 10)
 
 ### 5.2 Stage 2: Noise-Aware Surrogate Metric Fine-tuning
 
@@ -402,77 +407,96 @@ L_sup = -Σ_i Σ_j Y_ij · log(P_ij)
 
 **Sinkhorn τ:** Fixed at 0.05.
 
-**Optimizer:** AdamW with cosine annealing. Warm-up 3–5 epochs recommended.
+**Optimizer:** AdamW with cosine annealing. Warm-up 5 epochs.
 
-#### Loss Term 1: L_surr — Error-Aware Edge Quality Loss
+#### Loss Component Registry
 
-Uses error-accumulated shortest path distance instead of simple hop count:
+Stage 2 uses a **modular loss registry** (`@register_loss()` in `training/losses.py`). Components are configured declaratively in YAML — no code changes needed to switch loss combinations. Each component receives P and all available kwargs (d_error, d_hw, hw_node_features, etc.).
 
+```yaml
+# configs/stage2.yaml
+loss:
+  type: surrogate
+  components:
+    - name: error_distance    # select registered components
+      weight: 1.0             # multiplier in total loss
+    - name: node_quality
+      weight: 0.3
 ```
-d_error(p, q) = shortest_path_weighted(coupling_map, weight=cx_error)
-```
 
-Precompute using Floyd-Warshall with cx_error as edge weights. Store as h×h lookup matrix per backend.
+**Available components:**
+
+#### error_distance — L_surr: Error-Aware Edge Quality Loss (Default Primary)
+
+Uses precomputed error-accumulated shortest path distances (Floyd-Warshall on 2Q gate error rates).
 
 ```
 L_surr = (1/|E_circuit|) · Σ_{(i,j)∈E_circuit} Σ_{p,q} P_ip · P_jq · d_error(p,q)
 ```
 
-Where E_circuit = set of logical qubit pairs connected by 2-qubit gates.
+Where d_error(p,q) = error-weighted shortest path between physical qubits p and q. Directly encodes the total error cost of SWAP chains. Fully differentiable w.r.t. P. Bounded in [0, ∞).
 
-Fully differentiable w.r.t. P (d_error is a precomputed constant).
+#### adjacency — L_adj: Adjacency Matching Loss (Gate-Frequency Weighted)
 
-#### Loss Term 2: L_node — NISQ Node Quality Loss
+Directly measures whether interacting logical qubits are mapped to adjacent physical qubits.
 
-Drives important logical qubits to high-quality physical qubits.
+```
+A_hw(p, q) = 1 if (p, q) ∈ coupling_map, else 0
+L_adj = -(1/W) · Σ_{(i,j)∈E_circuit} w_ij · Σ_{p,q} P_ip · P_jq · A_hw(p,q)
+```
 
-**q_score function (learnable weighted linear combination):**
+Where w_ij = number of 2-qubit gates on edge (i,j), W = Σ w_ij. Output bounded in [-1, 0].
+
+#### hop_distance — L_hop: Hop Distance Tiebreaker
+
+Continuous distance signal for non-adjacent placements. Differentiates distance-2 from distance-10.
+
+```
+L_hop = (1/|E_circuit|) · Σ_{(i,j)∈E_circuit} Σ_{p,q} P_ip · P_jq · d_hop_norm(p,q)
+```
+
+Where d_hop_norm = d_hw / max(d_hw), normalized to [0, 1].
+
+#### node_quality — L_node: NISQ Node Quality Loss
+
+Drives important logical qubits to high-quality physical qubits via learnable MLP.
 
 ```python
-q_score(p) = sigmoid(w1*T1_norm + w2*T2_norm + w3*(1-readout_err_norm) + w4*(1-sq_err_norm) + w5*freq_norm + bias)
+q_score(p) = sigmoid(MLP(hw_features_p))    # MLP: Linear(7→16) → ELU → Linear(16→1)
 ```
 
-- `w1–w5` and `bias` are **learnable parameters** (initialized to small positive values, e.g., 0.2)
-- Features are z-score normalized within backend
-- (1 - error) inversion ensures all terms are "higher = better" direction
-- Sigmoid bounds output to [0, 1] for scale stability
-- After training, inspecting w1–w5 provides insight into which noise factors matter most for PST
-
-**Logical qubit importance w(i):** Number of 2-qubit gates involving qubit i (from circuit graph).
-
 ```
-L_node = (1/l_total) · (-Σ_i w(i) · Σ_p P_ip · q_score(p))
+L_node = -Σ_i w_norm(i) · Σ_p P_ip · q_score(p)
 ```
 
-Negative sign: higher quality assignment → lower loss.
+Where w_norm(i) = importance of qubit i normalized to sum to 1. Bounded in [-1, 0]. QualityScore MLP trained jointly with model.
 
-#### Loss Term 3: L_sep — Multi-Programming Separation Loss
+#### separation — L_sep: Multi-Programming Separation Loss
 
-Encourages physical distance between qubits of different circuits (crosstalk reduction).
+Encourages physical distance between qubits of different circuits. Bounded in [-1, 0]. Automatically 0 for single-circuit scenarios.
 
 ```
-L_sep = (1/|E_cross|) · (-Σ_{(i,j)∈cross-circuit} Σ_{p,q} P_ip · P_jq · d_hw(p,q))
+L_sep = -(1/|E_cross|) · Σ_{(i,j)∈cross-circuit} Σ_{p,q} P_ip · P_jq · d_hw_norm(p,q)
 ```
-
-Where E_cross = all pairs (i, j) where i and j belong to different circuits.
-
-**Automatically equals 0 for single-circuit scenarios** (no cross-circuit pairs exist).
 
 #### Combined Stage 2 Loss
 
 ```
-L_2 = L_surr + α · L_node + λ · L_sep
+L_2 = Σ_k weight_k · component_k(P, ...)
 ```
 
-| Weight | Value | Rationale |
-|--------|-------|-----------|
-| L_surr coefficient | 1.0 (fixed) | Primary objective, baseline reference |
-| α (L_node) | 0.1 | Important for NISQ but secondary to distance |
-| λ (L_sep) | 0.1 | Most indirect effect |
+**Current default configuration:**
 
-**CRITICAL: All three terms are per-pair/per-qubit normalized** (divided by pair count or qubit count). This ensures scales are comparable regardless of circuit/hardware size.
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| error_distance | 1.0 | Primary: unified error-weighted distance captures both adjacency and error quality |
+| node_quality | 0.3 | Drives mapping to low-error qubits |
 
-**Verification:** Log each term during training. No single term should dominate by >10×. Grid search candidates: α ∈ {0.1, 0.3, 0.5}, λ ∈ {0.05, 0.1, 0.2}.
+**CRITICAL: All terms are per-pair/per-qubit normalized** (divided by pair count or qubit count). This ensures scales are comparable regardless of circuit/hardware size.
+
+**Verification:** Log each term during training. No single term should dominate by >10×.
+
+**Experimenting with loss combinations:** Modify YAML only. CLI override: `--override loss.components.0.weight=2.0`. Each run's `config.yaml` records exact configuration.
 
 ### 5.3 Stage Transition Criteria
 
@@ -615,14 +639,14 @@ See `scripts/process_mlqd.py` for the extraction script.
 
 **Stage 1 (Supervised):** Use existing labels directly from MLQD (OLSQ2 solver labels) and QUEKO (τ⁻¹ true optimal). No self-generated label pipeline required — existing labels provide sufficient supervised signal for learning basic mapping quality, and any router-specific bias is corrected in Stage 2.
 
-**Stage 2 (Unsupervised):** Fine-tune with surrogate losses (L_surr, L_node, L_sep) on all available circuits, including label-free datasets (MQT Bench, QASMBench, RevLib). This stage aligns the model toward SABRE routing and NISQ-aware PST optimization, compensating for any mismatch between existing labels and the SABRE pipeline.
+**Stage 2 (Unsupervised):** Fine-tune with configurable surrogate losses (default: L_surr + L_node) on all available circuits, including label-free datasets (MQT Bench, QASMBench, RevLib). Loss components are modular and configured via YAML registry. This stage aligns the model toward NISQ-aware PST optimization, compensating for any mismatch between existing labels and the evaluation pipeline. **Stage 2 uses only the 55 real Qiskit FakeBackendV2 backends** — synthetic backends are excluded. QUEKO/MLQD circuits (which were originally assigned to synthetic backends) are randomly re-assigned to real backends at data load time. This ensures the model's unsupervised fine-tuning generalizes to real hardware noise profiles.
 
 ### Rationale for Using Existing Labels
 
 - **MLQD OLSQ2 labels** were optimized for the OLSQ2 routing pipeline, but still encode meaningful mapping quality signal (e.g., minimizing qubit interaction distance)
 - **QUEKO τ⁻¹ labels** are true topology-optimal mappings (zero-SWAP overhead) — the highest quality supervised signal available
 - **MQT Bench** was initially considered for pseudo-labels but excluded because mapped-level data is effectively unavailable from MQT Bench web/API
-- **Stage 2 unsupervised fine-tuning corrects router-specific bias** — L_surr directly optimizes error-weighted distance aligned with SABRE routing
+- **Stage 2 unsupervised fine-tuning corrects router-specific bias** — surrogate losses directly optimize layout quality metrics
 - This approach **eliminates the massive computational cost** of self-generating labels while maintaining training effectiveness
 
 ---
@@ -654,9 +678,10 @@ The scenarios and proportions are fully configurable — not restricted to speci
 
 ### Multi-Programming Circuit Graph Construction
 
-1. Construct individual circuit graphs for each circuit (4-dim node features, same as single-circuit)
-2. Merge into a single disconnected graph (no edges between circuits)
-3. Total node count = l₁ + l₂ + ... (sum of all circuits' logical qubits)
+1. Construct individual circuit graphs for each circuit (4-dim node features, same as single-circuit; edge features z-score normalized per-circuit)
+2. Re-normalize edge features at group level via `renormalize_group_edges()` (ensures consistent edge scales across circuits)
+3. Merge into a single disconnected graph (no edges between circuits)
+4. Total node count = l₁ + l₂ + ... (sum of all circuits' logical qubits)
 
 ---
 
@@ -766,6 +791,22 @@ For fair comparison with MQM colleague, use original (non-normalized) circuits v
 Multiple repetitions per experiment (matching baseline research), reporting mean and standard deviation.
 Results presented as pandas DataFrame with per-circuit PST, depth, CX count, timing, and Avg row.
 
+### Evaluation Output Pipeline
+
+`evaluate.py` with `--output` automatically generates all evaluation artifacts in the run's `eval/` subdirectory:
+
+```
+<run_dir>/
+├── eval_results.csv         # Raw results: circuit × backend × method × rep (all backends combined)
+└── eval/
+    ├── pst_summary.md       # Per-circuit PST table for each backend (Markdown)
+    ├── pst_summary.csv      # Same in CSV format
+    ├── pst_comparison_*.png # PST bar charts (method comparison per backend)
+    └── pst_heatmap_*.png    # PST heatmaps (circuit × method per backend)
+```
+
+When evaluating multiple backends (e.g. `--backend toronto brooklyn torino`), all results are collected into a single combined CSV. Summary tables include per-backend sections with per-circuit breakdowns and AVG rows.
+
 ### Baselines
 
 | Method | Description |
@@ -787,7 +828,7 @@ Results presented as pandas DataFrame with per-circuit PST, depth, CX count, tim
 
 | Ablation | Tests |
 |----------|-------|
-| Hop count vs. Error-aware distance | L_surr definition; supports NISQ-aware claim |
+| Loss component ablation | L_surr vs L_adj+L_hop; error_distance vs adjacency as primary |
 | Stage 1 only vs. Stage 1+2 | Surrogate fine-tuning contribution |
 | Single-hardware vs. Multi-hardware training | Hardware-agnostic claim |
 
@@ -805,7 +846,6 @@ Results presented as pandas DataFrame with per-circuit PST, depth, CX count, tim
 |----------|-------|
 | τ annealing vs. fixed τ | Training-inference gap |
 | L_node presence/absence | Node quality loss contribution |
-| L_sep presence/absence | Multi-programming separation effect |
 | Noise features in Hardware GNN | With vs. without calibration features |
 | Noise parameter perturbation | Robustness to calibration drift |
 
@@ -818,8 +858,9 @@ These items are not yet finalized and need to be decided during implementation:
 ### Optimizer Details (Decided)
 - **Confirmed:** AdamW + Cosine Annealing LR scheduler
 - **Stage 1 LR:** 1e-3, weight decay 1e-4, cosine eta_min 1e-6
-- **Stage 2 LR:** 1e-4, weight decay 1e-4, cosine eta_min 1e-6, warmup 5 epochs
-- **Gradient clipping (Stage 2):** max_norm 0.5
+- **Stage 2 LR:** 5e-4, weight decay 1e-4, cosine eta_min 1e-5, warmup 2 epochs
+- **Stage 2 Sinkhorn τ:** exponential decay from 1.0 to 0.05 (starts softer for wider exploration with surrogate losses)
+- **Gradient clipping (Stage 2):** max_norm 2.0
 
 ### Reproducibility Settings (Decided)
 - Random seed: 42 (training), 43 (evaluation)
@@ -868,19 +909,22 @@ d_error = floyd_warshall(adj)  # h×h matrix, precomputed once per backend
 
 ```python
 class QualityScore(nn.Module):
-    def __init__(self):
+    def __init__(self, num_features=7, hidden_dim=16):
         super().__init__()
-        self.weights = nn.Parameter(torch.ones(5) * 0.2)  # w1-w5
-        self.bias = nn.Parameter(torch.zeros(1))
-    
+        self.mlp = nn.Sequential(
+            nn.Linear(num_features, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
     def forward(self, node_features):
         """
-        node_features: (h, 5) tensor
-        Columns: [T1_norm, T2_norm, (1-readout_err_norm), (1-sq_err_norm), freq_norm]
-        All pre-normalized within backend (z-score), with errors inverted
+        node_features: (h, 7) tensor
+        Columns: [T1_norm, T2_norm, readout_error_norm, single_qubit_error_norm,
+                  degree_norm, t1_cx_ratio_norm, t2_cx_ratio_norm]
+        All pre-normalized within backend (z-score)
         """
-        score = torch.sigmoid((node_features * self.weights).sum(dim=-1) + self.bias)
-        return score  # shape: (h,), values in [0, 1]
+        return torch.sigmoid(self.mlp(node_features).squeeze(-1))  # (h,), [0, 1]
 ```
 
 ### Sinkhorn with Dummy Padding
@@ -958,27 +1002,31 @@ def hungarian_decode(P, l):
 | | FFN Hidden | 128 |
 | | Dropout | 0.1 |
 | **Score Head** | d_k | 64 |
+| | noise_bias_dim | 7 (0 to disable) |
+| **QualityScore** | Architecture | MLP: 7 → 16 → 1 + sigmoid |
+| | Hidden dim | 16 |
 | **Sinkhorn** | τ_max | 1.0 |
 | | τ_min | 0.05 |
 | | Schedule | Exponential decay (Stage 1), Fixed (Stage 2) |
 | | Max Iterations | 20 |
 | | Tolerance | 1e-6 |
-| **Stage 2 Loss** | L_surr weight | 1.0 |
-| | α (L_node) | 0.1 |
-| | λ (L_sep) | 0.1 |
+| **Stage 2 Loss** | Components | Configurable via YAML registry |
+| | Default | error_distance (1.0) + node_quality (0.3) |
+| | Available | error_distance, adjacency, hop_distance, node_quality, separation |
 | **Batching** | Max total nodes | 512 (tune to GPU) |
+| | large_backend_boost | 2.0 (oversample 50Q+ backends) |
 | **Multi-prog** | Scenarios | Configurable (default: [1, 2, 4] with proportions [0.5, 0.3, 0.2]) |
 | **Labels** | Stage 1 sources | MLQD (OLSQ2, 3,729), QUEKO (τ⁻¹, 540) |
 | | Stage 2 (unsupervised) | MQT Bench, QASMBench, RevLib (+ all Stage 1 circuits) |
 | **Optimizer** | Type | AdamW |
 | | Weight Decay | 1e-4 |
 | | LR (Stage 1) | 1e-3, reduced to 1e-4 for QUEKO fine-tuning (lr_factor=0.1) |
-| | LR (Stage 2) | 1e-4 |
-| | LR Scheduler | Cosine Annealing (eta_min=1e-6) |
-| | Warmup (Stage 2) | 5 epochs |
-| | Grad Clip (Stage 2) | max_norm 0.5 |
-| **Transitions** | MLQD+QUEKO→QUEKO | Val CE early stop, patience 10 |
-| | QUEKO fine-tuning end | Val CE early stop, patience 5 |
+| | LR (Stage 2) | 5e-4 |
+| | LR Scheduler | Cosine Annealing (eta_min=1e-5 for Stage 2) |
+| | Warmup (Stage 2) | 2 epochs |
+| | Grad Clip (Stage 2) | max_norm 2.0 |
+| **Transitions** | MLQD+QUEKO→QUEKO | Val CE early stop, patience 15 |
+| | QUEKO fine-tuning end | Val CE early stop, patience 10 |
 | | Stage 1→2 | Manual (after Stage 1 completes) |
 | | Stage 2 end | Val PST early stopping, patience 10, min_delta 0.5% |
 | **Reproducibility** | Training seed | 42 |

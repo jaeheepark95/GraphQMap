@@ -28,10 +28,10 @@ import pandas as pd
 
 
 def plot_stage1(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.Figure]:
-    """Plot Stage 1 training metrics: train/val loss, LR, tau."""
+    """Plot Stage 1 training metrics: train/val loss."""
     figures = []
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    fig, ax = plt.subplots(1, 1, figsize=(8, 4))
     fig.suptitle("Stage 1 Training", fontsize=14)
 
     for run_dir in run_dirs:
@@ -47,8 +47,6 @@ def plot_stage1(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.
         phases = df["phase"].unique()
         phase_colors = {"mlqd_queko_best": "C0", "queko_best": "C1"}
 
-        # Train/Val Loss
-        ax = axes[0]
         for phase in phases:
             mask = df["phase"] == phase
             color = phase_colors.get(phase, "C2")
@@ -59,30 +57,11 @@ def plot_stage1(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.
             ax.plot(epochs, df.loc[mask, "val_loss"], color=color,
                     label=f"{label} val ({phase.split('_')[0]})")
 
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("CE Loss")
-        ax.set_title("Train / Val Loss")
-        ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3)
-
-        # LR Schedule
-        ax = axes[1]
-        ax.plot(df["lr"], label=label)
-        ax.set_xlabel("Step")
-        ax.set_ylabel("Learning Rate")
-        ax.set_title("LR Schedule")
-        ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3)
-        ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
-
-        # Tau Schedule
-        ax = axes[2]
-        ax.plot(df["tau"], label=label)
-        ax.set_xlabel("Step")
-        ax.set_ylabel("τ")
-        ax.set_title("Tau Schedule")
-        ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("CE Loss")
+    ax.set_title("Train / Val Loss")
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
     figures.append(fig)
@@ -94,10 +73,21 @@ def plot_stage1(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.
 
 
 def plot_stage2(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.Figure]:
-    """Plot Stage 2 training metrics: all loss components, LR."""
+    """Plot Stage 2 training metrics: loss components and Val PST."""
     figures = []
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    # Detect if any run has PST data
+    has_pst = False
+    for run_dir in run_dirs:
+        metrics_path = run_dir / "metrics.csv"
+        if metrics_path.exists():
+            df_check = pd.read_csv(metrics_path)
+            if "val_pst" in df_check.columns and df_check["val_pst"].notna().any():
+                has_pst = True
+                break
+
+    ncols = 3 if has_pst else 2
+    fig, axes = plt.subplots(1, ncols, figsize=(6 * ncols, 4))
     fig.suptitle("Stage 2 Training", fontsize=14)
 
     for run_dir in run_dirs:
@@ -109,34 +99,51 @@ def plot_stage2(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.
         df = pd.read_csv(metrics_path)
         label = run_dir.name
 
-        # Loss components
+        # Loss components: L_total + all active components
         ax = axes[0]
         ax.plot(df["epoch"], df["l_total"], label=f"{label} L_total", linewidth=2)
-        ax.plot(df["epoch"], df["l_surr"], label=f"{label} L_surr", alpha=0.7)
+        # Plot all loss component columns (everything except metadata columns)
+        skip_cols = {"epoch", "tau", "lr", "l_total", "val_pst"}
+        component_cols = [c for c in df.columns if c not in skip_cols]
+        for i, col in enumerate(component_cols):
+            ax.plot(df["epoch"], df[col], label=f"{label} {col}", alpha=0.7)
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
-        ax.set_title("L_total / L_surr")
+        ax.set_title("Loss Components")
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
 
+        # Second panel: individual component detail (use first component if available)
         ax = axes[1]
-        ax.plot(df["epoch"], df["l_node"], label=f"{label} L_node", color="C2")
-        ax.plot(df["epoch"], df["l_sep"], label=f"{label} L_sep", color="C3")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.set_title("L_node / L_sep")
-        ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3)
+        if component_cols:
+            for i, col in enumerate(component_cols):
+                ax.plot(df["epoch"], df[col], label=f"{label} {col}", color=f"C{i+2}")
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Loss")
+            ax.set_title("Individual Components")
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.3)
 
-        # LR Schedule
-        ax = axes[2]
-        ax.plot(df["epoch"], df["lr"], label=label)
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Learning Rate")
-        ax.set_title("LR Schedule")
-        ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3)
-        ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
+        # Val PST
+        if has_pst and "val_pst" in df.columns:
+            pst_df = df.dropna(subset=["val_pst"])
+            if not pst_df.empty:
+                ax = axes[2]
+                ax.plot(pst_df["epoch"], pst_df["val_pst"], marker="o",
+                        markersize=4, label=label)
+                best_idx = pst_df["val_pst"].idxmax()
+                ax.axhline(y=pst_df.loc[best_idx, "val_pst"], color="gray",
+                           linestyle="--", alpha=0.5)
+                ax.annotate(
+                    f"best={pst_df.loc[best_idx, 'val_pst']:.4f}",
+                    xy=(pst_df.loc[best_idx, "epoch"], pst_df.loc[best_idx, "val_pst"]),
+                    fontsize=8, ha="left",
+                )
+                ax.set_xlabel("Epoch")
+                ax.set_ylabel("PST")
+                ax.set_title("Validation PST")
+                ax.legend(fontsize=7)
+                ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
     figures.append(fig)
@@ -165,6 +172,12 @@ def plot_eval(
 
     title_backend = backend_label or df["backend"].iloc[0]
     file_suffix = f"_{backend_label}" if backend_label else ""
+
+    # Filter by backend if specified and column exists
+    if backend_label and "backend" in df.columns:
+        df = df[df["backend"] == backend_label]
+        if df.empty:
+            return figures
 
     # --- PST Bar Chart (mean per method) ---
     agg = df.groupby("method")["pst"].agg(["mean", "std"]).reset_index()
@@ -266,10 +279,8 @@ def main() -> None:
     if not args.run_dirs and not args.eval_csv:
         parser.error("Provide at least one run directory or --eval CSV")
 
-    # Determine save directory
+    # Explicit --save-dir overrides per-stage defaults
     save_dir = args.save_dir
-    if save_dir is None and args.run_dirs:
-        save_dir = args.run_dirs[0] / "plots"
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -281,9 +292,15 @@ def main() -> None:
         stage2_dirs = [d for d in args.run_dirs if detect_stage(d) == 2]
 
         if stage1_dirs:
-            all_figures.extend(plot_stage1(stage1_dirs, save_dir))
+            s1_save = save_dir if save_dir else stage1_dirs[0] / "plots"
+            s1_save.mkdir(parents=True, exist_ok=True)
+            all_figures.extend(plot_stage1(stage1_dirs, s1_save))
+            print(f"Plots saved to {s1_save}/")
         if stage2_dirs:
-            all_figures.extend(plot_stage2(stage2_dirs, save_dir))
+            s2_save = save_dir if save_dir else stage2_dirs[0] / "plots"
+            s2_save.mkdir(parents=True, exist_ok=True)
+            all_figures.extend(plot_stage2(stage2_dirs, s2_save))
+            print(f"Plots saved to {s2_save}/")
 
         undetected = [d for d in args.run_dirs if detect_stage(d) is None]
         for d in undetected:
@@ -296,8 +313,8 @@ def main() -> None:
         else:
             all_figures.extend(plot_eval(args.eval_csv, save_dir))
 
-    if save_dir and all_figures:
-        print(f"Plots saved to {save_dir}/")
+    if save_dir and args.eval_csv and all_figures:
+        print(f"Eval plots saved to {save_dir}/")
 
     if not args.no_show and all_figures:
         plt.show()

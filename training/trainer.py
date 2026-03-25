@@ -2,7 +2,7 @@
 
 Stage 1: Supervised pre-training with CE loss, τ annealing.
          MQT Bench → QUEKO sequential phases with early stopping.
-Stage 2: Noise-aware surrogate fine-tuning with L_surr + L_node + L_sep.
+Stage 2: Noise-aware surrogate fine-tuning with configurable loss components.
 """
 
 from __future__ import annotations
@@ -287,7 +287,7 @@ class Stage1Trainer:
 class Stage2Trainer:
     """Stage 2 noise-aware surrogate fine-tuning trainer.
 
-    Uses L_surr + alpha*L_node + lambda*L_sep with fixed τ.
+    Uses configurable loss components from YAML config.
 
     Args:
         model: GraphQMap model (pre-trained from Stage 1).
@@ -304,15 +304,26 @@ class Stage2Trainer:
         self.model = model.to(device)
         self.cfg = cfg
         self.device = device
-        self.tau = cfg.sinkhorn.tau
+
+        # τ scheduler: supports both fixed and annealing modes
+        self.tau_scheduler = TauScheduler(
+            tau_max=getattr(cfg.sinkhorn, "tau_max", getattr(cfg.sinkhorn, "tau", 0.05)),
+            tau_min=getattr(cfg.sinkhorn, "tau_min", getattr(cfg.sinkhorn, "tau", 0.05)),
+            schedule=getattr(cfg.sinkhorn, "schedule", "fixed"),
+            total_epochs=cfg.training.max_epochs,
+        )
 
         # Learnable quality score (parameters trained jointly with model)
         self.quality_score = QualityScore().to(device)
 
+        # Build loss from config components
+        components = [
+            {"name": c.name, "weight": c.weight}
+            for c in cfg.loss.components
+        ]
         self.criterion = Stage2Loss(
+            components=components,
             quality_score=self.quality_score,
-            alpha=cfg.loss.weights.alpha,
-            lambda_sep=cfg.loss.weights.lambda_sep,
         )
 
         # Combine model + quality_score parameters
@@ -332,11 +343,12 @@ class Stage2Trainer:
         self.checkpoint_dir = Path(cfg.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Metrics CSV
+        # Metrics CSV — columns derived from active loss components
+        self.loss_names = self.criterion.component_names
         self.metrics_path = self.checkpoint_dir.parent / "metrics.csv"
         with open(self.metrics_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["epoch", "lr", "l_total", "l_surr", "l_node", "l_sep"])
+            writer.writerow(["epoch", "tau", "lr", "l_total"] + self.loss_names + ["val_pst"])
 
     def _warmup_lr(self, epoch: int) -> None:
         """Apply linear warmup to learning rate."""
@@ -354,17 +366,20 @@ class Stage2Trainer:
 
         Args:
             train_loader: DataLoader yielding batch dicts with additional
-                fields: d_error, d_hw, hw_node_features,
-                circuit_edge_pairs, cross_circuit_pairs, qubit_importance.
+                fields: d_hw, hw_node_features, circuit_edge_pairs,
+                circuit_edge_weights, qubit_importance.
             epoch: Current epoch.
 
         Returns:
-            Dict of average losses: total, l_surr, l_node, l_sep.
+            Dict of average losses: total, l_adj, l_hop, l_node.
         """
         self.model.train()
         self._warmup_lr(epoch)
+        tau = self.tau_scheduler.get_tau(epoch)
 
-        accum = {"total": 0.0, "l_surr": 0.0, "l_node": 0.0, "l_sep": 0.0}
+        accum: dict[str, float] = {"total": 0.0}
+        for name in self.loss_names:
+            accum[name] = 0.0
         num_batches = 0
 
         for batch in train_loader:
@@ -376,37 +391,48 @@ class Stage2Trainer:
 
             self.optimizer.zero_grad()
 
+            hw_feats = batch.get("hw_node_features")
+            if hw_feats is not None:
+                hw_feats = hw_feats.to(self.device)
+
             P = self.model(
                 circuit_batch, hardware_batch,
                 batch_size=batch_size,
                 num_logical=num_logical,
                 num_physical=num_physical,
-                tau=self.tau,
+                tau=tau,
+                hw_node_features=hw_feats,
             )
 
-            losses = self.criterion(
-                P=P,
-                d_error=batch["d_error"].to(self.device),
-                d_hw=batch["d_hw"].to(self.device),
-                hw_node_features=batch["hw_node_features"].to(self.device),
-                circuit_edge_pairs=batch["circuit_edge_pairs"],
-                cross_circuit_pairs=batch["cross_circuit_pairs"],
-                qubit_importance=batch["qubit_importance"].to(self.device),
-                num_logical=num_logical,
-            )
+            # Build kwargs for loss components — pass all available fields
+            loss_kwargs: dict[str, Any] = {
+                "num_logical": num_logical,
+                "circuit_edge_pairs": batch["circuit_edge_pairs"],
+                "circuit_edge_weights": batch.get("circuit_edge_weights", []),
+                "qubit_importance": batch["qubit_importance"].to(self.device),
+                "hw_node_features": batch["hw_node_features"].to(self.device),
+                "cross_circuit_pairs": batch.get("cross_circuit_pairs", []),
+            }
+            if "d_hw" in batch:
+                loss_kwargs["d_hw"] = batch["d_hw"].to(self.device)
+            if "d_error" in batch:
+                loss_kwargs["d_error"] = batch["d_error"].to(self.device)
+
+            losses = self.criterion(P, **loss_kwargs)
 
             # Skip nan/inf losses to avoid corrupting weights
             if torch.isnan(losses["total"]) or torch.isinf(losses["total"]):
-                num_batches += 1
                 continue
 
             losses["total"].backward()
             grad_clip = getattr(self.cfg.training, 'grad_clip_norm', 1.0)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip)
+            all_params = list(self.model.parameters()) + list(self.quality_score.parameters())
+            torch.nn.utils.clip_grad_norm_(all_params, max_norm=grad_clip)
             self.optimizer.step()
 
             for k in accum:
-                accum[k] += losses[k].item()
+                if k in losses:
+                    accum[k] += losses[k].item()
             num_batches += 1
 
         if epoch >= self.warmup_epochs:
@@ -414,20 +440,24 @@ class Stage2Trainer:
 
         avg = {k: v / max(num_batches, 1) for k, v in accum.items()}
         lr = self.optimizer.param_groups[0]['lr']
-        logger.info(
-            f"Epoch {epoch} | LR={lr:.6f} | "
-            f"L_total={avg['total']:.6f} | L_surr={avg['l_surr']:.6f} | "
-            f"L_node={avg['l_node']:.6f} | L_sep={avg['l_sep']:.6f}"
-        )
 
-        # Append to metrics CSV
-        with open(self.metrics_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([epoch, f"{lr:.8f}", f"{avg['total']:.6f}",
-                             f"{avg['l_surr']:.6f}", f"{avg['l_node']:.6f}",
-                             f"{avg['l_sep']:.6f}"])
+        parts = [f"Epoch {epoch} | τ={tau:.4f} | LR={lr:.6f} | L_total={avg['total']:.6f}"]
+        for name in self.loss_names:
+            parts.append(f"{name}={avg[name]:.6f}")
+        logger.info(" | ".join(parts))
+
+        # Store metrics for CSV (PST filled in by run() after validation)
+        self._last_metrics = [epoch, f"{tau:.6f}", f"{lr:.8f}", f"{avg['total']:.6f}"]
+        for name in self.loss_names:
+            self._last_metrics.append(f"{avg[name]:.6f}")
 
         return avg
+
+    def _write_metrics_row(self, val_pst: str = "") -> None:
+        """Append the last training metrics row with optional PST value."""
+        with open(self.metrics_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(self._last_metrics + [val_pst])
 
     def save_checkpoint(self, epoch: int, tag: str = "best") -> Path:
         """Save model checkpoint."""
@@ -476,6 +506,7 @@ class Stage2Trainer:
                     and (epoch + 1) % pst_cfg.interval == 0):
                 pst = val_pst_fn(self.model, epoch)
                 logger.info(f"Epoch {epoch} | Val PST={pst:.4f}")
+                self._write_metrics_row(val_pst=f"{pst:.4f}")
 
                 if pst > best_pst:
                     best_pst = pst
@@ -484,6 +515,8 @@ class Stage2Trainer:
                 if early_stop is not None and early_stop.step(pst):
                     logger.info(f"Early stopping at epoch {epoch} (PST)")
                     break
+            else:
+                self._write_metrics_row()
 
         # Save final
         self.save_checkpoint(0, tag="final")

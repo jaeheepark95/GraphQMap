@@ -4,9 +4,9 @@ from training.early_stopping import EarlyStopping
 from training.losses import (
     ErrorAwareEdgeLoss,
     NodeQualityLoss,
-    SeparationLoss,
     Stage2Loss,
     SupervisedCELoss,
+    get_available_losses,
 )
 from training.quality_score import QualityScore
 from training.tau_scheduler import TauScheduler
@@ -17,10 +17,10 @@ __all__ = [
     "ErrorAwareEdgeLoss",
     "NodeQualityLoss",
     "QualityScore",
-    "SeparationLoss",
     "Stage1Trainer",
     "Stage2Loss",
     "Stage2Trainer",
     "SupervisedCELoss",
     "TauScheduler",
+    "get_available_losses",
 ]

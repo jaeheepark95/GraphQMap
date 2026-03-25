@@ -20,10 +20,10 @@ Supports arbitrary multi-programming (any number of co-located circuits, total l
   - `evaluation/benchmark.py` — structured benchmark runner (DataFrame output, simulator reuse)
   - `evaluation/prev_methods/` — baseline routing/layout methods (NASSC, NoiseAdaptive, QAP)
 - `configs/` — hyperparameter configs (YAML) and config loader (`config_loader.py`)
-- `runs/` — experiment outputs (timestamped, gitignored): checkpoints, metrics CSV, config snapshots
+- `runs/` — experiment outputs (timestamped, gitignored): checkpoints, metrics CSV, config snapshots, note.md, EXPERIMENTS.md
 - `scripts/` — dataset generation/processing scripts, `visualize.py` (training/eval plotting)
 - `docs/` — research specification and documentation
-- `tests/` — unit and integration tests (119 tests)
+- `tests/` — unit and integration tests (137 tests)
 
 ## Dataset Structure
 All circuit data lives under `data/circuits/` with circuits, labels, backends, and splits separated.
@@ -79,6 +79,7 @@ QUEKO/MLQD circuits use hardware topologies not available as Qiskit FakeBackendV
 ## Key Commands
 ```bash
 # Training (each run creates a timestamped directory under runs/)
+# Training plots are auto-generated in <run_dir>/plots/ on completion
 python train.py --config configs/stage1.yaml --name baseline_v1
 python train.py --config configs/stage2.yaml --name baseline_v1 \
   --override pretrained_checkpoint=runs/stage1/<STAGE1_RUN>/checkpoints/best.pt
@@ -88,20 +89,20 @@ python train.py --config configs/stage1.yaml --name lr_test \
   --override training.optimizer.lr=0.0005 \
   --override training.mlqd_queko.max_epochs=50
 
-# Evaluation (model + baselines, save results to CSV)
+# Evaluation (model + baselines on all 3 test backends, auto-saved to runs/eval/<RUN>/)
 python evaluate.py --config configs/stage2.yaml \
   --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
-  --backend toronto --reps 3 --output runs/stage2/<RUN>/eval_toronto.csv
+  --backend toronto brooklyn torino --reps 3
 
 # Benchmark (baselines only, no model)
 python evaluate.py --benchmark --backend toronto brooklyn torino
 
-# Visualization
-python scripts/visualize.py runs/stage1/<RUN> runs/stage2/<RUN> \
-  --eval runs/stage2/<RUN>/eval_toronto.csv
+# Manual visualization (for comparing runs or standalone eval CSV)
+python scripts/visualize.py runs/stage1/<RUN> runs/stage2/<RUN>
+python scripts/visualize.py --eval runs/eval/<RUN>/eval_results.csv
 
 # Tests
-pytest tests/                                       # 119 tests
+pytest tests/                                       # 137 tests
 
 # Dataset scripts
 python scripts/generate_queko_noise.py             # Generate synthetic noise profiles
@@ -111,57 +112,77 @@ python scripts/normalize_gates.py                  # Normalize all QASM to basis
 ```
 
 ## Experiment Management
-Each `train.py` run creates a timestamped directory with config snapshot and metrics:
+Each `train.py` run creates a timestamped directory with config snapshot, metrics, and note template.
+Training plots are auto-generated on completion. Evaluation outputs go to `runs/eval/<RUN>/`.
 ```
 runs/
+├── EXPERIMENTS.md               # Central experiment log (all runs, results, changes)
 ├── stage1/
-│   └── 20260323_025733_baseline_v1/
+│   └── 20260323_221150_baseline_after_refactor/
 │       ├── config.yaml          # Actual config used (with overrides applied)
 │       ├── source_config.txt    # Original config file path
+│       ├── note.md              # Auto-generated: what changed, hypothesis, result
 │       ├── metrics.csv          # Per-epoch: epoch, phase, tau, lr, train_loss, val_loss
+│       ├── plots/               # Auto-generated training visualization
+│       │   └── stage1_training.png
 │       └── checkpoints/
 │           ├── mlqd_queko_best.pt
 │           ├── queko_best.pt
 │           └── best.pt
-└── stage2/
-    └── 20260323_025902_baseline_v1/
-        ├── config.yaml
-        ├── source_config.txt
-        ├── metrics.csv          # Per-epoch: epoch, lr, l_total, l_surr, l_node, l_sep
-        └── checkpoints/
-            ├── best.pt
-            └── final.pt
+├── stage2/
+│   └── 20260323_223946_baseline_after_refactor/
+│       ├── config.yaml
+│       ├── source_config.txt
+│       ├── note.md
+│       ├── metrics.csv          # Per-epoch: epoch, lr, l_total, <active_components...>, val_pst
+│       ├── plots/               # Auto-generated training visualization
+│       │   └── stage2_training.png
+│       └── checkpoints/
+│           ├── best.pt
+│           └── final.pt
+└── eval/                        # Evaluation outputs (auto-derived from checkpoint run name)
+    └── 20260323_223946_baseline_after_refactor/
+        ├── eval_results.csv     # Raw evaluation results (all backends, all reps)
+        ├── pst_summary.md       # Per-circuit PST table + per-backend comparison (Markdown)
+        ├── pst_summary.csv      # Same as above in CSV format
+        ├── pst_comparison_*.png # PST bar charts per backend
+        └── pst_heatmap_*.png    # PST heatmaps per backend
 ```
-- `--name` flag appends a label to the timestamp (optional but recommended)
+- `--name` flag appends a label to the timestamp — **use descriptive names reflecting what changed** (e.g. `ablation_no_cross_attn`, `loss_alpha0.5`, `gnn_6layer`, `feat_no_t1t2_ratio`)
+- `note.md` is auto-generated with template (What changed / Hypothesis / Result) — fill in after each run
+- `runs/EXPERIMENTS.md` is the central log — add one row per experiment with key results
 - Previous runs are never overwritten; each run gets its own directory
 - `runs/` is gitignored
 - `checkpoint_dir`/`log_dir` in YAML configs are fallback values; overridden at runtime by `_setup_run_dir()`
 - Stage 2 `pretrained_checkpoint` must be specified via `--override` (no default path)
+- Stage 1→2 checkpoint loading uses `strict=False` (Stage 2 adds `noise_proj` layer not in Stage 1)
 
 ### Visualization
+Training and evaluation plots are auto-generated. Manual visualization is for comparing runs or standalone use:
 ```bash
-# Training curves (loss, LR, tau)
-python scripts/visualize.py runs/stage1/<RUN>
-python scripts/visualize.py runs/stage2/<RUN>
+# Training curves (loss only — LR/tau schedules excluded as they are deterministic)
+python scripts/visualize.py runs/stage1/<RUN>    # Stage 1: train/val CE loss
+python scripts/visualize.py runs/stage2/<RUN>    # Stage 2: loss components + Val PST
 
-# Compare multiple runs
+# Compare multiple runs (plots saved to each run's plots/ directory)
 python scripts/visualize.py runs/stage1/RUN_A runs/stage1/RUN_B
 
 # Evaluation results (PST bar chart + heatmap)
-python scripts/visualize.py --eval runs/stage2/<RUN>/eval_toronto.csv
-
-# Combined training + eval
-python scripts/visualize.py runs/stage1/<RUN> runs/stage2/<RUN> --eval eval.csv
+python scripts/visualize.py --eval runs/stage2/<RUN>/eval_results.csv
 
 # Headless (save PNG only, no display)
 python scripts/visualize.py runs/stage1/<RUN> --no-show
 ```
-Plots are saved to `<first_run_dir>/plots/` (or `--save-dir`).
+- Stage 1 plots: Train/Val Loss (with phase boundaries)
+- Stage 2 plots: L_total + active components, Val PST (with best annotation)
+- Plots saved to each run's own `plots/` directory (not shared across stages)
 
 ## Hardware Backends
-- **Training (55 Qiskit + 5 synthetic = 60 backends)**:
+- **Stage 1 Training (55 Qiskit + 5 synthetic = 60 backends)**:
   - Qiskit FakeBackendV2: 5Q×15, 7Q×6, 15-16Q×2, 20Q×5, 27-28Q×12, 33Q×1, 53Q×1, 65Q×1, 127Q×9
   - Synthetic: queko_aspen4(16Q), queko_tokyo(20Q), queko_rochester(53Q), queko_sycamore(54Q), mlqd_grid5x5(25Q)
+- **Stage 2 Training (55 Qiskit backends only)**:
+  - Synthetic backends excluded; QUEKO/MLQD circuits randomly re-assigned to real backends at data load time
 - **Test (UNSEEN)**: FakeToronto(27Q), FakeBrooklyn(65Q), FakeTorino(133Q)
 - Native 2-qubit gates: cx, ecr, or cz (auto-detected via `_get_two_qubit_gate_name()`)
 
@@ -169,18 +190,51 @@ Plots are saved to `<first_run_dir>/plots/` (or `--save-dir`).
 - **Stage 1**: Supervised CE loss on labeled data (MLQD + QUEKO → QUEKO fine-tuning)
   - Phase 1: Train on all 3,846 labeled circuits with τ annealing (1.0→0.05)
   - Phase 2: Fine-tune on 486 QUEKO circuits with reduced LR (1/10)
-- **Stage 2**: Unsupervised surrogate losses (L_surr + α·L_node + λ·L_sep) on all 6,887 circuits
-  - Fixed τ=0.05, warm-up 3 epochs
+- **Stage 2**: Unsupervised surrogate losses on all 6,887 circuits
+  - Loss components configured via YAML registry pattern (see Loss Registry below)
+  - Default: L_surr (error-weighted distance) + α·L_node (node quality MLP)
+  - τ annealing (1.0→0.05, exponential), warm-up 2 epochs
+  - Large backend (50Q+) oversampling via `large_backend_boost`
+
+### Loss Registry (Stage 2)
+Loss components are modular and configured declaratively in YAML. Each component is registered via `@register_loss()` decorator in `training/losses.py`.
+
+**Available components:**
+| Name | Loss | Description | Bounds |
+|------|------|-------------|--------|
+| `error_distance` | L_surr | Error-weighted shortest path distance (Floyd-Warshall on cx_error) | [0, ∞) |
+| `adjacency` | L_adj | Binary adjacency matching with gate-frequency weighting | [-1, 0] |
+| `hop_distance` | L_hop | Normalized hop distance penalty | [0, 1] |
+| `node_quality` | L_node | Learnable MLP qubit quality score | [-1, 0] |
+| `separation` | L_sep | Multi-programming circuit separation | [-1, 0] |
+
+**YAML config format:**
+```yaml
+loss:
+  type: surrogate
+  components:
+    - name: error_distance
+      weight: 1.0
+    - name: node_quality
+      weight: 0.3
+```
+
+**Experimenting with loss combinations:**
+- Add/remove/reorder components in YAML — no code changes needed
+- Weight override via CLI: `--override loss.components.0.weight=2.0`
+- Each run's `config.yaml` records exact loss configuration for reproducibility
+- Metrics CSV columns are dynamic — reflect active components
 
 ## Critical Rules
 - All quantum circuits are pre-normalized to basis gates {cx, id, rz, sx, x} via `scripts/normalize_gates.py`
 - All quantum circuits loaded from .qasm files (OPENQASM 2.0)
 - Hardware noise features MUST be z-score normalized WITHIN each backend
 - Circuit node features MUST be z-score normalized WITHIN each circuit
+- Circuit edge features MUST be z-score normalized WITHIN each circuit (multi-programming: group-level via `renormalize_group_edges`)
 - Sinkhorn MUST use log-domain implementation (numerical stability at low τ)
 - Stage 1 uses existing labels: QUEKO (τ⁻¹), MLQD (OLSQ2)
 - Stage 2 uses unsupervised surrogate losses on all circuits
-- Score Matrix uses Cross-Attention + learned projection, NOT simple dot product
+- Score Matrix uses Cross-Attention + learned projection + noise-aware bias, NOT simple dot product
 - Dummy padding for rectangular l×h → h×h before Sinkhorn
 - All hyperparameters configurable via YAML
 - Batching groups samples by (backend, num_logical) for uniform tensor shapes
@@ -190,7 +244,7 @@ Plots are saved to `<first_run_dir>/plots/` (or `--save-dir`).
 - Evaluation order: baselines run before model to prevent GPU state corruption from model-generated deep circuits
 - PST measurement: optimization_level configurable (default 3), 8192 shots
 - Transpilation: custom PassManager builder supporting layout×routing combinations (sabre, nassc, dense, noise_adaptive, trivial, qap)
-- Benchmark circuits: 8 standard circuits (toffoli_3, fredkin_3, 3_17_13, 4mod5-v1_22, mod5mils_65, alu-v0_27, decod24-v2_43, 4gt13_92)
+- Benchmark circuits: 23 standard circuits (3Q-9Q), stored in `data/circuits/qasm/benchmarks/`, deduplicated from training sets
 - Multi-programming: model handles arbitrary circuit count; training scenarios configured via YAML (no fixed limit on circuit count)
 
 ## Dependencies

@@ -380,7 +380,7 @@ def precompute_error_distance(backend: Any) -> np.ndarray:
 def precompute_hop_distance(backend: Any) -> np.ndarray:
     """Precompute unweighted shortest path (hop count) distances.
 
-    Used for L_sep loss in Stage 2 training.
+    Used for L_hop loss in Stage 2 training.
 
     Args:
         backend: A FakeBackendV2 instance.

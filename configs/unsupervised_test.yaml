@@ -1,5 +1,5 @@
 # GraphQMap — Unsupervised (Stage 2 only) sanity check configuration
-# Goal: verify L_surr, L_node, L_sep decrease on randomly initialized model
+# Goal: verify surrogate losses decrease on randomly initialized model
 
 model:
   embedding_dim: 64
@@ -15,8 +15,8 @@ model:
     residual_layers: [2, 3]
 
   hardware_gnn:
-    node_input_dim: 6
-    edge_input_dim: 2
+    node_input_dim: 7
+    edge_input_dim: 1
     num_layers: 3
     num_heads: 4
     activation: elu
@@ -62,10 +62,12 @@ training:
 
 loss:
   type: surrogate
-  weights:
-    l_surr: 1.0
-    alpha: 0.1                 # L_node now in [-1, 0] after importance normalization
-    lambda_sep: 0.1
+  components:
+    - name: error_distance
+      weight: 1.0
+    - name: node_quality
+      weight: 0.1
+
 
 data:
   circuit_dirs:

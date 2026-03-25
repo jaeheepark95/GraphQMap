@@ -12,6 +12,7 @@ from qiskit import QuantumCircuit
 from torch_geometric.data import Batch, Data
 
 from data.circuit_graph import build_circuit_graph
+from data.normalization import renormalize_group_edges
 
 
 def merge_circuits(
@@ -23,14 +24,17 @@ def merge_circuits(
     Node features remain 4-dimensional (same as single-circuit), keeping
     the model architecture unified for both single and multi-programming.
 
+    Edge features are re-normalized at the group level (across all circuits)
+    when multiple circuits are merged. Node features remain per-circuit normalized.
+
     Args:
         circuits: List of QuantumCircuit objects to merge.
         eps: Epsilon for normalization.
 
     Returns:
         Merged PyG Data object with:
-        - x: (total_qubits, 4) node features (same as single-circuit)
-        - edge_index, edge_attr: merged edges with adjusted indices
+        - x: (total_qubits, 4) node features (per-circuit normalized)
+        - edge_index, edge_attr: merged edges with group-level normalized features
         - num_qubits: total logical qubit count
         - circuit_sizes: list of per-circuit qubit counts
         - circuit_ids: (total_qubits,) tensor mapping each node to its circuit index
@@ -42,6 +46,10 @@ def merge_circuits(
         graph = build_circuit_graph(circuit, eps=eps)
         graph_list.append(graph)
         circuit_sizes.append(circuit.num_qubits)
+
+    # Re-normalize edge features at group level for multi-programming
+    if len(graph_list) > 1:
+        graph_list = renormalize_group_edges(graph_list, eps=eps)
 
     # Merge into a single disconnected graph using PyG Batch
     merged = Batch.from_data_list(graph_list)

@@ -6,7 +6,6 @@ Only the top l rows (actual logical qubits) are used.
 
 from __future__ import annotations
 
-import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
 

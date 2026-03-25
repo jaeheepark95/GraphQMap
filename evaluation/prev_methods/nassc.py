@@ -25,9 +25,9 @@ from qiskit.circuit import Qubit
 from qiskit.transpiler.basepasses import TransformationPass
 from qiskit.transpiler.exceptions import TranspilerError
 from qiskit.transpiler.layout import Layout
-from qiskit.dagcircuit import DAGOpNode, DAGCircuit #pli11: add DAGCircuit 
-from qiskit.quantum_info.operators import Operator #pli11
-from qiskit.circuit import Gate, QuantumRegister, QuantumCircuit #pli11
+from qiskit.dagcircuit import DAGOpNode, DAGCircuit
+from qiskit.quantum_info.operators import Operator
+from qiskit.circuit import Gate, QuantumRegister, QuantumCircuit
 from qiskit.circuit.library import UnitaryGate
 from qiskit.converters import circuit_to_dag, dag_to_circuit
 
@@ -59,29 +59,22 @@ class NASSCSwap(TransformationPass):
         self.applied_predecessors = None
         self.qubits_decay = None
         self._bit_indices = None
-    
-        #pli11: used for commutation analysis
         self.cache = {} 
         self.commutation_set = None
-        #pli11: enable the recalculation of the swap score
         self.enable_factor_block = enable_factor_block
         self.enable_factor_commute_0 = enable_factor_commute_0
         self.enable_factor_commute_1 = enable_factor_commute_1
-        #pli11: used for recalculating the swap score
         self.factor_block = factor_block
         self.factor_commute_0 = factor_commute_0
         self.factor_commute_1 = factor_commute_1
-        #pli11: for collect 2q blocks
         self.pending_1q = None
         self.block_id = None
         self.current_id = None
         self.block_list = None
-        #pli11: for synthesis 2q block
         self.decomposer2q = decomposer2q
         self.approximation_degree = approximation_degree
         
     def run(self, dag):
-        # print(dag_to_circuit(dag))  
         if len(dag.qregs) != 1 or dag.qregs.get("q", None) is None:
             raise TranspilerError("NASSC swap runs on physical circuits only.")
 
@@ -94,7 +87,6 @@ class NASSCSwap(TransformationPass):
         mapped_dag = None
         if not self.fake_run:
             mapped_dag = dag.copy_empty_like()
-            # print("mapped_dag", mapped_dag, mapped_dag.__dir__(), mapped_dag.metadata)  #pli11: debug
 
         canonical_register = dag.qregs["q"]
         current_layout = Layout.generate_trivial_layout(canonical_register)
@@ -104,8 +96,6 @@ class NASSCSwap(TransformationPass):
         # A decay factor for each qubit used to heuristically penalize recently
         # used qubits (to encourage parallelism).
         self.qubits_decay = {qubit: 1 for qubit in dag.qubits}
-
-        #pli11: initiate the commutation set
         self.commutation_set = defaultdict(list)
         for wire in dag.wires:
             self.commutation_set[wire] = []
@@ -113,7 +103,6 @@ class NASSCSwap(TransformationPass):
         for node in dag.topological_op_nodes():
             for (_, _, edge_wire) in dag.edges(node):
                 self.commutation_set[(node, edge_wire)] = -1
-        #pli11: init self.pending_1q, self.block_id, self.current_id, self.block_list
         self.pending_1q = [list() for _ in range(dag.num_qubits())]
         self.block_id = [-(i + 1) for i in range(dag.num_qubits())]
         self.current_id = 0
@@ -126,9 +115,6 @@ class NASSCSwap(TransformationPass):
         for _, input_node in dag.input_map.items():
             for successor in self._successors(input_node, dag):
                 self.applied_predecessors[successor] += 1
-
-        # print(self.coupling_map.graph.nodes())
-        # print(self.coupling_map.graph.edge_list())
         while front_layer:
             execute_gate_list = []
 
@@ -136,17 +122,11 @@ class NASSCSwap(TransformationPass):
             for node in front_layer:
                 if len(node.qargs) == 2:
                     v0, v1 = node.qargs
-                    # print("2q gate", node.op.name, v0, v1, 
                     #       self.coupling_map.graph.has_edge(current_layout[v0], current_layout[v1]))
                     if self.coupling_map.graph.has_edge(current_layout[v0], current_layout[v1]):
                         execute_gate_list.append(node)
                 else:  # Single-qubit gates as well as barriers are free
-                    # print("1q gate", node.op.name)
                     execute_gate_list.append(node)
-                # print("execute_gate_list", execute_gate_list)  #pli11: debug
-            # print()
-
-            # print(execute_gate_list)
             if execute_gate_list:
                 for node in execute_gate_list:
                     self._apply_gate(mapped_dag, node, current_layout, canonical_register)
@@ -169,30 +149,25 @@ class NASSCSwap(TransformationPass):
             extended_set = self._obtain_extended_set(dag, front_layer)
             swap_candidates = self._obtain_swaps(front_layer, current_layout)
             swap_scores = dict.fromkeys(swap_candidates, 0)
-            predecessor_block=list() #pli11: used for collecting 2q block
-            swap_commutation = dict.fromkeys(swap_candidates, None) #pli11: used for commutation pattern check
+            predecessor_block=list()
+            swap_commutation = dict.fromkeys(swap_candidates, None)
             for swap_qubits in swap_scores:
                 trial_layout = current_layout.copy()
-                #pli11: record the score in current layout
                 score_current_layout = self._score_heuristic(
                     "basic", front_layer, extended_set, trial_layout, swap_qubits
                 )
                 trial_layout.swap(*swap_qubits)
-                #pli11: compute the score in basic config
                 score = self._score_heuristic(
                     "basic", front_layer, extended_set, trial_layout, swap_qubits
                 )
                 swap_scores[swap_qubits] = score
-                #pli11: if this swap inserted in opposite direction, do not consider 2q block and commutation opt.
                 if score - score_current_layout > 0:
                     swap_scores[swap_qubits] = self._score_heuristic_recalculate(
                         swap_scores[swap_qubits], self.heuristic, front_layer, extended_set, trial_layout, swap_qubits
                     )
                     continue
-                #pli11
                 swap_node = DAGOpNode(op=SwapGate(), qargs=swap_qubits)
                 swap_node = _transform_gate_for_layout(swap_node, current_layout, canonical_register)
-                #pli11: see if there is 2q block that can be merged, and store the info into predecessor_block
                 predecessor_block.clear()
                 swap_commutation[swap_qubits] = (None, None, None, None, None, None, None)
                 qids = [self._bit_indices[q] for q in swap_node.qargs]
@@ -200,8 +175,6 @@ class NASSCSwap(TransformationPass):
                     and (self.block_id[qids[0]] == self.block_id[qids[1]])
                    ):
                     predecessor_block.extend(self.block_list[self.block_id[qids[0]]])
-                
-                #pli11:reduce the swap score based on 2q block or comuation pattern 0 and 1
                 if len(predecessor_block)>0:
                     if not (predecessor_block[-1].name == "swap"):
                         gate_2q_num_before_adding_swap=0
@@ -235,9 +208,7 @@ class NASSCSwap(TransformationPass):
                         swap_scores[swap_qubits] -= decreased_score*self.factor_block
                 else:  
                     if(self.enable_factor_commute_0 or self.enable_factor_commute_1):
-                        #pli11: swap_check: commutation pattern 0 and pattern 1 checking
                         swap_commutation[swap_qubits]=self._swap_check(swap_node)
-                        #pli11: recalculating the swap score
                         if (self.enable_factor_commute_0 and swap_commutation[swap_qubits][0]):
                             swap_scores[swap_qubits] -= 2*self.factor_commute_0
                         elif (self.enable_factor_commute_1 and swap_commutation[swap_qubits][1]):
@@ -254,8 +225,6 @@ class NASSCSwap(TransformationPass):
             if((self.enable_factor_commute_0 and swap_commutation[tuple(best_swap)][0])
                or (self.enable_factor_commute_1 and swap_commutation[tuple(best_swap)][1])
               ):
-            
-                #pli11: consider the commutation rule when applying gate
                 self._apply_gate_consider_commutation(swap_commutation[tuple(best_swap)],
                                                       mapped_dag, swap_node, current_layout, canonical_register)
             else:
@@ -272,7 +241,6 @@ class NASSCSwap(TransformationPass):
 
             
         self.property_set["final_layout"] = current_layout
-        # print(dag_to_circuit(mapped_dag))  #pli11: debug
         if not self.fake_run:
             return mapped_dag
         return dag
@@ -282,8 +250,6 @@ class NASSCSwap(TransformationPass):
             return
         new_node = _transform_gate_for_layout(node, current_layout, canonical_register)
         new_node = mapped_dag.apply_operation_back(new_node.op, new_node.qargs, new_node.cargs)
-        
-        #pli11: collect 2q blocks
         qids = [self._bit_indices[q] for q in new_node.qargs]
         if (
                 not isinstance(new_node.op, Gate)
@@ -319,8 +285,6 @@ class NASSCSwap(TransformationPass):
                 new_block.append(new_node)
                 self.block_list.append(new_block)
                 self.current_id += 1
-        
-        #pli11
         # Construct the commutation set
         for wire in new_node.qargs:
             current_comm_set = self.commutation_set[wire]
@@ -342,8 +306,6 @@ class NASSCSwap(TransformationPass):
         
             temp_len = len(current_comm_set)
             self.commutation_set[(new_node, wire)] = temp_len - 1
-     
-    #pli11: apply gate consider the commutation rule
   
     def _apply_gate_consider_commutation(self,swap_commutation, mapped_dag, node, current_layout, canonical_register):
         if self.fake_run:
@@ -432,8 +394,6 @@ class NASSCSwap(TransformationPass):
             current_comm_set.append([new_single_gate])
             temp_len = len(current_comm_set)
             self.commutation_set[(new_single_gate, new_node.qargs[1])] = temp_len - 1
-        
-        #pli11: collect 2q blocks
         qids = [self._bit_indices[q] for q in new_node.qargs]
         if (
                 not isinstance(new_node.op, Gate)
@@ -522,7 +482,6 @@ class NASSCSwap(TransformationPass):
         cost = 0
         for node in layer:
             cost += self.coupling_map.distance(layout[node.qargs[0]], layout[node.qargs[1]])
-        #pli11: change the return cost to 3*cost in order to recalculate the score
         return 3*cost
 
     def _score_heuristic(self, heuristic, front_layer, extended_set, layout, swap_qubits=None):
@@ -551,8 +510,6 @@ class NASSCSwap(TransformationPass):
             )
 
         raise TranspilerError("Heuristic %s not recognized." % heuristic)
-        
-    #pli11: def _score_heuristic_recalculate: recalculating the score of swap 
     def _score_heuristic_recalculate(self, score, heuristic, front_layer, extended_set, layout, swap_qubits=None):
         """Return a heuristic score for a trial layout.
         Assuming a trial layout has resulted from a SWAP, we now assign a cost
@@ -578,8 +535,6 @@ class NASSCSwap(TransformationPass):
             )
 
         raise TranspilerError("Heuristic %s not recognized." % heuristic)
-     
-    #pli11: add _swap_check: commutation pattern checking 
   
     def _swap_check(self, node):
         
@@ -694,8 +649,6 @@ class NASSCSwap(TransformationPass):
             single_gate_list_1.clear()
             
         return (flag_swap_check_0, flag_swap_check_1, swap_in_pattern0, swap_in_pattern0_decomposition_method, swap_decomposition_method, single_gate_list_0, single_gate_list_1) #, flag_swap_check_2qblock, flag_swap_check_2qblock_has_swap)
-    
-    #pli11: add _swap_decomposition_method to determine how to decompose swap
     def _swap_decomposition_method(self, swap_node, another_node):
         swap_decomposition_method = False
         
@@ -718,10 +671,8 @@ def _transform_gate_for_layout(op_node, layout, device_qreg):
 
     # mapped_qargs = map(lambda x: device_qreg[layout[x]], premap_qargs)
     # mapped_op_node.qargs = tuple(mapped_qargs)
-    # print(tuple(mapped_qargs))
 
     return mapped_op_node
-#pli11: add method _commute
 def _commute(node1, node2, cache):
 
     if not isinstance(node1, DAGOpNode) or not isinstance(node2, DAGOpNode):

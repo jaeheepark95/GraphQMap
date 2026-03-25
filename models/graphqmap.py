@@ -40,16 +40,17 @@ class GraphQMap(nn.Module):
         cross_attn_ffn_dim: FFN hidden dimension in cross-attention.
         cross_attn_dropout: Cross-attention dropout rate.
         score_d_k: Score head projection dimension.
+        noise_bias_dim: Hardware feature dim for score head bias (0 to disable).
         sinkhorn_max_iter: Maximum Sinkhorn iterations.
         sinkhorn_tol: Sinkhorn convergence tolerance.
     """
 
     def __init__(
         self,
-        circuit_node_dim: int = 8,
+        circuit_node_dim: int = 4,
         circuit_edge_dim: int = 3,
-        hardware_node_dim: int = 6,
-        hardware_edge_dim: int = 2,
+        hardware_node_dim: int = 7,
+        hardware_edge_dim: int = 1,
         embedding_dim: int = 64,
         gnn_layers: int = 3,
         gnn_heads: int = 4,
@@ -59,6 +60,7 @@ class GraphQMap(nn.Module):
         cross_attn_ffn_dim: int = 128,
         cross_attn_dropout: float = 0.1,
         score_d_k: int = 64,
+        noise_bias_dim: int = 0,
         sinkhorn_max_iter: int = 20,
         sinkhorn_tol: float = 1e-6,
     ) -> None:
@@ -92,7 +94,9 @@ class GraphQMap(nn.Module):
         )
 
         # Score head
-        self.score_head = ScoreHead(d_model=embedding_dim, d_k=score_d_k)
+        self.score_head = ScoreHead(
+            d_model=embedding_dim, d_k=score_d_k, noise_bias_dim=noise_bias_dim,
+        )
 
         # Sinkhorn
         self.sinkhorn = SinkhornLayer(
@@ -143,6 +147,7 @@ class GraphQMap(nn.Module):
         num_logical: int,
         num_physical: int,
         tau: float = 0.05,
+        hw_node_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Full forward pass: GNN → Cross-Attention → Score → Sinkhorn → P.
 
@@ -153,6 +158,7 @@ class GraphQMap(nn.Module):
             num_logical: Number of logical qubits per sample.
             num_physical: Number of physical qubits per sample.
             tau: Sinkhorn temperature.
+            hw_node_features: (h, feat_dim) raw hardware features for noise bias.
 
         Returns:
             P: Doubly stochastic matrix (batch, h, h).
@@ -165,8 +171,8 @@ class GraphQMap(nn.Module):
         # Cross-attention interaction
         C_prime, H_prime = self.cross_attention(C, H)
 
-        # Score matrix
-        S = self.score_head(C_prime, H_prime)  # (batch, l, h)
+        # Score matrix (with optional noise bias)
+        S = self.score_head(C_prime, H_prime, hw_node_features)  # (batch, l, h)
 
         # Sinkhorn with dummy padding
         P = self.sinkhorn(S, num_logical, num_physical, tau)  # (batch, h, h)
@@ -182,6 +188,7 @@ class GraphQMap(nn.Module):
         num_logical: int,
         num_physical: int,
         tau: float = 0.05,
+        hw_node_features: torch.Tensor | None = None,
     ) -> list[dict[int, int]]:
         """Inference: forward pass + Hungarian decoding.
 
@@ -192,13 +199,15 @@ class GraphQMap(nn.Module):
             num_logical: Number of logical qubits per sample.
             num_physical: Number of physical qubits per sample.
             tau: Sinkhorn temperature.
+            hw_node_features: (h, feat_dim) raw hardware features for noise bias.
 
         Returns:
             List of layout dicts {logical_qubit: physical_qubit}.
         """
         self.eval()
         P = self.forward(
-            circuit_data, hardware_data, batch_size, num_logical, num_physical, tau,
+            circuit_data, hardware_data, batch_size, num_logical, num_physical,
+            tau, hw_node_features,
         )
         return hungarian_decode_batch(P, num_logical)
 
@@ -226,6 +235,7 @@ class GraphQMap(nn.Module):
             cross_attn_ffn_dim=cfg.model.cross_attention.ffn_hidden_dim,
             cross_attn_dropout=cfg.model.cross_attention.dropout,
             score_d_k=cfg.model.score_head.d_k,
+            noise_bias_dim=getattr(cfg.model.score_head, "noise_bias_dim", 0),
             sinkhorn_max_iter=cfg.sinkhorn.max_iter,
             sinkhorn_tol=cfg.sinkhorn.tolerance,
         )

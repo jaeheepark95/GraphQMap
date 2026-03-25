@@ -14,7 +14,7 @@ from typing import List, Tuple
 import numpy as np
 import rustworkx as rx
 
-from qiskit.transpiler import CouplingMap, Layout
+from qiskit.transpiler import Layout
 from qiskit.transpiler.basepasses import AnalysisPass
 from qiskit.dagcircuit import DAGCircuit
 

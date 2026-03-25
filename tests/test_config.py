@@ -43,9 +43,13 @@ def test_load_stage1_config():
 def test_load_stage2_config():
     cfg = load_config("configs/stage2.yaml")
     assert cfg.training.stage == 2
-    assert cfg.sinkhorn.tau == 0.05
-    assert cfg.sinkhorn.schedule == "fixed"
+    assert cfg.sinkhorn.tau_max == 0.5
+    assert cfg.sinkhorn.tau_min == 0.05
+    assert cfg.sinkhorn.schedule == "exponential"
     assert cfg.loss.type == "surrogate"
-    assert cfg.loss.weights.l_surr == 1.0
-    assert cfg.loss.weights.alpha == 0.1
-    assert cfg.loss.weights.lambda_sep == 0.1
+    # Components-based loss config
+    assert len(cfg.loss.components) == 2
+    assert cfg.loss.components[0].name == "error_distance"
+    assert cfg.loss.components[0].weight == 1.0
+    assert cfg.loss.components[1].name == "node_quality"
+    assert cfg.loss.components[1].weight == 0.3

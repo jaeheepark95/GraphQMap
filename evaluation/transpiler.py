@@ -197,6 +197,7 @@ def build_transpiler(
             basis_gates,
             approximation_degree=1.0,
             coupling_map=coupling_map,
+            backend_props=backend.properties(),
         ),
         passes.Optimize1qGatesDecomposition(basis_gates),
         passes.CommutativeCancellation(),
@@ -209,6 +210,7 @@ def build_transpiler(
             basis_gates,
             approximation_degree=1.0,
             coupling_map=coupling_map,
+            backend_props=backend.properties(),
         ),
         passes.Optimize1qGatesDecomposition(basis_gates),
     ]
@@ -225,8 +227,13 @@ def build_transpiler(
         if hasattr(target, "_instruction_durations")
         else None
     )
+    granularity = target.timing_constraints().granularity if hasattr(target, "timing_constraints") else 1
+    min_length = target.timing_constraints().min_length if hasattr(target, "timing_constraints") else 1
+    acquire_alignment = target.timing_constraints().acquire_alignment if hasattr(target, "timing_constraints") else 1
     _sched = [
         passes.TimeUnitConversion(instruction_durations),
+        passes.ValidatePulseGates(granularity=granularity, min_length=min_length),
+        passes.AlignMeasures(alignment=acquire_alignment),
     ]
 
     # --- Build PassManager ---

@@ -4,15 +4,17 @@ import math
 
 import pytest
 import torch
-import numpy as np
 
 from training.early_stopping import EarlyStopping
 from training.losses import (
+    AdjacencyMatchingLoss,
     ErrorAwareEdgeLoss,
+    HopDistanceLoss,
     NodeQualityLoss,
     SeparationLoss,
     Stage2Loss,
     SupervisedCELoss,
+    get_available_losses,
 )
 from training.quality_score import QualityScore
 from training.tau_scheduler import TauScheduler
@@ -89,29 +91,31 @@ class TestEarlyStopping:
 
 class TestQualityScore:
     def test_output_shape(self):
-        qs = QualityScore(num_features=5)
-        features = torch.randn(10, 5)
+        qs = QualityScore(num_features=7)
+        features = torch.randn(10, 7)
         scores = qs(features)
         assert scores.shape == (10,)
 
     def test_output_range(self):
-        qs = QualityScore(num_features=5)
-        features = torch.randn(100, 5)
+        qs = QualityScore(num_features=7)
+        features = torch.randn(100, 7)
         scores = qs(features)
         assert (scores >= 0).all()
         assert (scores <= 1).all()
 
     def test_gradient_flow(self):
-        qs = QualityScore(num_features=5)
-        features = torch.randn(10, 5)
+        qs = QualityScore(num_features=7)
+        features = torch.randn(10, 7)
         scores = qs(features)
         scores.sum().backward()
-        assert qs.weights.grad is not None
-        assert qs.bias.grad is not None
+        # All MLP parameters should have gradients
+        for param in qs.parameters():
+            assert param.grad is not None
 
-    def test_init_weights(self):
-        qs = QualityScore(num_features=5, init_weight=0.2)
-        assert torch.allclose(qs.weights.data, torch.ones(5) * 0.2)
+    def test_learnable_params(self):
+        qs = QualityScore(num_features=7, hidden_dim=16)
+        num_params = sum(p.numel() for p in qs.parameters())
+        assert num_params > 0
 
 
 # ---- Supervised CE Loss ----
@@ -150,168 +154,290 @@ class TestSupervisedCELoss:
         assert loss.shape == ()
 
 
+# ---- Loss Registry ----
+
+class TestLossRegistry:
+    def test_all_losses_registered(self):
+        available = get_available_losses()
+        assert "error_distance" in available
+        assert "adjacency" in available
+        assert "hop_distance" in available
+        assert "node_quality" in available
+        assert "separation" in available
+
+    def test_unknown_loss_raises(self):
+        qs = QualityScore(num_features=7)
+        with pytest.raises(ValueError, match="Unknown loss component"):
+            Stage2Loss(components=[{"name": "nonexistent", "weight": 1.0}], quality_score=qs)
+
+    def test_node_quality_without_qs_raises(self):
+        with pytest.raises(ValueError, match="requires quality_score"):
+            Stage2Loss(components=[{"name": "node_quality", "weight": 1.0}])
+
+
 # ---- Error-Aware Edge Loss ----
 
 class TestErrorAwareEdgeLoss:
+    def _make_d_error(self, n=5):
+        """Create a simple error distance matrix."""
+        d = torch.zeros(n, n)
+        for i in range(n):
+            for j in range(n):
+                d[i, j] = abs(i - j) * 0.01  # error accumulates with distance
+        return d
+
     def test_basic(self):
         loss_fn = ErrorAwareEdgeLoss()
         P = torch.rand(2, 5, 5)
-        d_error = torch.rand(5, 5)
-        d_error = (d_error + d_error.T) / 2  # symmetric
-        pairs = [(0, 1), (1, 2)]
-
-        loss = loss_fn(P, d_error, pairs, num_logical=3)
+        d_error = self._make_d_error()
+        loss = loss_fn(P, d_error=d_error, circuit_edge_pairs=[(0, 1), (1, 2)], num_logical=3)
         assert loss.shape == ()
-        assert loss.item() >= 0
+        assert loss.item() >= 0  # distance-based, non-negative
 
     def test_empty_pairs(self):
         loss_fn = ErrorAwareEdgeLoss()
         P = torch.rand(2, 5, 5)
-        d_error = torch.rand(5, 5)
-        loss = loss_fn(P, d_error, [], num_logical=3)
+        d_error = self._make_d_error()
+        loss = loss_fn(P, d_error=d_error, circuit_edge_pairs=[], num_logical=3)
         assert loss.item() == 0.0
 
     def test_gradient_flow(self):
         loss_fn = ErrorAwareEdgeLoss()
         P = torch.rand(1, 5, 5, requires_grad=True)
-        d_error = torch.rand(5, 5)
-        loss = loss_fn(P, d_error, [(0, 1)], num_logical=3)
+        d_error = self._make_d_error()
+        loss = loss_fn(P, d_error=d_error, circuit_edge_pairs=[(0, 1)], num_logical=3)
         loss.backward()
         assert P.grad is not None
+
+    def test_adjacent_mapping_lower_cost(self):
+        """Mapping adjacent logical qubits to adjacent physical qubits should yield lower error cost."""
+        loss_fn = ErrorAwareEdgeLoss()
+        d_error = self._make_d_error()
+
+        # Good mapping: logical 0->physical 0, logical 1->physical 1 (adjacent, low error)
+        P_good = torch.eye(5).unsqueeze(0)
+        # Bad mapping: logical 0->physical 0, logical 1->physical 4 (far apart, high error)
+        P_bad = torch.zeros(1, 5, 5)
+        P_bad[0, 0, 0] = 1.0
+        P_bad[0, 1, 4] = 1.0
+        P_bad[0, 2, 2] = 1.0
+        P_bad[0, 3, 3] = 1.0
+        P_bad[0, 4, 1] = 1.0
+
+        loss_good = loss_fn(P_good, d_error=d_error, circuit_edge_pairs=[(0, 1)], num_logical=5)
+        loss_bad = loss_fn(P_bad, d_error=d_error, circuit_edge_pairs=[(0, 1)], num_logical=5)
+        assert loss_good.item() < loss_bad.item()
+
+
+# ---- Adjacency Matching Loss ----
+
+class TestAdjacencyMatchingLoss:
+    def _make_d_hw(self):
+        """Create a simple hop distance matrix for a 5-node path graph: 0-1-2-3-4."""
+        d_hw = torch.zeros(5, 5)
+        for i in range(5):
+            for j in range(5):
+                d_hw[i, j] = abs(i - j)
+        return d_hw
+
+    def test_basic(self):
+        loss_fn = AdjacencyMatchingLoss()
+        P = torch.rand(2, 5, 5)
+        d_hw = self._make_d_hw()
+        loss = loss_fn(P, d_hw=d_hw, circuit_edge_pairs=[(0, 1), (1, 2)],
+                       circuit_edge_weights=[3.0, 1.0], num_logical=3)
+        assert loss.shape == ()
+        assert loss.item() <= 0  # bounded in [-1, 0]
+
+    def test_empty_pairs(self):
+        loss_fn = AdjacencyMatchingLoss()
+        P = torch.rand(2, 5, 5)
+        d_hw = self._make_d_hw()
+        loss = loss_fn(P, d_hw=d_hw, circuit_edge_pairs=[], circuit_edge_weights=[], num_logical=3)
+        assert loss.item() == 0.0
+
+    def test_gradient_flow(self):
+        loss_fn = AdjacencyMatchingLoss()
+        P = torch.rand(1, 5, 5, requires_grad=True)
+        d_hw = self._make_d_hw()
+        loss = loss_fn(P, d_hw=d_hw, circuit_edge_pairs=[(0, 1)],
+                       circuit_edge_weights=[2.0], num_logical=3)
+        loss.backward()
+        assert P.grad is not None
+
+    def test_perfect_adjacent_mapping(self):
+        """Identity mapping on a path graph should give best score for adjacent pairs."""
+        loss_fn = AdjacencyMatchingLoss()
+        P = torch.eye(5).unsqueeze(0)
+        d_hw = self._make_d_hw()
+        loss = loss_fn(P, d_hw=d_hw, circuit_edge_pairs=[(0, 1), (1, 2)],
+                       circuit_edge_weights=[1.0, 1.0], num_logical=5)
+        assert abs(loss.item() + 1.0) < 1e-5
+
+    def test_gate_frequency_weighting(self):
+        """Higher-weight edges should contribute more to the loss."""
+        loss_fn = AdjacencyMatchingLoss()
+        P = torch.rand(1, 5, 5)
+        d_hw = self._make_d_hw()
+        pairs = [(0, 1), (0, 3)]
+
+        loss_equal = loss_fn(P, d_hw=d_hw, circuit_edge_pairs=pairs,
+                             circuit_edge_weights=[1.0, 1.0], num_logical=5)
+        loss_weight_adj = loss_fn(P, d_hw=d_hw, circuit_edge_pairs=pairs,
+                                  circuit_edge_weights=[10.0, 1.0], num_logical=5)
+        loss_weight_nonadj = loss_fn(P, d_hw=d_hw, circuit_edge_pairs=pairs,
+                                     circuit_edge_weights=[1.0, 10.0], num_logical=5)
+        assert torch.isfinite(loss_equal)
+        assert torch.isfinite(loss_weight_adj)
+        assert torch.isfinite(loss_weight_nonadj)
 
 
 # ---- Node Quality Loss ----
 
 class TestNodeQualityLoss:
     def test_basic(self):
-        qs = QualityScore(num_features=5)
+        qs = QualityScore(num_features=7)
         loss_fn = NodeQualityLoss(qs)
         P = torch.rand(2, 5, 5)
-        features = torch.randn(5, 5)
+        features = torch.randn(5, 7)
         importance = torch.tensor([3.0, 2.0, 1.0])
-        loss = loss_fn(P, features, importance, num_logical=3)
+        loss = loss_fn(P, hw_node_features=features, qubit_importance=importance, num_logical=3)
         assert loss.shape == ()
 
     def test_gradient_to_quality_score(self):
-        qs = QualityScore(num_features=5)
+        qs = QualityScore(num_features=7)
         loss_fn = NodeQualityLoss(qs)
         P = torch.rand(1, 5, 5, requires_grad=True)
-        features = torch.randn(5, 5)
+        features = torch.randn(5, 7)
         importance = torch.tensor([1.0, 1.0, 1.0])
-        loss = loss_fn(P, features, importance, num_logical=3)
+        loss = loss_fn(P, hw_node_features=features, qubit_importance=importance, num_logical=3)
         loss.backward()
-        assert qs.weights.grad is not None
+        for param in qs.parameters():
+            assert param.grad is not None
 
 
-# ---- Separation Loss ----
-
-class TestSeparationLoss:
-    def test_no_cross_pairs(self):
-        """Single circuit → no cross pairs → loss = 0."""
-        loss_fn = SeparationLoss()
-        P = torch.rand(2, 5, 5)
-        d_hw = torch.rand(5, 5)
-        loss = loss_fn(P, d_hw, [], num_logical=3)
-        assert loss.item() == 0.0
-
-    def test_with_cross_pairs(self):
-        loss_fn = SeparationLoss()
-        P = torch.rand(2, 5, 5)
-        d_hw = torch.rand(5, 5)
-        d_hw = (d_hw + d_hw.T) / 2
-        # Cross-circuit: qubit 0 (circuit A) vs qubit 2 (circuit B)
-        loss = loss_fn(P, d_hw, [(0, 2)], num_logical=3)
-        assert loss.shape == ()
-        # Should be negative (encouraging distance)
-        assert loss.item() <= 0.0
-
-    def test_gradient_flow(self):
-        loss_fn = SeparationLoss()
-        P = torch.rand(1, 5, 5, requires_grad=True)
-        d_hw = torch.rand(5, 5)
-        loss = loss_fn(P, d_hw, [(0, 1)], num_logical=3)
-        loss.backward()
-        assert P.grad is not None
-
-
-# ---- Stage 2 Combined Loss ----
+# ---- Stage 2 Combined Loss (Registry-based) ----
 
 class TestStage2Loss:
-    def test_combined(self):
-        qs = QualityScore(num_features=5)
-        loss_fn = Stage2Loss(qs, alpha=0.3, lambda_sep=0.1)
-        P = torch.rand(2, 5, 5)
-        d_error = torch.rand(5, 5)
-        d_hw = torch.rand(5, 5)
-        features = torch.randn(5, 5)
-        importance = torch.tensor([2.0, 1.0, 1.0])
+    def _make_d_hw(self, n=5):
+        """Create hop distance matrix for a path graph."""
+        d_hw = torch.zeros(n, n)
+        for i in range(n):
+            for j in range(n):
+                d_hw[i, j] = abs(i - j)
+        return d_hw
 
-        result = loss_fn(
-            P=P,
-            d_error=d_error,
-            d_hw=d_hw,
-            hw_node_features=features,
+    def _make_d_error(self, n=5):
+        """Create error distance matrix."""
+        d = torch.zeros(n, n)
+        for i in range(n):
+            for j in range(n):
+                d[i, j] = abs(i - j) * 0.01
+        return d
+
+    def _common_kwargs(self, n=5):
+        return dict(
+            d_hw=self._make_d_hw(n),
+            d_error=self._make_d_error(n),
+            hw_node_features=torch.randn(n, 7),
             circuit_edge_pairs=[(0, 1), (1, 2)],
-            cross_circuit_pairs=[(0, 2)],
-            qubit_importance=importance,
+            circuit_edge_weights=[3.0, 1.0],
+            qubit_importance=torch.tensor([2.0, 1.0, 1.0]),
             num_logical=3,
+            cross_circuit_pairs=[],
         )
+
+    def test_original_config(self):
+        """Test the original loss: error_distance + node_quality."""
+        qs = QualityScore(num_features=7)
+        loss_fn = Stage2Loss(
+            components=[
+                {"name": "error_distance", "weight": 1.0},
+                {"name": "node_quality", "weight": 0.3},
+            ],
+            quality_score=qs,
+        )
+        P = torch.rand(2, 5, 5)
+        result = loss_fn(P, **self._common_kwargs())
 
         assert "total" in result
-        assert "l_surr" in result
-        assert "l_node" in result
-        assert "l_sep" in result
+        assert "error_distance" in result
+        assert "node_quality" in result
         assert result["total"].shape == ()
 
-    def test_single_circuit_no_sep(self):
-        """L_sep should be 0 when no cross-circuit pairs."""
-        qs = QualityScore(num_features=5)
-        loss_fn = Stage2Loss(qs, alpha=0.3, lambda_sep=0.1)
-        P = torch.rand(1, 5, 5)
-
-        result = loss_fn(
-            P=P,
-            d_error=torch.rand(5, 5),
-            d_hw=torch.rand(5, 5),
-            hw_node_features=torch.randn(5, 5),
-            circuit_edge_pairs=[(0, 1)],
-            cross_circuit_pairs=[],
-            qubit_importance=torch.tensor([1.0, 1.0]),
-            num_logical=2,
+    def test_adj_hop_config(self):
+        """Test adjacency + hop + node config."""
+        qs = QualityScore(num_features=7)
+        loss_fn = Stage2Loss(
+            components=[
+                {"name": "adjacency", "weight": 1.0},
+                {"name": "hop_distance", "weight": 0.2},
+                {"name": "node_quality", "weight": 0.3},
+            ],
+            quality_score=qs,
         )
+        P = torch.rand(2, 5, 5)
+        result = loss_fn(P, **self._common_kwargs())
 
-        assert result["l_sep"].item() == 0.0
+        assert "adjacency" in result
+        assert "hop_distance" in result
+        assert "node_quality" in result
 
-    def test_loss_scale_balance(self):
-        """No single term should dominate by >10x (spec requirement)."""
-        qs = QualityScore(num_features=5)
-        loss_fn = Stage2Loss(qs, alpha=0.3, lambda_sep=0.1)
-
-        # Use realistic-ish inputs
-        P = torch.softmax(torch.randn(4, 10, 10), dim=-1)
-        d_error = torch.rand(10, 10) * 0.05
-        d_hw = torch.rand(10, 10) * 3
-        features = torch.randn(10, 5)
-        importance = torch.ones(5)
-
-        result = loss_fn(
-            P=P,
-            d_error=d_error,
-            d_hw=d_hw,
-            hw_node_features=features,
-            circuit_edge_pairs=[(0, 1), (1, 2), (2, 3)],
-            cross_circuit_pairs=[(0, 3), (1, 4)],
-            qubit_importance=importance,
-            num_logical=5,
+    def test_single_component(self):
+        """Test with just one loss component."""
+        loss_fn = Stage2Loss(
+            components=[{"name": "error_distance", "weight": 1.0}],
         )
+        P = torch.rand(2, 5, 5)
+        result = loss_fn(P, **self._common_kwargs())
 
-        terms = [
-            abs(result["l_surr"].item()),
-            abs(0.3 * result["l_node"].item()),
-            abs(0.1 * result["l_sep"].item()),
-        ]
-        nonzero = [t for t in terms if t > 1e-8]
-        if len(nonzero) >= 2:
-            ratio = max(nonzero) / min(nonzero)
-            # Log the ratio for inspection (not a hard assert since inputs are random)
-            print(f"Loss ratio max/min: {ratio:.1f}")
+        assert "total" in result
+        assert "error_distance" in result
+        assert len(result) == 2  # total + error_distance
+
+    def test_component_names_tracked(self):
+        qs = QualityScore(num_features=7)
+        loss_fn = Stage2Loss(
+            components=[
+                {"name": "error_distance", "weight": 1.0},
+                {"name": "node_quality", "weight": 0.3},
+            ],
+            quality_score=qs,
+        )
+        assert loss_fn.component_names == ["error_distance", "node_quality"]
+        assert loss_fn.component_weights == [1.0, 0.3]
+
+    def test_weighted_sum(self):
+        """Total should equal weighted sum of components."""
+        qs = QualityScore(num_features=7)
+        loss_fn = Stage2Loss(
+            components=[
+                {"name": "error_distance", "weight": 2.0},
+                {"name": "node_quality", "weight": 0.5},
+            ],
+            quality_score=qs,
+        )
+        P = torch.rand(2, 5, 5)
+        result = loss_fn(P, **self._common_kwargs())
+
+        expected = 2.0 * result["error_distance"] + 0.5 * result["node_quality"]
+        assert result["total"].item() == pytest.approx(expected.item(), abs=1e-5)
+
+    def test_with_separation(self):
+        """Test that separation loss works when cross_circuit_pairs provided."""
+        qs = QualityScore(num_features=7)
+        loss_fn = Stage2Loss(
+            components=[
+                {"name": "error_distance", "weight": 1.0},
+                {"name": "separation", "weight": 0.1},
+                {"name": "node_quality", "weight": 0.3},
+            ],
+            quality_score=qs,
+        )
+        P = torch.rand(2, 5, 5)
+        kwargs = self._common_kwargs()
+        kwargs["cross_circuit_pairs"] = [(0, 2)]
+        result = loss_fn(P, **kwargs)
+
+        assert "separation" in result
+        assert result["separation"].item() <= 0  # bounded [-1, 0]

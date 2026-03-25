@@ -34,8 +34,6 @@ def _set_seed(seed: int) -> None:
     """Set random seeds for reproducibility."""
     import random
 
-    import numpy as np
-
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -69,7 +67,7 @@ def _build_val_pst_fn(cfg, device: torch.device):
     from data.circuit_graph import build_circuit_graph
     from data.hardware_graph import build_hardware_graph, get_backend
     from evaluation.benchmark import BENCHMARK_CIRCUITS, load_benchmark_circuit
-    from evaluation.pst import create_ideal_simulator, create_noisy_simulator
+    from evaluation.pst import compute_pst, create_ideal_simulator, create_noisy_simulator
     from evaluation.transpiler import transpile_with_timing
 
     # Use first test backend for validation
@@ -79,7 +77,7 @@ def _build_val_pst_fn(cfg, device: torch.device):
     backend = get_backend(val_backend_name)
     num_physical = backend.target.num_qubits
     hw_graph = build_hardware_graph(backend)
-    tau = getattr(cfg.sinkhorn, "tau", 0.05)
+    tau = getattr(cfg.sinkhorn, "tau_min", getattr(cfg.sinkhorn, "tau", 0.05))
 
     ideal_sim = create_ideal_simulator(backend)
     noisy_sim = create_noisy_simulator(backend)
@@ -125,15 +123,17 @@ def _build_val_pst_fn(cfg, device: torch.device):
                     routing_method="sabre",
                     seed=cfg.seed,
                 )
-                ideal_result = ideal_sim.run(tc, shots=1024).result()
-                noisy_result = noisy_sim.run(tc, shots=1024).result()
-                ideal_counts = ideal_result.get_counts()
-                noisy_counts = noisy_result.get_counts()
+                ideal_counts = ideal_sim.run(tc, shots=4096).result().get_counts()
 
-                # PST = probability of correct output
-                max_state = max(ideal_counts, key=ideal_counts.get)
-                pst = noisy_counts.get(max_state, 0) / 1024
-                pst_values.append(pst)
+                # Average over multiple noisy reps to reduce measurement noise
+                rep_psts = []
+                for _ in range(3):
+                    noisy_counts = noisy_sim.run(tc, shots=4096).result().get_counts()
+                    p = compute_pst(noisy_counts, ideal_counts)
+                    if isinstance(p, list):
+                        p = sum(p) / len(p)
+                    rep_psts.append(p)
+                pst_values.append(float(np.mean(rep_psts)))
             except Exception as e:
                 logger.warning("  PST val skip %s: %s", cname, e)
 
@@ -142,6 +142,31 @@ def _build_val_pst_fn(cfg, device: torch.device):
         return avg_pst
 
     return val_pst_fn
+
+
+def _generate_plots(cfg) -> None:
+    """Generate training visualizations after training completes."""
+    from pathlib import Path
+
+    import matplotlib
+    matplotlib.use("Agg")
+
+    from scripts.visualize import detect_stage, plot_stage1, plot_stage2
+
+    run_dir = Path(cfg.checkpoint_dir).parent
+    save_dir = run_dir / "plots"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    stage = detect_stage(run_dir)
+
+    if stage == 1:
+        plot_stage1([run_dir], save_dir=save_dir)
+    elif stage == 2:
+        plot_stage2([run_dir], save_dir=save_dir)
+    else:
+        logger.warning("Could not detect stage for plotting")
+        return
+
+    logger.info("Plots saved to %s", save_dir)
 
 
 def main() -> None:
@@ -200,6 +225,7 @@ def main() -> None:
             )
 
         trainer.run(train_loader, val_loader, queko_train_loader, queko_val_loader)
+        _generate_plots(cfg)
 
     elif stage == 2:
         model = GraphQMap.from_config(cfg)
@@ -209,7 +235,11 @@ def main() -> None:
         if pretrained:
             logger.info("Loading pretrained checkpoint: %s", pretrained)
             ckpt = torch.load(pretrained, map_location=device, weights_only=True)
-            model.load_state_dict(ckpt["model_state_dict"])
+            missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+            if missing:
+                logger.info("New keys (randomly initialized): %s", missing)
+            if unexpected:
+                logger.warning("Unexpected keys in checkpoint: %s", unexpected)
 
         trainer = Stage2Trainer(model, cfg, device)
 
@@ -231,6 +261,7 @@ def main() -> None:
         # PST validation function using benchmark circuits on a test backend
         val_pst_fn = _build_val_pst_fn(cfg, device)
         trainer.run(train_loader, val_pst_fn=val_pst_fn)
+        _generate_plots(cfg)
 
     else:
         raise ValueError(f"Unknown stage: {stage}")

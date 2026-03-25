@@ -1,6 +1,5 @@
 """Tests for Phase 4: label generation, dataset, dataloader, multi-prog sampler."""
 
-import tempfile
 from pathlib import Path
 
 import numpy as np

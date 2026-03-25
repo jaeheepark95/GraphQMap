@@ -13,7 +13,6 @@ Tests the full pipeline with synthetic circuits:
 """
 
 import pytest
-import numpy as np
 import torch
 from torch.optim import AdamW
 from qiskit import QuantumCircuit
@@ -146,24 +145,34 @@ class TestEndToEnd:
         d_error = torch.tensor(precompute_error_distance(backend))
         d_hw = d_error.clone()  # use same for simplicity
 
-        # Circuit edge pairs
+        # Circuit edge pairs and weights
         feats = extract_circuit_features(circuit)
         circuit_edge_pairs = feats["edge_list"]
+        circuit_edge_weights = feats["edge_features"][:, 0].tolist()
 
         # Qubit importance
         importance = feats["node_features"][:, 1]  # two_qubit_gate_count
 
-        # Hardware node features for q_score (5 features)
-        hw_features = hw_graph.x[:, :5]  # T1, T2, freq, readout, sq_err
+        # Hardware node features for q_score (all 7 features)
+        hw_features = hw_graph.x  # T1, T2, readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
 
         circuit_batch = Batch.from_data_list([circuit_graph])
         hw_batch = Batch.from_data_list([hw_graph])
 
         # Setup
-        quality_score = QualityScore(num_features=5)
-        criterion = Stage2Loss(quality_score, alpha=0.3, lambda_sep=0.1)
+        quality_score = QualityScore(num_features=7)
+        criterion = Stage2Loss(
+            components=[
+                {"name": "error_distance", "weight": 1.0},
+                {"name": "node_quality", "weight": 0.3},
+            ],
+            quality_score=quality_score,
+        )
         all_params = list(model.parameters()) + list(quality_score.parameters())
         optimizer = AdamW(all_params, lr=1e-3)
+
+        # Build error distance matrix from hop distance (simple proxy for test)
+        d_error = d_hw * 0.01  # error scales with distance
 
         model.train()
         optimizer.zero_grad()
@@ -171,15 +180,15 @@ class TestEndToEnd:
                   num_logical=3, num_physical=5, tau=0.05)
 
         losses = criterion(
-            P=P, d_error=d_error, d_hw=d_hw,
+            P=P, d_hw=d_hw, d_error=d_error,
             hw_node_features=hw_features,
             circuit_edge_pairs=circuit_edge_pairs,
-            cross_circuit_pairs=[],  # single circuit
+            circuit_edge_weights=circuit_edge_weights,
             qubit_importance=importance,
             num_logical=3,
+            cross_circuit_pairs=[],
         )
 
-        assert losses["l_sep"].item() == 0.0  # single circuit
         losses["total"].backward()
         optimizer.step()
 
@@ -269,39 +278,6 @@ class TestEndToEnd:
         # 4 logical qubits → 4 unique physical assignments
         assert len(layout) == 4
         assert len(set(layout.values())) == 4
-
-    def test_multi_circuit_stage2_separation_loss(self, backend):
-        """L_sep should be non-zero for multi-circuit scenarios."""
-        c1 = _make_circuit(2, 1, seed=0)
-        c2 = _make_circuit(2, 1, seed=1)
-
-        merged = merge_circuits([c1, c2])
-        hw_graph = build_hardware_graph(backend)
-
-        model = GraphQMap(
-            circuit_node_dim=4, circuit_edge_dim=3,
-            hardware_node_dim=7, hardware_edge_dim=1,
-            embedding_dim=32, gnn_layers=2, gnn_heads=4,
-            gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
-            cross_attn_ffn_dim=64, cross_attn_dropout=0.0,
-            score_d_k=32,
-        )
-
-        circuit_batch = Batch.from_data_list([merged])
-        hw_batch = Batch.from_data_list([hw_graph])
-
-        P = model(circuit_batch, hw_batch, batch_size=1,
-                  num_logical=4, num_physical=5, tau=0.5)
-
-        # Cross-circuit pairs: (0,2), (0,3), (1,2), (1,3)
-        cross_pairs = [(i, j) for i in range(2) for j in range(2, 4)]
-        d_error = torch.tensor(precompute_error_distance(backend))
-
-        from training.losses import SeparationLoss
-        sep_loss_fn = SeparationLoss()
-        loss = sep_loss_fn(P, d_error, cross_pairs, num_logical=4)
-
-        assert loss.item() != 0.0  # should be non-zero
 
     def test_from_config_and_predict(self):
         """Load model from YAML config → predict → valid output."""

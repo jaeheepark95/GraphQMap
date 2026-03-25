@@ -50,10 +50,10 @@ class MappingSample:
         num_physical: Number of physical qubits.
         layout: Raw layout list (optional).
         d_error: (h, h) error-weighted distance matrix (Stage 2).
-        d_hw: (h, h) hardware distance matrix for separation loss (Stage 2).
-        hw_node_features: (h, 5) quality features for QualityScore (Stage 2).
+        d_hw: (h, h) hardware distance matrix (Stage 2).
+        hw_node_features: (h, 7) quality features for QualityScore (Stage 2).
         circuit_edge_pairs: List of (i, j) logical qubit pairs with 2Q gates.
-        cross_circuit_pairs: List of (i, j) cross-circuit pairs (multi-prog).
+        circuit_edge_weights: Per-edge interaction count (parallel to circuit_edge_pairs).
         qubit_importance: (l,) 2Q gate count per logical qubit.
     """
 
@@ -70,7 +70,7 @@ class MappingSample:
         d_hw: np.ndarray | None = None,
         hw_node_features: np.ndarray | None = None,
         circuit_edge_pairs: list[tuple[int, int]] | None = None,
-        cross_circuit_pairs: list[tuple[int, int]] | None = None,
+        circuit_edge_weights: list[float] | None = None,
         qubit_importance: np.ndarray | None = None,
     ) -> None:
         self.circuit_graph = circuit_graph
@@ -84,7 +84,7 @@ class MappingSample:
         self.d_hw = d_hw
         self.hw_node_features = hw_node_features
         self.circuit_edge_pairs = circuit_edge_pairs or []
-        self.cross_circuit_pairs = cross_circuit_pairs or []
+        self.circuit_edge_weights = circuit_edge_weights or []
         self.qubit_importance = qubit_importance
 
 
@@ -218,6 +218,7 @@ class LazyMappingDataset(Dataset):
         d_hw = None
         hw_feats = None
         circuit_edge_pairs = cache_data.get("circuit_edge_pairs", [])
+        circuit_edge_weights = cache_data.get("circuit_edge_weights", [])
         qubit_importance = cache_data.get("qubit_importance")
 
         if meta.include_stage2_fields:
@@ -237,6 +238,7 @@ class LazyMappingDataset(Dataset):
             d_hw=d_hw,
             hw_node_features=hw_feats,
             circuit_edge_pairs=circuit_edge_pairs,
+            circuit_edge_weights=circuit_edge_weights,
             qubit_importance=qubit_importance,
         )
 
@@ -307,11 +309,13 @@ class BackendBucketSampler(Sampler):
         max_total_nodes: int = 512,
         shuffle: bool = True,
         seed: int = 42,
+        large_backend_boost: float = 1.0,
     ) -> None:
         self.dataset = dataset
         self.max_total_nodes = max_total_nodes
         self.shuffle = shuffle
         self.rng = np.random.RandomState(seed)
+        self.large_backend_boost = large_backend_boost
 
     def _build_groups(self) -> dict[tuple[str, int], list[int]]:
         """Group sample indices by (backend_name, num_logical)."""
@@ -353,6 +357,18 @@ class BackendBucketSampler(Sampler):
             num_physical = self._get_num_physical(indices[0])
             batch_size = max(1, self.max_total_nodes // num_physical)
 
+            # Oversample large backends (50Q+) to improve generalization
+            if self.large_backend_boost > 1.0 and num_physical >= 50:
+                repeat = int(self.large_backend_boost)
+                remainder = self.large_backend_boost - repeat
+                expanded = indices * repeat
+                extra = int(len(indices) * remainder)
+                if extra > 0:
+                    expanded += list(self.rng.choice(indices, size=extra, replace=True))
+                indices = expanded
+                if self.shuffle:
+                    self.rng.shuffle(indices)
+
             for i in range(0, len(indices), batch_size):
                 batch = indices[i : i + batch_size]
                 all_batches.append(batch)
@@ -392,9 +408,9 @@ def collate_mapping_samples(
         Stage 2 fields (present if first sample has them):
         - d_error: (h, h) tensor
         - d_hw: (h, h) tensor
-        - hw_node_features: (h, 5) tensor
+        - hw_node_features: (h, 7) tensor
         - circuit_edge_pairs: list of (i, j) tuples
-        - cross_circuit_pairs: list of (i, j) tuples
+        - circuit_edge_weights: list of interaction counts per edge
         - qubit_importance: (l,) tensor
     """
     circuit_graphs = [s.circuit_graph for s in samples]
@@ -438,7 +454,7 @@ def collate_mapping_samples(
 
     # Per-sample circuit metadata
     result["circuit_edge_pairs"] = s0.circuit_edge_pairs
-    result["cross_circuit_pairs"] = s0.cross_circuit_pairs
+    result["circuit_edge_weights"] = s0.circuit_edge_weights
     if s0.qubit_importance is not None:
         result["qubit_importance"] = torch.tensor(
             s0.qubit_importance, dtype=torch.float32,
@@ -685,6 +701,7 @@ def _load_split_eager(
         hw_feats = None
         qubit_importance = None
         circuit_edge_pairs = []
+        circuit_edge_weights = []
         if include_stage2_fields:
             d_error = _get_error_distance(backend_name)
             d_hw = _get_hop_distance(backend_name)
@@ -694,6 +711,7 @@ def _load_split_eager(
             qi_sum = qi.sum()
             qubit_importance = qi / qi_sum if qi_sum > 0 else np.ones(num_logical) / num_logical
             circuit_edge_pairs = feats["edge_list"]
+            circuit_edge_weights = feats["edge_features"][:, 0].tolist()
 
         sample = MappingSample(
             circuit_graph=circuit_graph,
@@ -707,6 +725,7 @@ def _load_split_eager(
             d_hw=d_hw,
             hw_node_features=hw_feats,
             circuit_edge_pairs=circuit_edge_pairs,
+            circuit_edge_weights=circuit_edge_weights,
             qubit_importance=qubit_importance,
         )
         dataset.add_sample(sample)

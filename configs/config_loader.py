@@ -46,6 +46,11 @@ class Config:
         for key, value in d.items():
             if isinstance(value, dict):
                 setattr(self, key, Config(value))
+            elif isinstance(value, list):
+                setattr(self, key, [
+                    Config(item) if isinstance(item, dict) else item
+                    for item in value
+                ])
             else:
                 setattr(self, key, value)
 
@@ -55,6 +60,11 @@ class Config:
         for key, value in self.__dict__.items():
             if isinstance(value, Config):
                 result[key] = value.to_dict()
+            elif isinstance(value, list):
+                result[key] = [
+                    item.to_dict() if isinstance(item, Config) else item
+                    for item in value
+                ]
             else:
                 result[key] = value
         return result
@@ -100,6 +110,19 @@ def _setup_run_dir(cfg_dict: dict[str, Any], name: str | None, config_path: str)
     # Save source config path for reference
     with open(run_dir / "source_config.txt", "w") as f:
         f.write(config_path)
+
+    # Generate experiment note template
+    overrides = [f"  - {k}: {v}" for k, v in cfg_dict.items()
+                 if k in ("pretrained_checkpoint",)]
+    note_path = run_dir / "note.md"
+    if not note_path.exists():
+        with open(note_path, "w") as f:
+            f.write(f"# {run_name}\n\n")
+            f.write(f"**Stage**: {stage}\n")
+            f.write(f"**Base config**: {config_path}\n\n")
+            f.write("## What changed\n\n- \n\n")
+            f.write("## Hypothesis\n\n\n\n")
+            f.write("## Result\n\n\n")
 
 
 def parse_args_with_config() -> Config:

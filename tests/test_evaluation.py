@@ -1,7 +1,6 @@
 """Tests for evaluation components: PST, baselines, metrics."""
 
 import pytest
-import numpy as np
 from qiskit import QuantumCircuit
 
 from data.hardware_graph import get_backend

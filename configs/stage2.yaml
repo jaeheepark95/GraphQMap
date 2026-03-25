@@ -34,11 +34,13 @@ model:
 
   score_head:
     d_k: 64
+    noise_bias_dim: 7          # hardware node features for score bias (0 to disable)
 
 # ---- Sinkhorn ----
 sinkhorn:
-  tau: 0.05                  # fixed at tau_min in stage 2
-  schedule: fixed
+  tau_max: 1.0               # start soft for gradient flow
+  tau_min: 0.05              # final sharp temperature
+  schedule: exponential      # exponential decay from tau_max to tau_min
   max_iter: 20
   tolerance: 1.0e-6
 
@@ -47,14 +49,14 @@ training:
   stage: 2
   optimizer:
     type: adamw
-    lr: 1.0e-4
+    lr: 5.0e-4
     weight_decay: 1.0e-4
   scheduler:
     type: cosine_annealing
     T_max: 100
-    eta_min: 1.0e-6
-  warmup_epochs: 5
-  grad_clip_norm: 0.5
+    eta_min: 1.0e-5
+  warmup_epochs: 2
+  grad_clip_norm: 2.0
 
   max_epochs: 100
   early_stopping:
@@ -69,12 +71,17 @@ training:
     convergence_checks: 3      # stop if N consecutive < min_delta
 
 # ---- Loss ----
+# Components are registered loss modules. Add/remove/reorder freely.
+# Each component: name (from registry), weight (multiplier in total loss).
+# Available: error_distance, adjacency, hop_distance, node_quality, separation
 loss:
   type: surrogate
-  weights:
-    l_surr: 1.0               # error-aware edge quality (primary)
-    alpha: 0.1                 # L_node: NISQ node quality (bounded [-1,0] after normalization)
-    lambda_sep: 0.1            # L_sep: multi-programming separation
+  components:
+    - name: error_distance       # L_surr: error-weighted shortest path distance (primary)
+      weight: 1.0
+    - name: node_quality         # L_node: NISQ node quality (bounded [-1,0])
+      weight: 0.3
+
 
 # ---- Data ----
 data:
@@ -96,6 +103,7 @@ data:
 batching:
   max_total_nodes: 512
   backend_balanced: true
+  large_backend_boost: 2.0    # oversample 50Q+ backends by this factor
 
 # ---- Hardware Backends ----
 backends:
@@ -161,12 +169,9 @@ backends:
     - FakeQuebec
     - FakeSherbrooke
     - FakeWashington
-    # Synthetic backends (QUEKO + MLQD)
-    - queko_aspen4           # 16Q
-    - queko_tokyo            # 20Q
-    - queko_rochester        # 53Q
-    - queko_sycamore         # 54Q
-    - mlqd_grid5x5           # 25Q
+    # NOTE: Synthetic backends (queko_*, mlqd_*) are Stage 1 only.
+    # Stage 2 uses 55 real Qiskit backends; QUEKO/MLQD circuits are
+    # randomly re-assigned to real backends at data load time.
   test:
     - FakeToronto            # 27Q
     - FakeBrooklyn           # 65Q

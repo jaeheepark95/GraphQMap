@@ -1,11 +1,11 @@
 """GraphQMap evaluation entry point.
 
 Usage:
-    # Model evaluation with baselines
-    python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto --reps 3
+    # Model evaluation with baselines (auto-saves to runs/eval/<run_name>/)
+    python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto brooklyn torino --reps 3
 
-    # Save results to CSV
-    python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto --reps 3 --output results.csv
+    # Custom output path
+    python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto --reps 3 --output runs/eval/custom/eval_results.csv
 
     # Benchmark mode (baselines only, no model)
     python evaluate.py --benchmark --backend toronto brooklyn torino
@@ -63,6 +63,63 @@ MODEL_ROUTING_VARIANTS = [
     ("sabre", "OURS+SABRE"),
     ("nassc", "OURS+NASSC"),
 ]
+
+
+def _save_pst_tables(raw_df: pd.DataFrame, eval_dir: Path) -> None:
+    """Save PST summary tables as CSV and Markdown."""
+    method_order = [label for _, _, label in BASELINE_COMBOS] + [label for _, label in MODEL_ROUTING_VARIANTS]
+
+    # Average across reps
+    pivot = raw_df.groupby(["backend", "circuit", "method"])["pst"].mean().reset_index()
+    table = pivot.pivot_table(index=["backend", "circuit"], columns="method", values="pst")
+    table = table[[m for m in method_order if m in table.columns]]
+
+    # Build table with per-backend averages
+    backends = sorted(table.index.get_level_values(0).unique())
+    parts = []
+    for backend in backends:
+        sub = table.loc[backend]
+        avg = pd.DataFrame([sub.mean()], index=pd.MultiIndex.from_tuples([(backend, "AVG")]))
+        avg.columns = table.columns
+        parts.append(pd.concat([table.loc[[backend]], avg]))
+    full_table = pd.concat(parts)
+
+    # Save CSV
+    full_table.to_csv(eval_dir / "pst_summary.csv", float_format="%.4f")
+
+    # Save Markdown (per-backend tables + per-circuit detail)
+    with open(eval_dir / "pst_summary.md", "w") as f:
+        f.write("# PST Evaluation Results\n\n")
+        for backend in backends:
+            f.write(f"## {backend.capitalize()}\n\n")
+            sub = full_table.loc[backend]
+            f.write(sub.to_markdown(floatfmt=".4f"))
+            f.write("\n\n")
+
+        # Per-circuit comparison across all backends
+        f.write("## Per-Circuit Comparison (All Backends)\n\n")
+        for backend in backends:
+            f.write(f"### {backend.capitalize()}\n\n")
+            sub = table.loc[backend]
+            f.write("| Circuit |")
+            for m in sub.columns:
+                f.write(f" {m} |")
+            f.write("\n|---------|")
+            for _ in sub.columns:
+                f.write(":---:|")
+            f.write("\n")
+            for circuit in sub.index:
+                f.write(f"| {circuit} |")
+                for m in sub.columns:
+                    f.write(f" {sub.loc[circuit, m]:.4f} |")
+                f.write("\n")
+            avg = sub.mean()
+            f.write(f"| **AVG** |")
+            for m in sub.columns:
+                f.write(f" **{avg[m]:.4f}** |")
+            f.write("\n\n")
+
+    logger.info("PST tables saved to %s", eval_dir)
 
 
 def _safe_simulate(transpiled_circuit, ideal_sim, noisy_sim, shots):
@@ -126,7 +183,7 @@ def evaluate_model(args, cfg) -> None:
 
     # Determine test circuits and model params
     circuit_names = args.circuits or BENCHMARK_CIRCUITS
-    tau = getattr(cfg.sinkhorn, "tau", 0.05)
+    tau = getattr(cfg.sinkhorn, "tau_min", getattr(cfg.sinkhorn, "tau", 0.05))
 
     # Results storage (baselines first, then model — matches evaluation order)
     method_labels = (
@@ -268,33 +325,19 @@ def evaluate_model(args, cfg) -> None:
             f"Depth={agg['depth_mean']:.1f} | n={agg['num_circuits']}"
         )
 
-    # Save results CSV + PNG if --output specified
-    if getattr(args, "output", None):
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        rows = []
-        for r in all_results:
-            for i in range(len(r.pst_values)):
-                rows.append({
-                    "circuit": r.circuit_name,
-                    "backend": r.backend_name,
-                    "method": r.method,
-                    "rep": i,
-                    "pst": r.pst_values[i],
-                    "depth": r.depths[i] if i < len(r.depths) else "",
-                })
-        pd.DataFrame(rows).to_csv(output_path, index=False)
-        logger.info("Results saved to %s", output_path)
-
-        # Auto-generate PST plots as PNG
-        import matplotlib
-        matplotlib.use("Agg")
-        from scripts.visualize import plot_eval
-        plot_dir = output_path.parent / "plots"
-        plot_dir.mkdir(parents=True, exist_ok=True)
-        backend_name = args.backend
-        plot_eval(output_path, save_dir=plot_dir, backend_label=backend_name)
-        logger.info("Plots saved to %s", plot_dir)
+    # Return rows for combined CSV saving
+    rows = []
+    for r in all_results:
+        for i in range(len(r.pst_values)):
+            rows.append({
+                "circuit": r.circuit_name,
+                "backend": r.backend_name,
+                "method": r.method,
+                "rep": i,
+                "pst": r.pst_values[i],
+                "depth": r.depths[i] if i < len(r.depths) else "",
+            })
+    return rows
 
 
 def main() -> None:
@@ -351,10 +394,48 @@ def main() -> None:
 
         cfg = load_config(args.config)
 
+        # Collect all results across backends
+        all_rows = []
         for backend_name in args.backend:
             args_copy = argparse.Namespace(**vars(args))
             args_copy.backend = backend_name
-            evaluate_model(args_copy, cfg)
+            # Disable per-backend CSV save; collect results instead
+            args_copy.output = None
+            rows = evaluate_model(args_copy, cfg)
+            if rows:
+                all_rows.extend(rows)
+
+        # Determine eval output directory
+        if args.output:
+            output_path = Path(args.output)
+            eval_dir = output_path.parent
+        elif args.checkpoint:
+            # Auto-derive from checkpoint: runs/stage2/<RUN>/checkpoints/best.pt → runs/eval/<RUN>/
+            ckpt_path = Path(args.checkpoint)
+            run_name = ckpt_path.parent.parent.name  # e.g. 20260324_091153_rerun_consistency
+            eval_dir = Path("runs/eval") / run_name
+            output_path = eval_dir / "eval_results.csv"
+        else:
+            eval_dir = Path("runs/eval/default")
+            output_path = eval_dir / "eval_results.csv"
+
+        # Save combined CSV + eval plots + summary tables
+        if all_rows:
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            raw_df = pd.DataFrame(all_rows)
+            raw_df.to_csv(output_path, index=False)
+            logger.info("Results saved to %s", output_path)
+
+            # Generate PST summary tables (per-backend + combined)
+            _save_pst_tables(raw_df, eval_dir)
+
+            # Generate plots
+            import matplotlib
+            matplotlib.use("Agg")
+            from scripts.visualize import plot_eval
+            for bname in args.backend:
+                plot_eval(output_path, save_dir=eval_dir, backend_label=bname)
+            logger.info("Eval results saved to %s", eval_dir)
 
 
 if __name__ == "__main__":

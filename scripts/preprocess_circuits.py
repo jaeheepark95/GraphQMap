@@ -65,9 +65,13 @@ def preprocess_one(qasm_path: Path, cache_path: Path) -> bool:
     qi_sum = qi.sum()
     qubit_importance = qi / qi_sum if qi_sum > 0 else np.ones(circuit.num_qubits) / circuit.num_qubits
 
+    # Raw interaction counts per edge (for loss computation, before normalization)
+    edge_weights = feats["edge_features"][:, 0].tolist() if len(feats["edge_list"]) > 0 else []
+
     cache_data = {
         "circuit_graph": circuit_graph,
         "circuit_edge_pairs": feats["edge_list"],
+        "circuit_edge_weights": edge_weights,
         "qubit_importance": qubit_importance,
         "num_logical": circuit.num_qubits,
     }

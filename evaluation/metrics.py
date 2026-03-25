@@ -74,7 +74,7 @@ def evaluate_model_on_circuit(
     num_logical: int = 0,
     num_physical: int = 0,
     tau: float = 0.05,
-    shots: int = 4096,
+    shots: int = 8192,
     num_repetitions: int = 1,
 ) -> EvalResult:
     """Evaluate the model on a single circuit with multiple repetitions.

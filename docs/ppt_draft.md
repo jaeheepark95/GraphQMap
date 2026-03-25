@@ -216,7 +216,7 @@ Stage 1: Supervised Pre-training (labeled data)
   Phase 2: QUEKO only → CE Loss (true optimal로 정밀 보정)
       |
 Stage 2: Unsupervised Surrogate Fine-tuning (all data)
-  L_surr + alpha * L_node + lambda * L_sep
+  L_adj + beta * L_hop + alpha * L_node
   (label 불필요, noise-aware 최적화)
 ```
 
@@ -258,7 +258,7 @@ Stage 2: Unsupervised Surrogate Fine-tuning (all data)
 
 **데이터:** 6,887 전체 회로 (label 불필요)
 
-**Loss = L_surr + alpha * L_node + lambda * L_sep**
+**Loss = L_adj + beta * L_hop + alpha * L_node**
 
 **L_surr (Error-Aware Edge Quality):**
 - 논리적으로 연결된 큐빗 쌍이 물리적으로도 가까운 (low error path) 위치에 매핑되도록
@@ -269,8 +269,7 @@ Stage 2: Unsupervised Surrogate Fine-tuning (all data)
 - q_score: learnable weighted combination of noise features
 - 학습 후 w1~w5 분석 → 어떤 noise factor가 PST에 중요한지 insight
 
-**L_sep (Separation Loss):**
-- Multi-programming용 (단일 회로에서는 자동으로 0)
+**Multi-programming:** 여러 회로를 하나의 disconnected circuit graph로 합쳐서 처리. L_adj의 intra-circuit clustering이 자연스럽게 회로 간 분리를 만듦.
 
 ---
 
@@ -347,7 +346,7 @@ Stage 2: Unsupervised Surrogate Fine-tuning (all data)
 
 - Stage 1, Stage 2 학습 완료 및 하이퍼파라미터 튜닝
 - Unseen backend (Toronto, Brooklyn, Torino)에서 PST 평가
-- Ablation study (Cross-Attention 유무, L_node/L_sep 기여도 등)
+- Ablation study (Cross-Attention 유무, L_node 기여도 등)
 - 논문 작성
 - (향후) Multi-programming 확장
 

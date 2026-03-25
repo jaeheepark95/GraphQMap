@@ -150,6 +150,8 @@ def build_circuit_graph(
 
         edge_attr = feats["edge_features"]
         edge_attr = torch.cat([edge_attr, edge_attr], dim=0)  # duplicate for both dirs
+        # Z-score normalize edge features within circuit (across edges, dim=0)
+        edge_attr = zscore_normalize(edge_attr, dim=0, eps=eps)
     else:
         edge_index = torch.zeros((2, 0), dtype=torch.long)
         edge_attr = torch.zeros((0, 3), dtype=torch.float32)

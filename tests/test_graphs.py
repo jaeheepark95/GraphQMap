@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 from qiskit import QuantumCircuit
+from torch_geometric.data import Data
 
 from data.circuit_graph import build_circuit_graph, extract_circuit_features
 from data.hardware_graph import (
@@ -14,7 +15,7 @@ from data.hardware_graph import (
     precompute_error_distance,
 )
 from data.multi_programming import merge_circuits, validate_multi_programming
-from data.normalization import zscore_normalize
+from data.normalization import renormalize_group_edges, zscore_normalize
 
 
 # ---- Normalization ----
@@ -153,6 +154,12 @@ class TestCircuitGraph:
         # Z-score: mean should be ~0 along dim=0
         assert torch.allclose(data.x.mean(dim=0), torch.zeros(4), atol=0.1)
 
+    def test_build_circuit_graph_edge_normalized(self, circuit):
+        data = build_circuit_graph(circuit)
+        # Edge features should also be z-score normalized (mean ~0)
+        assert data.edge_attr.shape[0] > 0
+        assert torch.allclose(data.edge_attr.mean(dim=0), torch.zeros(3), atol=0.1)
+
     def test_single_qubit_circuit(self):
         """Circuit with no 2-qubit gates should have no edges."""
         qc = QuantumCircuit(2)
@@ -162,6 +169,58 @@ class TestCircuitGraph:
         assert data.x.shape == (2, 4)
         assert data.edge_index.shape[1] == 0
         assert data.edge_attr.shape[0] == 0
+
+
+# ---- Group-Level Edge Renormalization ----
+
+class TestRenormalizeGroupEdges:
+    def test_single_graph_unchanged(self):
+        """Single graph should be returned as-is."""
+        g = Data(
+            x=torch.randn(3, 4),
+            edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+            edge_attr=torch.tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]),
+            num_qubits=3,
+        )
+        result = renormalize_group_edges([g])
+        assert result[0] is g  # same object
+
+    def test_multiple_graphs_renormalized(self):
+        """Multiple graphs should have group-level z-score normalized edges."""
+        g1 = Data(
+            x=torch.randn(2, 4),
+            edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+            edge_attr=torch.tensor([[1.0, 2.0], [1.0, 2.0]]),
+            num_qubits=2,
+        )
+        g2 = Data(
+            x=torch.randn(2, 4),
+            edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+            edge_attr=torch.tensor([[3.0, 4.0], [3.0, 4.0]]),
+            num_qubits=2,
+        )
+        result = renormalize_group_edges([g1, g2])
+        # Combined edges: [[1,2],[1,2],[3,4],[3,4]] -> mean=[2,3], normalize to ~0
+        all_edges = torch.cat([r.edge_attr for r in result], dim=0)
+        assert torch.allclose(all_edges.mean(dim=0), torch.zeros(2), atol=1e-5)
+
+    def test_empty_edges_preserved(self):
+        """Graphs with no edges should be handled gracefully."""
+        g1 = Data(
+            x=torch.randn(2, 4),
+            edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+            edge_attr=torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+            num_qubits=2,
+        )
+        g2 = Data(
+            x=torch.randn(1, 4),
+            edge_index=torch.zeros((2, 0), dtype=torch.long),
+            edge_attr=torch.zeros((0, 2)),
+            num_qubits=1,
+        )
+        result = renormalize_group_edges([g1, g2])
+        assert result[0].edge_attr.shape[0] == 2
+        assert result[1].edge_attr.shape[0] == 0
 
 
 # ---- Multi-Programming ----
