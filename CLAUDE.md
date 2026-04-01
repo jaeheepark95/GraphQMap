@@ -12,7 +12,7 @@ Supports arbitrary multi-programming (any number of co-located circuits, total l
 - networkx
 
 ## Project Structure
-- `models/` — GNN encoders, cross-attention, score head, sinkhorn, hungarian
+- `models/` — GNN encoders, cross-attention, score head, SoftmaxNorm (+ legacy sinkhorn), hungarian
 - `data/` — dataset loaders, graph construction, label generation, normalization
 - `training/` — training loops, loss functions, tau scheduler, early stopping
 - `evaluation/` — PST measurement, metrics, baselines, transpiler, benchmarks
@@ -21,9 +21,14 @@ Supports arbitrary multi-programming (any number of co-located circuits, total l
   - `evaluation/prev_methods/` — baseline routing/layout methods (NASSC, NoiseAdaptive, QAP)
 - `configs/` — hyperparameter configs (YAML) and config loader (`config_loader.py`)
 - `runs/` — experiment outputs (timestamped, gitignored): checkpoints, metrics CSV, config snapshots, note.md, EXPERIMENTS.md
-- `scripts/` — dataset generation/processing scripts, `visualize.py` (training/eval plotting)
+- `scripts/` — dataset generation/processing, visualization, diagnostics
+  - `visualize.py` — training/eval plotting (auto-generated + manual comparison)
+  - `diagnose_features.py` — circuit node feature quality diagnostics (effective dim, cosine sim, correlations)
+  - `visualize_layouts.py` — initial layout visualization on backend topology (SABRE vs model vs QAP)
+  - `visualize_backends.py` — test backend topology/error map visualization
+  - `compare_pst.py` — PST comparison across layout methods
+  - `benchmark_feature_analysis.py` — per-circuit feature analysis (variance, correlation, dimensionality)
 - `docs/` — research specification and documentation
-- `scripts/diagnose_features.py` — circuit node feature quality diagnostics (effective dim, cosine sim, correlations)
 - `tests/` — unit and integration tests (151 tests)
 
 ## Dataset Structure
