@@ -110,7 +110,10 @@ class Stage1Trainer:
         for batch in train_loader:
             circuit_batch = batch["circuit_batch"].to(self.device)
             hardware_batch = batch["hardware_batch"].to(self.device)
-            label_matrices = batch["label_matrices"].to(self.device)
+            label_matrices = batch["label_matrices"]
+            if label_matrices is None:
+                continue  # skip batch with inconsistent labels
+            label_matrices = label_matrices.to(self.device)
             num_logical = batch["num_logical"][0]  # same within backend bucket
             num_physical = batch["num_physical"]
             batch_size = batch["batch_size"]
@@ -160,7 +163,10 @@ class Stage1Trainer:
         for batch in val_loader:
             circuit_batch = batch["circuit_batch"].to(self.device)
             hardware_batch = batch["hardware_batch"].to(self.device)
-            label_matrices = batch["label_matrices"].to(self.device)
+            label_matrices = batch["label_matrices"]
+            if label_matrices is None:
+                continue
+            label_matrices = label_matrices.to(self.device)
             num_logical = batch["num_logical"][0]
             num_physical = batch["num_physical"]
             batch_size = batch["batch_size"]

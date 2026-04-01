@@ -6,15 +6,10 @@ All metrics with mean ± std across multiple repetitions.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
-import torch
-from qiskit import QuantumCircuit
-
-from evaluation.pst import create_ideal_simulator, create_noisy_simulator, measure_pst
 
 
 @dataclass
@@ -58,83 +53,10 @@ class EvalResult:
             "pst": f"{self.pst_mean:.4f} ± {self.pst_std:.4f}",
             "swap_count": f"{self.swap_mean:.1f}",
             "depth": f"{self.depth_mean:.1f}",
-            "inference_ms": f"{self.inference_time_mean * 1000:.1f}",
+            "inference_ms": f"{self.inference_time_mean * 1000:.1f}" if self.inference_times else "N/A",
             "n_reps": len(self.pst_values),
         }
 
-
-def evaluate_model_on_circuit(
-    model: torch.nn.Module,
-    circuit: QuantumCircuit,
-    circuit_graph: Any,
-    hardware_graph: Any,
-    backend: Any,
-    circuit_name: str = "",
-    backend_name: str = "",
-    num_logical: int = 0,
-    num_physical: int = 0,
-    tau: float = 0.05,
-    shots: int = 8192,
-    num_repetitions: int = 1,
-) -> EvalResult:
-    """Evaluate the model on a single circuit with multiple repetitions.
-
-    Each repetition uses a different transpiler seed for statistical reliability.
-
-    Args:
-        model: GraphQMap model.
-        circuit: Quantum circuit.
-        circuit_graph: Batched PyG Data for the circuit (batch_size=1).
-        hardware_graph: Batched PyG Data for the hardware (batch_size=1).
-        backend: FakeBackendV2 instance.
-        circuit_name: Name for reporting.
-        backend_name: Backend name for reporting.
-        num_logical: Number of logical qubits.
-        num_physical: Number of physical qubits.
-        tau: Sinkhorn temperature.
-        shots: Simulation shots.
-        num_repetitions: Number of repetitions.
-
-    Returns:
-        EvalResult with all metrics.
-    """
-    result = EvalResult(
-        circuit_name=circuit_name,
-        backend_name=backend_name,
-        method="graphqmap",
-    )
-
-    # Create simulators once, reuse across repetitions
-    ideal_sim = create_ideal_simulator(backend)
-    noisy_sim = create_noisy_simulator(backend)
-
-    for rep in range(num_repetitions):
-        # Inference timing
-        t0 = time.perf_counter()
-        layouts = model.predict(
-            circuit_graph, hardware_graph,
-            batch_size=1,
-            num_logical=num_logical,
-            num_physical=num_physical,
-            tau=tau,
-        )
-        t1 = time.perf_counter()
-
-        layout = layouts[0]
-        result.inference_times.append(t1 - t0)
-
-        # PST measurement with different transpiler seed per rep
-        pst_result = measure_pst(
-            circuit, backend, list(layout.values()),
-            shots=shots, seed_transpiler=rep,
-            ideal_sim=ideal_sim, noisy_sim=noisy_sim,
-        )
-
-        result.pst_values.append(pst_result["pst"])
-        result.swap_counts.append(pst_result["swap_count"])
-        result.depths.append(pst_result["depth"])
-
-    return result
 
 
 def format_results_table(results: list[EvalResult]) -> str:
@@ -173,9 +95,9 @@ def aggregate_results(results: list[EvalResult]) -> dict[str, Any]:
     all_pst = [r.pst_mean for r in results]
     all_swap = [r.swap_mean for r in results]
     all_depth = [r.depth_mean for r in results]
-    all_time = [r.inference_time_mean for r in results]
+    all_time = [r.inference_time_mean for r in results if r.inference_times]
 
-    return {
+    agg = {
         "num_circuits": len(results),
         "pst_mean": float(np.mean(all_pst)),
         "pst_std": float(np.std(all_pst)),
@@ -183,6 +105,12 @@ def aggregate_results(results: list[EvalResult]) -> dict[str, Any]:
         "swap_std": float(np.std(all_swap)),
         "depth_mean": float(np.mean(all_depth)),
         "depth_std": float(np.std(all_depth)),
-        "inference_ms_mean": float(np.mean(all_time)) * 1000,
-        "inference_ms_std": float(np.std(all_time)) * 1000,
     }
+    if all_time:
+        agg["inference_ms_mean"] = float(np.mean(all_time)) * 1000
+        agg["inference_ms_std"] = float(np.std(all_time)) * 1000
+    else:
+        agg["inference_ms_mean"] = "N/A"
+        agg["inference_ms_std"] = "N/A"
+
+    return agg

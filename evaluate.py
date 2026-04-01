@@ -18,7 +18,6 @@ import logging
 import time
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import Batch
@@ -41,7 +40,7 @@ from evaluation.pst import (
     create_ideal_simulator,
     create_noisy_simulator,
 )
-from evaluation.transpiler import build_transpiler, transpile_with_timing
+from evaluation.transpiler import transpile_with_timing
 from models.graphqmap import GraphQMap
 
 logging.basicConfig(
@@ -220,17 +219,17 @@ def evaluate_model(args, cfg) -> None:
 
             for rep in range(args.reps):
                 try:
-                    pm = build_transpiler(
-                        backend,
+                    tc, metadata = transpile_with_timing(
+                        circuit, backend,
                         layout_method=layout,
                         routing_method=routing,
                         seed=args.seed + rep,
                     )
-                    tc = pm.run(circuit)
                 except Exception as e:
                     logger.warning("  Transpile failed (%s): %s", label, e)
                     baseline_result.pst_values.append(float("nan"))
                     baseline_result.depths.append(0)
+                    baseline_result.swap_counts.append(0)
                     continue
 
                 avg_pst, depth, _ = _safe_simulate(
@@ -241,13 +240,18 @@ def evaluate_model(args, cfg) -> None:
                     avg_pst, depth = float("nan"), tc.depth()
                 baseline_result.pst_values.append(avg_pst)
                 baseline_result.depths.append(depth)
+                baseline_result.swap_counts.append(metadata["map_cx"])
 
             all_results.append(baseline_result)
             all_pst[label].append(baseline_result.pst_mean)
             logger.info("  %s PST: %.4f", label, baseline_result.pst_mean)
 
         # --- Model evaluation (both routing variants) ---
-        circuit_graph = build_circuit_graph(circuit)
+        node_fnames = getattr(cfg.model.circuit_gnn, "node_features", None)
+        rk = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
+        circuit_graph = build_circuit_graph(
+            circuit, node_feature_names=node_fnames, rwpe_k=rk,
+        )
         circuit_batch = Batch.from_data_list([circuit_graph])
         hw_batch = Batch.from_data_list([hw_graph])
 

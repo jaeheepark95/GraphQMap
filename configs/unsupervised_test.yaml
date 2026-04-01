@@ -5,7 +5,12 @@ model:
   embedding_dim: 64
 
   circuit_gnn:
-    node_input_dim: 4         # no multi-prog summary for this test
+    node_features:
+      - gate_count
+      - two_qubit_gate_count
+      - single_qubit_gate_ratio
+      - critical_path_fraction
+    rwpe_k: 2
     edge_input_dim: 3
     num_layers: 3
     num_heads: 4
@@ -15,7 +20,7 @@ model:
     residual_layers: [2, 3]
 
   hardware_gnn:
-    node_input_dim: 7
+    node_input_dim: 5
     edge_input_dim: 1
     num_layers: 3
     num_heads: 4

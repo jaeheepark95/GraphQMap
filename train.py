@@ -99,9 +99,14 @@ def _build_val_pst_fn(cfg, device: torch.device):
         model.eval()
         pst_values = []
 
+        node_fnames = getattr(cfg.model.circuit_gnn, "node_features", None)
+        rk = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
+
         for cname, circuit in val_circuits:
             num_logical = circuit.num_qubits
-            circuit_graph = build_circuit_graph(circuit)
+            circuit_graph = build_circuit_graph(
+                circuit, node_feature_names=node_fnames, rwpe_k=rk,
+            )
             circuit_batch = Batch.from_data_list([circuit_graph]).to(device)
             hw_batch = Batch.from_data_list([hw_graph]).to(device)
 
@@ -185,14 +190,19 @@ def main() -> None:
     num_workers = cfg.num_workers
     training_backends = _get_training_backends(cfg)
 
+    # Circuit feature config (from YAML, passed to dataset loaders)
+    node_feature_names = getattr(cfg.model.circuit_gnn, "node_features", None)
+    rwpe_k = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
+    feature_kwargs = {"node_feature_names": node_feature_names, "rwpe_k": rwpe_k}
+
     if stage == 1:
         model = GraphQMap.from_config(cfg)
         trainer = Stage1Trainer(model, cfg, device)
 
         # Load main supervised train/val datasets
         logger.info("Loading Stage 1 supervised training data...")
-        train_ds = load_split(cfg.data.splits.train, data_root=data_root)
-        val_ds = load_split(cfg.data.splits.val, data_root=data_root)
+        train_ds = load_split(cfg.data.splits.train, data_root=data_root, **feature_kwargs)
+        val_ds = load_split(cfg.data.splits.val, data_root=data_root, **feature_kwargs)
         logger.info("Train: %d samples, Val: %d samples", len(train_ds), len(val_ds))
 
         train_loader = create_dataloader(
@@ -211,8 +221,8 @@ def main() -> None:
         queko_val_path = getattr(cfg.data.splits, "queko_val", None)
         if queko_train_path and queko_val_path:
             logger.info("Loading QUEKO fine-tuning data...")
-            queko_train_ds = load_split(queko_train_path, data_root=data_root)
-            queko_val_ds = load_split(queko_val_path, data_root=data_root)
+            queko_train_ds = load_split(queko_train_path, data_root=data_root, **feature_kwargs)
+            queko_val_ds = load_split(queko_val_path, data_root=data_root, **feature_kwargs)
             logger.info("QUEKO Train: %d, Val: %d", len(queko_train_ds), len(queko_val_ds))
 
             queko_train_loader = create_dataloader(
@@ -250,6 +260,7 @@ def main() -> None:
             data_root=data_root,
             training_backends=training_backends,
             include_stage2_fields=True,
+            **feature_kwargs,
         )
         logger.info("Train: %d samples", len(train_ds))
 

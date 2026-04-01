@@ -1,6 +1,13 @@
 """Data module: graph construction, normalization, datasets, label generation."""
 
-from data.circuit_graph import build_circuit_graph, extract_circuit_features, load_circuit
+from data.circuit_graph import (
+    DEFAULT_NODE_FEATURES,
+    build_circuit_graph,
+    build_circuit_graph_from_raw,
+    compute_rwpe,
+    extract_circuit_features,
+    load_circuit,
+)
 from data.dataset import (
     BackendBucketSampler,
     MappingDataset,
@@ -28,8 +35,11 @@ __all__ = [
     "LabelResult",
     "MappingDataset",
     "MappingSample",
+    "DEFAULT_NODE_FEATURES",
     "build_circuit_graph",
+    "build_circuit_graph_from_raw",
     "build_hardware_graph",
+    "compute_rwpe",
     "collate_mapping_samples",
     "create_dataloader",
     "extract_circuit_features",

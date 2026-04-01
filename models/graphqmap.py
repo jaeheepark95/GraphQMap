@@ -5,7 +5,7 @@ Pipeline:
   [Hardware Graph] → Hardware GNN → H (h×d)
   → Cross-Attention (2 layers) → C' (l×d), H' (h×d)
   → Score Head → S (l×h)
-  → Dummy Padding + Log-domain Sinkhorn → P (h×h)
+  → Row-wise Softmax(S/τ) → P (l×h)
   [Training] P used for loss
   [Inference] Hungarian(P) → discrete layout
 """
@@ -20,7 +20,7 @@ from models.cross_attention import CrossAttentionModule
 from models.gnn_encoder import GNNEncoder
 from models.hungarian import hungarian_decode_batch
 from models.score_head import ScoreHead
-from models.sinkhorn import SinkhornLayer
+from models.sinkhorn import SoftmaxNorm
 
 
 class GraphQMap(nn.Module):
@@ -49,7 +49,7 @@ class GraphQMap(nn.Module):
         self,
         circuit_node_dim: int = 4,
         circuit_edge_dim: int = 3,
-        hardware_node_dim: int = 7,
+        hardware_node_dim: int = 5,
         hardware_edge_dim: int = 1,
         embedding_dim: int = 64,
         gnn_layers: int = 3,
@@ -98,11 +98,8 @@ class GraphQMap(nn.Module):
             d_model=embedding_dim, d_k=score_d_k, noise_bias_dim=noise_bias_dim,
         )
 
-        # Sinkhorn
-        self.sinkhorn = SinkhornLayer(
-            max_iter=sinkhorn_max_iter,
-            tol=sinkhorn_tol,
-        )
+        # Score normalization (row-wise softmax, no dummy padding)
+        self.sinkhorn = SoftmaxNorm()
 
     def encode(
         self,
@@ -161,7 +158,7 @@ class GraphQMap(nn.Module):
             hw_node_features: (h, feat_dim) raw hardware features for noise bias.
 
         Returns:
-            P: Doubly stochastic matrix (batch, h, h).
+            P: Row-stochastic matrix (batch, l, h).
         """
         # Encode
         C, H = self.encode(
@@ -174,8 +171,8 @@ class GraphQMap(nn.Module):
         # Score matrix (with optional noise bias)
         S = self.score_head(C_prime, H_prime, hw_node_features)  # (batch, l, h)
 
-        # Sinkhorn with dummy padding
-        P = self.sinkhorn(S, num_logical, num_physical, tau)  # (batch, h, h)
+        # Row-wise softmax normalization
+        P = self.sinkhorn(S, num_logical, num_physical, tau)  # (batch, l, h)
 
         return P
 
@@ -221,8 +218,16 @@ class GraphQMap(nn.Module):
         Returns:
             Initialized GraphQMap model.
         """
+        # Auto-compute circuit node_input_dim from feature config
+        node_features = getattr(cfg.model.circuit_gnn, "node_features", None)
+        rwpe_k = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
+        if node_features is not None:
+            circuit_node_dim = len(node_features) + rwpe_k
+        else:
+            circuit_node_dim = getattr(cfg.model.circuit_gnn, "node_input_dim", 4)
+
         return cls(
-            circuit_node_dim=cfg.model.circuit_gnn.node_input_dim,
+            circuit_node_dim=circuit_node_dim,
             circuit_edge_dim=cfg.model.circuit_gnn.edge_input_dim,
             hardware_node_dim=cfg.model.hardware_gnn.node_input_dim,
             hardware_edge_dim=cfg.model.hardware_gnn.edge_input_dim,

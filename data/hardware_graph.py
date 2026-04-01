@@ -259,7 +259,7 @@ def extract_edge_properties(backend: Any) -> tuple[list[tuple[int, int]], np.nda
     Returns:
         Tuple of (edge_list, edge_features).
         edge_list: List of (src, dst) tuples (undirected, each pair once).
-        edge_features: Array of shape (num_edges, 2) with [2q_error, 2q_duration].
+        edge_features: Array of shape (num_edges, 1) with [2q_error].
     """
     target = backend.target
     gate_name = _get_two_qubit_gate_name(backend)
@@ -290,7 +290,7 @@ def extract_edge_properties(backend: Any) -> tuple[list[tuple[int, int]], np.nda
 def build_hardware_graph(backend: Any, eps: float = 1e-8) -> Data:
     """Build a PyG Data object for a hardware backend.
 
-    Node features (7): T1, T2, readout_error, single_qubit_error, degree,
+    Node features (5): readout_error, single_qubit_error, degree,
                        t1_cx_ratio, t2_cx_ratio
     Edge features (1): cx_error
     All features z-score normalized within the backend.
@@ -305,10 +305,8 @@ def build_hardware_graph(backend: Any, eps: float = 1e-8) -> Data:
     qubit_props = extract_qubit_properties(backend)
     edge_list, edge_feats = extract_edge_properties(backend)
 
-    # Stack node features: (num_qubits, 7)
+    # Stack node features: (num_qubits, 5)
     node_features = np.stack([
-        qubit_props["t1"],
-        qubit_props["t2"],
         qubit_props["readout_error"],
         qubit_props["single_qubit_error"],
         qubit_props["degree"],
@@ -401,7 +399,7 @@ def precompute_hop_distance(backend: Any) -> np.ndarray:
 def get_hw_node_features(backend: Any) -> np.ndarray:
     """Get quality-score input features for a Qiskit FakeBackendV2.
 
-    Returns (h, 7) array: [T1, T2, readout_error, single_qubit_error, degree,
+    Returns (h, 5) array: [readout_error, single_qubit_error, degree,
                            t1_cx_ratio, t2_cx_ratio].
     Values are z-score normalized within the backend.
 
@@ -409,12 +407,10 @@ def get_hw_node_features(backend: Any) -> np.ndarray:
         backend: A FakeBackendV2 instance.
 
     Returns:
-        (h, 7) numpy array for QualityScore module input.
+        (h, 5) numpy array for QualityScore module input.
     """
     props = extract_qubit_properties(backend)
     raw = np.stack([
-        props["t1"],
-        props["t2"],
         props["readout_error"],
         props["single_qubit_error"],
         props["degree"],
@@ -450,7 +446,7 @@ def build_hardware_graph_from_synthetic(name: str, eps: float = 1e-8) -> Data:
     qprops = profile["qubit_properties"]
     eprops = profile["edge_properties"]
 
-    # Node features: (n, 7) — t1, t2, readout_error, sq_gate_error, degree,
+    # Node features: (n, 5) — readout_error, sq_gate_error, degree,
     #                           t1_cx_ratio, t2_cx_ratio
     degree = np.zeros(n)
     neighbor_map: list[set[int]] = [set() for _ in range(n)]
@@ -478,11 +474,10 @@ def build_hardware_graph_from_synthetic(name: str, eps: float = 1e-8) -> Data:
     t1_cx_ratio = np.where(mean_cx_duration > 0, t1_arr / mean_cx_duration, 0.0)
     t2_cx_ratio = np.where(mean_cx_duration > 0, t2_arr / mean_cx_duration, 0.0)
 
-    node_features = np.zeros((n, 7), dtype=np.float32)
+    node_features = np.zeros((n, 5), dtype=np.float32)
     for i in range(n):
         qp = qprops[str(i)]
         node_features[i] = [
-            qp["t1"], qp["t2"],
             qp["readout_error"], qp["sq_gate_error"], degree[i],
             t1_cx_ratio[i], t2_cx_ratio[i],
         ]
@@ -561,7 +556,7 @@ def precompute_hop_distance_synthetic(name: str) -> np.ndarray:
 def get_hw_node_features_synthetic(name: str) -> np.ndarray:
     """Get quality-score input features for a synthetic backend.
 
-    Returns (h, 7) array: [T1, T2, readout_error, single_qubit_error, degree,
+    Returns (h, 5) array: [readout_error, single_qubit_error, degree,
                            t1_cx_ratio, t2_cx_ratio].
     Values are z-score normalized within the backend.
 
@@ -569,7 +564,7 @@ def get_hw_node_features_synthetic(name: str) -> np.ndarray:
         name: Synthetic backend name.
 
     Returns:
-        (h, 7) numpy array for QualityScore module input.
+        (h, 5) numpy array for QualityScore module input.
     """
     profile = _load_synthetic_backend(name)
     n = profile["num_qubits"]
@@ -604,11 +599,10 @@ def get_hw_node_features_synthetic(name: str) -> np.ndarray:
     t1_cx_ratio = np.where(mean_cx_duration > 0, t1_arr / mean_cx_duration, 0.0)
     t2_cx_ratio = np.where(mean_cx_duration > 0, t2_arr / mean_cx_duration, 0.0)
 
-    raw = np.zeros((n, 7), dtype=np.float32)
+    raw = np.zeros((n, 5), dtype=np.float32)
     for i in range(n):
         qp = qprops[str(i)]
         raw[i] = [
-            qp["t1"], qp["t2"],
             qp["readout_error"], qp["sq_gate_error"], degree[i],
             t1_cx_ratio[i], t2_cx_ratio[i],
         ]

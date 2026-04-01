@@ -5,17 +5,26 @@ model:
   embedding_dim: 64
 
   circuit_gnn:
-    node_input_dim: 4        # 4 local features (gate_count, 2q_count, degree, depth_participation)
-    edge_input_dim: 3        # interaction_count, earliest, latest
+    # Node features: select from registry (gate_count, two_qubit_gate_count, degree,
+    #   depth_participation, weighted_degree, single_qubit_gate_ratio, critical_path_fraction)
+    # Diagnose before training: python scripts/diagnose_features.py --config configs/stage1.yaml
+    node_features:
+      - gate_count
+      - two_qubit_gate_count
+      - single_qubit_gate_ratio
+      - critical_path_fraction
+    rwpe_k: 2                  # Random Walk PE steps (0 = disabled)
+    # node_input_dim is auto-computed: len(node_features) + rwpe_k = 6
+    edge_input_dim: 3          # interaction_count, earliest, latest
     num_layers: 3
     num_heads: 4
     activation: elu
     dropout: 0.1
     use_batchnorm: true
-    residual_layers: [2, 3]  # 1-indexed
+    residual_layers: [2, 3]    # 1-indexed
 
   hardware_gnn:
-    node_input_dim: 7        # T1, T2, readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
+    node_input_dim: 5        # readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
     edge_input_dim: 1        # cx_error
     num_layers: 3
     num_heads: 4

@@ -17,7 +17,6 @@ from evaluation.benchmark import (
 from evaluation.metrics import (
     EvalResult,
     aggregate_results,
-    evaluate_model_on_circuit,
     format_results_table,
 )
 from evaluation.pst import (
@@ -26,7 +25,6 @@ from evaluation.pst import (
     create_noisy_simulator,
     get_sim_config,
     measure_pst,
-    measure_pst_batch,
 )
 from evaluation.transpiler import (
     build_transpiler,
@@ -43,13 +41,11 @@ __all__ = [
     "create_noisy_simulator",
     "dense_layout",
     "evaluate_baseline",
-    "evaluate_model_on_circuit",
     "execute_on_simulators",
     "format_results_table",
     "get_sim_config",
     "load_benchmark_circuit",
     "measure_pst",
-    "measure_pst_batch",
     "naive_multi_programming_layout",
     "random_layout",
     "run_benchmark_single",

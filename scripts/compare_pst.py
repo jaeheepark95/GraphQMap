@@ -70,7 +70,7 @@ def load_test_circuits(
                 has_2q = any(len(inst.qubits) == 2 for inst in qc.data)
                 if not has_2q:
                     continue
-                # Skip circuits with mid-circuit measurements (incompatible with statevector)
+                # Skip circuits with mid-circuit measurements
                 has_mid_meas = any(
                     inst.operation.name == "measure"
                     for inst in qc.data[:-qc.num_qubits]  # ignore final measurements
@@ -131,7 +131,7 @@ def main() -> None:
     parser.add_argument("--opt-level", type=int, default=3,
                         help="Qiskit transpiler optimization level (0-3)")
     parser.add_argument("--max-qubits", type=int, default=10,
-                        help="Max logical qubits per circuit (statevector scales as 2^n)")
+                        help="Max logical qubits per circuit")
     parser.add_argument("--baselines", nargs="*", default=["sabre"],
                         help="Baseline methods to compare")
     parser.add_argument("--seed", type=int, default=42)
@@ -170,7 +170,7 @@ def main() -> None:
     max_q = min(args.max_qubits, num_physical - 1)
     circuit_dirs = [Path("data/circuits/queko"), Path("data/circuits/qasmbench")]
     circuits = load_test_circuits(circuit_dirs, args.max_circuits, max_q)
-    logger.info(f"Max qubits per circuit: {max_q} (statevector: 2^{max_q} = {2**max_q:,} dims)")
+    logger.info(f"Max qubits per circuit: {max_q}")
     logger.info(f"Test circuits: {len(circuits)}")
 
     if not circuits:

@@ -1,19 +1,22 @@
-"""Preprocess all QASM circuits into cached PyG .pt files.
+"""Preprocess all QASM circuits into cached .pt files.
 
-Parses each .qasm file, extracts circuit features, builds the PyG graph,
-and saves everything needed for training into a single .pt file per circuit.
+Parses each .qasm file, extracts ALL circuit features (raw), and saves
+everything needed for training into a single .pt file per circuit.
 
-This avoids repeated QASM parsing during training (the main OOM bottleneck
-when loading thousands of circuits at once).
+Feature selection happens at load time (not here), so changing which
+node features to use does NOT require re-preprocessing.
 
 Usage:
     python scripts/preprocess_circuits.py --data-root data/circuits
+    python scripts/preprocess_circuits.py --data-root data/circuits --force
 
 Cache layout:
     data/circuits/cache/{source}/{filename}.pt
     Each .pt contains:
-        - circuit_graph: PyG Data (z-score normalized node features)
-        - circuit_edge_pairs: list of (i, j) tuples
+        - node_features_dict: dict[str, list[float]] — all raw node features
+        - edge_list: list of (i, j) tuples
+        - edge_features: tensor (num_edges, 3) — raw edge features
+        - circuit_edge_weights: list[float] — interaction counts per edge
         - qubit_importance: numpy array (l,)
         - num_logical: int
 """
@@ -33,47 +36,53 @@ import torch
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from data.circuit_graph import build_circuit_graph, extract_circuit_features, load_circuit
+from data.circuit_graph import extract_circuit_features, load_circuit
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def preprocess_one(qasm_path: Path, cache_path: Path) -> bool:
+def preprocess_one(qasm_path: Path, cache_path: Path, timeout: int = 60) -> bool:
     """Preprocess a single QASM file and save as .pt cache.
 
     Returns True on success, False on failure.
     """
+    import signal
+
+    def _timeout_handler(signum, frame):
+        raise TimeoutError(f"Preprocessing timed out after {timeout}s")
+
+    # Set per-circuit timeout to avoid hanging on very large circuits
+    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(timeout)
     try:
         circuit = load_circuit(qasm_path)
-    except Exception as e:
-        logger.debug("Failed to load %s: %s", qasm_path.name, e)
-        return False
-
-    if circuit.num_qubits < 2:
-        return False
-
-    try:
-        circuit_graph = build_circuit_graph(circuit)
+        if circuit.num_qubits < 2:
+            return False
         feats = extract_circuit_features(circuit)
-    except Exception as e:
-        logger.debug("Failed to build graph for %s: %s", qasm_path.name, e)
+    except (Exception, TimeoutError) as e:
+        logger.debug("Failed to process %s: %s", qasm_path.name, e)
         return False
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
     # Qubit importance: 2Q gate count per logical qubit, normalized
-    qi = feats["node_features"][:, 1].numpy()  # two_qubit_gate_count
+    qi = np.array(feats["node_features_dict"]["two_qubit_gate_count"])
     qi_sum = qi.sum()
     qubit_importance = qi / qi_sum if qi_sum > 0 else np.ones(circuit.num_qubits) / circuit.num_qubits
 
-    # Raw interaction counts per edge (for loss computation, before normalization)
+    # Raw interaction counts per edge (for loss computation)
     edge_weights = feats["edge_features"][:, 0].tolist() if len(feats["edge_list"]) > 0 else []
 
     cache_data = {
-        "circuit_graph": circuit_graph,
+        "node_features_dict": feats["node_features_dict"],
+        "edge_list": feats["edge_list"],
+        "edge_features": feats["edge_features"],
         "circuit_edge_pairs": feats["edge_list"],
         "circuit_edge_weights": edge_weights,
         "qubit_importance": qubit_importance,
-        "num_logical": circuit.num_qubits,
+        "num_logical": feats["num_qubits"],
     }
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,7 +135,6 @@ def main() -> None:
         )
 
     # Build metadata index: {source/filename.qasm: num_logical}
-    # This avoids reading .pt files just to get num_logical during dataset loading
     metadata = {}
     for source_dir in sorted(cache_root.iterdir()):
         if not source_dir.is_dir():

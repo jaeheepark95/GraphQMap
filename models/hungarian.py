@@ -1,7 +1,7 @@
 """Hungarian algorithm decoder for inference.
 
-Converts doubly stochastic matrix P to a discrete one-to-one mapping.
-Only the top l rows (actual logical qubits) are used.
+Converts row-stochastic matrix P (l×h) to a discrete one-to-one mapping.
+scipy's linear_sum_assignment handles rectangular matrices natively.
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ def hungarian_decode(P: torch.Tensor, num_logical: int) -> dict[int, int]:
     """Decode P matrix to a discrete layout via Hungarian algorithm.
 
     Args:
-        P: (h, h) doubly stochastic matrix (single sample, no batch dim).
-        num_logical: Number of actual logical qubits (l).
+        P: (l, h) row-stochastic matrix (single sample, no batch dim).
+        num_logical: Number of logical qubits (l). Must match P.shape[0].
 
     Returns:
         Layout dict {logical_qubit: physical_qubit}.
@@ -36,7 +36,7 @@ def hungarian_decode_batch(
     """Decode a batch of P matrices.
 
     Args:
-        P: (batch, h, h) doubly stochastic matrices.
+        P: (batch, l, h) row-stochastic matrices.
         num_logical: Number of logical qubits (same for all samples in batch).
 
     Returns:

@@ -63,10 +63,11 @@ def _detect_sim_config() -> dict[str, str]:
     except Exception:
         pass
 
-    # Fallback to statevector (only works for small circuits)
-    _SIM_CONFIG = {"method": "statevector"}
-    logger.warning("Simulation method: statevector (large circuits may OOM)")
-    return _SIM_CONFIG
+    raise RuntimeError(
+        "No supported simulation method available. "
+        "tensor_network (GPU or CPU) is required. "
+        "Install qiskit-aer with tensor_network support."
+    )
 
 
 def get_sim_config() -> dict[str, str]:
@@ -233,39 +234,3 @@ def measure_pst(
     }
 
 
-def measure_pst_batch(
-    circuits: list[QuantumCircuit],
-    backend: Any,
-    layouts: list[list[int] | dict[int, int]],
-    shots: int = 8192,
-    seed_transpiler: int = 0,
-    optimization_level: int = 3,
-) -> list[dict[str, Any]]:
-    """Measure PST for a batch of circuits.
-
-    Creates simulators once and reuses for all circuits.
-
-    Args:
-        circuits: List of quantum circuits.
-        backend: FakeBackendV2 instance.
-        layouts: List of layouts, one per circuit.
-        shots: Simulation shots per circuit.
-        seed_transpiler: Transpiler seed.
-        optimization_level: Qiskit transpiler optimization level (0-3).
-
-    Returns:
-        List of result dicts from measure_pst.
-    """
-    ideal_sim = create_ideal_simulator(backend)
-    noisy_sim = create_noisy_simulator(backend)
-
-    results = []
-    for circuit, layout in zip(circuits, layouts):
-        result = measure_pst(
-            circuit, backend, layout,
-            shots=shots, seed_transpiler=seed_transpiler,
-            optimization_level=optimization_level,
-            ideal_sim=ideal_sim, noisy_sim=noisy_sim,
-        )
-        results.append(result)
-    return results

@@ -61,9 +61,9 @@ logging.getLogger("qiskit").setLevel(logging.WARNING)
 # ---------------------------------------------------------------------------
 
 def prepare_hw_node_features_for_qscore(backend) -> np.ndarray:
-    """Prepare (h, 7) node features for QualityScore.
+    """Prepare (h, 5) node features for QualityScore.
 
-    Features: [T1, T2, readout_error, single_qubit_error, degree, t1_cx_ratio, t2_cx_ratio]
+    Features: [readout_error, single_qubit_error, degree, t1_cx_ratio, t2_cx_ratio]
     Z-score normalized within backend.
     """
     return get_hw_node_features(backend)
@@ -138,7 +138,7 @@ def build_stage2_sample(
     edge_pairs = list(feats["edge_list"])
     edge_weights = feats["edge_features"][:, 0].tolist()
     # Qubit importance = number of 2-qubit gates per qubit
-    importance = feats["node_features"][:, 1].numpy()  # two_qubit_gate_count column
+    importance = np.array(feats["node_features_dict"]["two_qubit_gate_count"])
 
     return MappingSample(
         circuit_graph=circuit_graph,

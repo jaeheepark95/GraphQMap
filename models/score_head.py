@@ -25,7 +25,7 @@ class ScoreHead(nn.Module):
     """
 
     def __init__(
-        self, d_model: int = 64, d_k: int = 64, noise_bias_dim: int = 7,
+        self, d_model: int = 64, d_k: int = 64, noise_bias_dim: int = 0,
     ) -> None:
         super().__init__()
         self.d_k = d_k

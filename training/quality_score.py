@@ -19,12 +19,12 @@ class QualityScore(nn.Module):
     hardware noise features and qubit quality.
 
     Args:
-        num_features: Number of input features (default 7:
-            T1, T2, readout_error, single_qubit_error, degree, t1_cx_ratio, t2_cx_ratio).
+        num_features: Number of input features (default 5:
+            readout_error, single_qubit_error, degree, t1_cx_ratio, t2_cx_ratio).
         hidden_dim: Hidden layer dimension.
     """
 
-    def __init__(self, num_features: int = 7, hidden_dim: int = 16) -> None:
+    def __init__(self, num_features: int = 5, hidden_dim: int = 16) -> None:
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(num_features, hidden_dim),

@@ -16,7 +16,7 @@ from typing import Any
 from qiskit import QuantumCircuit, transpile
 
 from evaluation.benchmark import execute_on_simulators
-from evaluation.pst import create_ideal_simulator, create_noisy_simulator, measure_pst
+from evaluation.pst import create_ideal_simulator, create_noisy_simulator
 from evaluation.transpiler import transpile_with_timing
 
 
@@ -162,44 +162,27 @@ def evaluate_baseline(
     Returns:
         Dict with pst, swap_count, depth, method, layout.
     """
-    if method in ("noise_adaptive",) or routing_method == "nassc":
-        # Use custom transpiler for advanced combinations
-        tc, metadata = transpile_with_timing(
-            circuit, backend,
-            layout_method=method,
-            routing_method=routing_method,
-            seed=seed,
-        )
-        ideal_sim = create_ideal_simulator(backend)
-        noisy_sim = create_noisy_simulator(backend)
-        avg_pst, depth, _ = execute_on_simulators(
-            tc, ideal_sim, noisy_sim, shots=shots,
-        )
-        return {
-            "pst": avg_pst,
-            "swap_count": metadata["map_cx"],
-            "depth": depth,
-            "method": f"{method}+{routing_method}",
-            "layout_time": metadata["layout_time"],
-            "total_time": metadata["total_time"],
-        }
-    else:
-        # Use simple layout + measure_pst for basic baselines
-        layout_fns = {
-            "sabre": lambda: sabre_layout(circuit, backend, seed, optimization_level),
-            "dense": lambda: dense_layout(circuit, backend, seed, optimization_level),
-            "trivial": lambda: trivial_layout(circuit, backend),
-            "random": lambda: random_layout(circuit, backend, seed),
-        }
+    # Ensure circuit has measurements
+    if circuit.num_clbits == 0:
+        circuit = circuit.copy()
+        circuit.measure_all()
 
-        if method not in layout_fns:
-            raise ValueError(f"Unknown method '{method}'. Available: {list(layout_fns.keys())}")
-
-        layout = layout_fns[method]()
-        result = measure_pst(
-            circuit, backend, layout, shots=shots,
-            optimization_level=optimization_level,
-        )
-        result["method"] = method
-        result["layout"] = layout
-        return result
+    tc, metadata = transpile_with_timing(
+        circuit, backend,
+        layout_method=method,
+        routing_method=routing_method,
+        seed=seed,
+    )
+    ideal_sim = create_ideal_simulator(backend)
+    noisy_sim = create_noisy_simulator(backend)
+    avg_pst, depth, _ = execute_on_simulators(
+        tc, ideal_sim, noisy_sim, shots=shots,
+    )
+    return {
+        "pst": avg_pst,
+        "swap_count": metadata["map_cx"],
+        "depth": depth,
+        "method": f"{method}+{routing_method}",
+        "layout_time": metadata["layout_time"],
+        "total_time": metadata["total_time"],
+    }

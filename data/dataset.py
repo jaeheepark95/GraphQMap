@@ -20,7 +20,13 @@ import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 from torch_geometric.data import Batch, Data
 
-from data.circuit_graph import build_circuit_graph, extract_circuit_features, load_circuit
+from data.circuit_graph import (
+    DEFAULT_NODE_FEATURES,
+    build_circuit_graph,
+    build_circuit_graph_from_raw,
+    extract_circuit_features,
+    load_circuit,
+)
 from data.hardware_graph import (
     build_hardware_graph,
     build_hardware_graph_from_synthetic,
@@ -185,11 +191,20 @@ class LazyMappingDataset(Dataset):
     Only lightweight metadata (backend, num_logical, num_physical, label, cache_path)
     is kept in memory. Circuit graphs are loaded from disk in __getitem__.
     Hardware graphs and distance matrices are cached in memory (shared, small).
+
+    Feature selection (node_feature_names, rwpe_k) is applied at load time,
+    allowing experiments with different feature combinations without re-caching.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        node_feature_names: list[str] | None = None,
+        rwpe_k: int = 0,
+    ) -> None:
         self._entries: list[_SampleMetadata] = []
         self._backend_indices: dict[str, list[int]] = {}
+        self.node_feature_names = node_feature_names or DEFAULT_NODE_FEATURES
+        self.rwpe_k = rwpe_k
 
     def add_entry(self, meta: _SampleMetadata) -> None:
         """Add a sample metadata entry."""
@@ -208,7 +223,20 @@ class LazyMappingDataset(Dataset):
 
         # Load circuit data from cached .pt file
         cache_data = torch.load(meta.cache_path, weights_only=False)
-        circuit_graph = cache_data["circuit_graph"]
+
+        # Build circuit graph from raw features (new format) or use pre-built (old format)
+        if "node_features_dict" in cache_data:
+            circuit_graph = build_circuit_graph_from_raw(
+                node_features_dict=cache_data["node_features_dict"],
+                edge_list=cache_data["edge_list"],
+                edge_features=cache_data["edge_features"],
+                num_qubits=cache_data["num_logical"],
+                node_feature_names=self.node_feature_names,
+                rwpe_k=self.rwpe_k,
+            )
+        else:
+            # Legacy cache format: pre-built PyG Data
+            circuit_graph = cache_data["circuit_graph"]
 
         # Hardware graph from memory cache
         hw_graph = _get_hardware_graph(meta.backend_name)
@@ -422,12 +450,17 @@ def collate_mapping_samples(
     num_physical = samples[0].num_physical
     num_logical_list = [s.num_logical for s in samples]
 
-    # Label matrices (Stage 1) — only stack if ALL samples have labels
+    # Label matrices (Stage 1) — only stack if ALL samples have labels with consistent shapes
     if all(s.label_matrix is not None for s in samples):
-        label_matrices = torch.tensor(
-            np.stack([s.label_matrix for s in samples]),
-            dtype=torch.float32,
-        )
+        shapes = {s.label_matrix.shape for s in samples}
+        if len(shapes) == 1:
+            label_matrices = torch.tensor(
+                np.stack([s.label_matrix for s in samples]),
+                dtype=torch.float32,
+            )
+        else:
+            # Shape mismatch (e.g. label qubit count != circuit qubit count)
+            label_matrices = None
     else:
         label_matrices = None
 
@@ -496,6 +529,8 @@ def load_split(
     training_backends: list[str] | None = None,
     include_stage2_fields: bool = False,
     lazy: bool = True,
+    node_feature_names: list[str] | None = None,
+    rwpe_k: int = 0,
 ) -> MappingDataset | LazyMappingDataset:
     """Build a dataset from a splits JSON file.
 
@@ -510,13 +545,21 @@ def load_split(
         training_backends: List of backend names for unsupervised circuit assignment.
         include_stage2_fields: If True, populate d_error, qubit_importance, etc.
         lazy: If True, use lazy loading from cached .pt files.
+        node_feature_names: Circuit node features to use (None = defaults).
+        rwpe_k: Number of RWPE steps (0 = disabled).
 
     Returns:
         MappingDataset or LazyMappingDataset.
     """
     if lazy:
-        return _load_split_lazy(split_path, data_root, training_backends, include_stage2_fields)
-    return _load_split_eager(split_path, data_root, training_backends, include_stage2_fields)
+        return _load_split_lazy(
+            split_path, data_root, training_backends, include_stage2_fields,
+            node_feature_names=node_feature_names, rwpe_k=rwpe_k,
+        )
+    return _load_split_eager(
+        split_path, data_root, training_backends, include_stage2_fields,
+        node_feature_names=node_feature_names, rwpe_k=rwpe_k,
+    )
 
 
 def _load_split_lazy(
@@ -524,6 +567,8 @@ def _load_split_lazy(
     data_root: str | Path,
     training_backends: list[str] | None,
     include_stage2_fields: bool,
+    node_feature_names: list[str] | None = None,
+    rwpe_k: int = 0,
 ) -> LazyMappingDataset:
     """Load split with lazy loading from cached .pt files.
 
@@ -558,7 +603,10 @@ def _load_split_lazy(
                     with open(label_file) as f:
                         labels_cache[label_dir.name] = json.load(f)
 
-    dataset = LazyMappingDataset()
+    dataset = LazyMappingDataset(
+        node_feature_names=node_feature_names,
+        rwpe_k=rwpe_k,
+    )
     rng = np.random.RandomState(42)
     loaded, skipped = 0, 0
 
@@ -622,6 +670,8 @@ def _load_split_eager(
     data_root: str | Path,
     training_backends: list[str] | None,
     include_stage2_fields: bool,
+    node_feature_names: list[str] | None = None,
+    rwpe_k: int = 0,
 ) -> MappingDataset:
     """Load split eagerly into memory (original behavior)."""
     data_root = Path(data_root)
@@ -673,7 +723,11 @@ def _load_split_eager(
             continue
 
         try:
-            circuit_graph = build_circuit_graph(circuit)
+            circuit_graph = build_circuit_graph(
+                circuit,
+                node_feature_names=node_feature_names,
+                rwpe_k=rwpe_k,
+            )
             hw_graph = _get_hardware_graph(backend_name)
         except Exception as e:
             logger.warning("Failed to build graphs for %s on %s: %s", filename, backend_name, e)
@@ -707,7 +761,7 @@ def _load_split_eager(
             d_hw = _get_hop_distance(backend_name)
             hw_feats = _get_hw_node_features(backend_name)
             feats = extract_circuit_features(circuit)
-            qi = feats["node_features"][:, 1].numpy()
+            qi = np.array(feats["node_features_dict"]["two_qubit_gate_count"])
             qi_sum = qi.sum()
             qubit_importance = qi / qi_sum if qi_sum > 0 else np.ones(num_logical) / num_logical
             circuit_edge_pairs = feats["edge_list"]

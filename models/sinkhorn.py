@@ -1,12 +1,49 @@
-"""Log-domain Sinkhorn normalization with dummy padding for GraphQMap.
+"""Score normalization layers for GraphQMap.
 
-CRITICAL: Log-domain implementation for numerical stability at low τ.
+Provides SoftmaxNorm (row-wise softmax) as the primary normalization.
+Sinkhorn kept for reference/experimentation.
 """
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+class SoftmaxNorm(nn.Module):
+    """Row-wise softmax normalization for score matrix.
+
+    Converts S (batch, l, h) to P (batch, l, h) where each row sums to 1.
+    No dummy padding needed — avoids the l << h instability of Sinkhorn.
+
+    Args:
+        max_iter: Unused, kept for API compatibility with SinkhornLayer.
+        tol: Unused, kept for API compatibility with SinkhornLayer.
+    """
+
+    def __init__(self, max_iter: int = 20, tol: float = 1e-6) -> None:
+        super().__init__()
+
+    def forward(
+        self,
+        S: torch.Tensor,
+        num_logical: int,
+        num_physical: int,
+        tau: float,
+    ) -> torch.Tensor:
+        """Apply row-wise softmax with temperature scaling.
+
+        Args:
+            S: Score matrix (batch, l, h) where l = num_logical, h = num_physical.
+            num_logical: Number of logical qubits (l). Unused, kept for API compat.
+            num_physical: Number of physical qubits (h). Unused, kept for API compat.
+            tau: Temperature for softmax (lower = sharper).
+
+        Returns:
+            P: Row-stochastic matrix (batch, l, h).
+        """
+        return F.softmax(S / tau, dim=-1)
 
 
 def log_sinkhorn(
@@ -39,7 +76,7 @@ def log_sinkhorn(
 
 
 class SinkhornLayer(nn.Module):
-    """Sinkhorn layer with dummy padding.
+    """Sinkhorn layer with dummy padding (legacy).
 
     Pads the score matrix from (batch, l, h) to (batch, h, h) with dummy rows,
     then applies log-domain Sinkhorn normalization.

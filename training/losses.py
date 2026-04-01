@@ -46,7 +46,7 @@ def get_available_losses() -> list[str]:
 # ---------------------------------------------------------------------------
 
 class SupervisedCELoss(nn.Module):
-    """Cross-entropy loss between Sinkhorn output P and label permutation Y.
+    """Cross-entropy loss between softmax output P and label matrix Y.
 
     L_sup = -sum_{i,j} Y_ij * log(P_ij)
 
@@ -62,8 +62,8 @@ class SupervisedCELoss(nn.Module):
         """Compute cross-entropy loss.
 
         Args:
-            P: (batch, h, h) doubly stochastic matrix from Sinkhorn.
-            Y: (batch, h, h) binary permutation matrix (ground truth).
+            P: (batch, l, h) row-stochastic matrix from softmax.
+            Y: (batch, l, h) binary label matrix (ground truth).
 
         Returns:
             Scalar loss.
@@ -81,35 +81,42 @@ class SupervisedCELoss(nn.Module):
 class ErrorAwareEdgeLoss(nn.Module):
     """L_surr: Error-aware edge quality loss.
 
-    Uses precomputed error-accumulated shortest path distances.
+    Uses precomputed error-accumulated shortest path distances,
+    weighted by gate frequency per edge.
 
-    L_surr = (1/|E_circuit|) * sum_{(i,j) in E_circuit} sum_{p,q} P_ip * P_jq * d_error(p,q)
+    L_surr = (1/W) * sum_{(i,j) in E_circuit} f_ij * sum_{p,q} P_ip * P_jq * d_error(p,q)
 
+    where f_ij is the 2Q gate count for pair (i,j) and W = sum f_ij.
     Fully differentiable w.r.t. P (d_error is a precomputed constant).
     """
 
     def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Compute error-aware edge loss.
 
-        Required kwargs: d_error, circuit_edge_pairs, num_logical.
+        Required kwargs: d_error, circuit_edge_pairs.
+        Optional kwargs: circuit_edge_weights (gate frequency per edge).
         """
         d_error = kwargs["d_error"]
         circuit_edge_pairs = kwargs["circuit_edge_pairs"]
-        num_logical = kwargs["num_logical"]
+        circuit_edge_weights = kwargs.get("circuit_edge_weights", [])
 
         if not circuit_edge_pairs:
             return torch.tensor(0.0, device=P.device, requires_grad=True)
 
-        P_logical = P[:, :num_logical, :]
+        if not circuit_edge_weights:
+            circuit_edge_weights = [1.0] * len(circuit_edge_pairs)
+
         total_loss = torch.tensor(0.0, device=P.device)
+        total_weight = 0.0
 
-        for i, j in circuit_edge_pairs:
-            P_i = P_logical[:, i, :]
-            P_j = P_logical[:, j, :]
+        for (i, j), w in zip(circuit_edge_pairs, circuit_edge_weights):
+            P_i = P[:, i, :]
+            P_j = P[:, j, :]
             cost = (P_i @ d_error * P_j).sum(dim=-1)
-            total_loss = total_loss + cost.mean()
+            total_loss = total_loss + w * cost.mean()
+            total_weight += w
 
-        return total_loss / len(circuit_edge_pairs)
+        return total_loss / max(total_weight, 1e-8)
 
 
 @register_loss("adjacency")
@@ -124,19 +131,17 @@ class AdjacencyMatchingLoss(nn.Module):
     def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Compute adjacency matching loss.
 
-        Required kwargs: d_hw, circuit_edge_pairs, num_logical.
+        Required kwargs: d_hw, circuit_edge_pairs.
         Optional kwargs: circuit_edge_weights.
         """
         d_hw = kwargs["d_hw"]
         circuit_edge_pairs = kwargs["circuit_edge_pairs"]
-        num_logical = kwargs["num_logical"]
         circuit_edge_weights = kwargs.get("circuit_edge_weights", [])
 
         if not circuit_edge_pairs:
             return torch.tensor(0.0, device=P.device, requires_grad=True)
 
         A_hw = (d_hw == 1).float()
-        P_logical = P[:, :num_logical, :]
 
         if not circuit_edge_weights:
             circuit_edge_weights = [1.0] * len(circuit_edge_pairs)
@@ -145,8 +150,8 @@ class AdjacencyMatchingLoss(nn.Module):
         total_weight = 0.0
 
         for (i, j), w in zip(circuit_edge_pairs, circuit_edge_weights):
-            P_i = P_logical[:, i, :]
-            P_j = P_logical[:, j, :]
+            P_i = P[:, i, :]
+            P_j = P[:, j, :]
             adj_score = (P_i @ A_hw * P_j).sum(dim=-1)
             total_adj = total_adj + w * adj_score.mean()
             total_weight += w
@@ -167,11 +172,10 @@ class HopDistanceLoss(nn.Module):
     def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Compute hop distance loss.
 
-        Required kwargs: d_hw, circuit_edge_pairs, num_logical.
+        Required kwargs: d_hw, circuit_edge_pairs.
         """
         d_hw = kwargs["d_hw"]
         circuit_edge_pairs = kwargs["circuit_edge_pairs"]
-        num_logical = kwargs["num_logical"]
 
         if not circuit_edge_pairs:
             return torch.tensor(0.0, device=P.device, requires_grad=True)
@@ -179,12 +183,11 @@ class HopDistanceLoss(nn.Module):
         d_max = d_hw.max().clamp(min=1e-8)
         d_hop_norm = d_hw / d_max
 
-        P_logical = P[:, :num_logical, :]
         total_loss = torch.tensor(0.0, device=P.device)
 
         for i, j in circuit_edge_pairs:
-            P_i = P_logical[:, i, :]
-            P_j = P_logical[:, j, :]
+            P_i = P[:, i, :]
+            P_j = P[:, j, :]
             cost = (P_i @ d_hop_norm * P_j).sum(dim=-1)
             total_loss = total_loss + cost.mean()
 
@@ -210,15 +213,13 @@ class NodeQualityLoss(nn.Module):
     def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Compute node quality loss.
 
-        Required kwargs: hw_node_features, qubit_importance, num_logical.
+        Required kwargs: hw_node_features, qubit_importance.
         """
         hw_node_features = kwargs["hw_node_features"]
         qubit_importance = kwargs["qubit_importance"]
-        num_logical = kwargs["num_logical"]
 
         q_scores = self.quality_score(hw_node_features)
-        P_logical = P[:, :num_logical, :]
-        expected_quality = (P_logical * q_scores.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+        expected_quality = (P * q_scores.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
 
         w = qubit_importance.unsqueeze(0)
         w_sum = w.sum(dim=-1, keepdim=True).clamp(min=1e-8)
@@ -240,28 +241,50 @@ class SeparationLoss(nn.Module):
     def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """Compute separation loss.
 
-        Required kwargs: d_hw, cross_circuit_pairs, num_logical.
+        Required kwargs: d_hw, cross_circuit_pairs.
         """
         d_hw = kwargs["d_hw"]
         cross_circuit_pairs = kwargs["cross_circuit_pairs"]
-        num_logical = kwargs["num_logical"]
 
         if not cross_circuit_pairs:
             return torch.tensor(0.0, device=P.device, requires_grad=True)
 
-        P_logical = P[:, :num_logical, :]
         d_max = d_hw.max().clamp(min=1e-8)
         d_hw_norm = d_hw / d_max
 
         total_dist = torch.tensor(0.0, device=P.device)
 
         for i, j in cross_circuit_pairs:
-            P_i = P_logical[:, i, :]
-            P_j = P_logical[:, j, :]
+            P_i = P[:, i, :]
+            P_j = P[:, j, :]
             dist = (P_i @ d_hw_norm * P_j).sum(dim=-1)
             total_dist = total_dist + dist.mean()
 
         loss = -total_dist / len(cross_circuit_pairs)
+        return loss
+
+
+@register_loss("exclusion")
+class ExclusionLoss(nn.Module):
+    """L_excl: Column-wise exclusion loss for one-to-one mapping.
+
+    Penalizes multiple logical qubits mapping to the same physical qubit.
+
+    L_excl = (1/h) * sum_j (sum_i P_ij)^2
+
+    When P is a perfect one-to-one mapping, each column sum is 0 or 1,
+    giving L_excl = l/h. Values above l/h indicate column collisions.
+    Bounded in [l/h, l] (l/h = best, l = all logical map to same physical).
+    """
+
+    def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """Compute exclusion loss.
+
+        Args:
+            P: (batch, l, h) row-stochastic matrix.
+        """
+        col_sums = P.sum(dim=1)  # (batch, h)
+        loss = (col_sums ** 2).mean(dim=-1).mean()
         return loss
 
 

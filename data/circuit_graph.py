@@ -2,6 +2,18 @@
 
 Parses .qasm files or QuantumCircuit objects and builds PyG Data objects
 with z-score normalized node and edge features.
+
+Node features are configurable via a feature registry. Available features:
+  - gate_count: total gates on this qubit
+  - two_qubit_gate_count: 2-qubit gates involving this qubit
+  - degree: number of distinct qubits interacting via 2-qubit gates
+  - depth_participation: fraction of circuit depth where qubit is active
+  - weighted_degree: sum of interaction counts across all connected edges
+  - single_qubit_gate_ratio: fraction of gates that are single-qubit
+  - critical_path_fraction: fraction of DAG critical path involving this qubit
+
+Positional encodings (appended after node features):
+  - rwpe: Random Walk Positional Encoding (k-step self-return probabilities)
 """
 
 from __future__ import annotations
@@ -10,12 +22,21 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from qiskit import QuantumCircuit
 from qiskit.converters import circuit_to_dag
 from torch_geometric.data import Data
 
 from data.normalization import zscore_normalize
+
+# Default feature set (backward compatible)
+DEFAULT_NODE_FEATURES: list[str] = [
+    "gate_count",
+    "two_qubit_gate_count",
+    "single_qubit_gate_ratio",
+    "critical_path_fraction",
+]
 
 
 def load_circuit(path: str | Path) -> QuantumCircuit:
@@ -31,13 +52,19 @@ def load_circuit(path: str | Path) -> QuantumCircuit:
 
 
 def extract_circuit_features(circuit: QuantumCircuit) -> dict[str, Any]:
-    """Extract node and edge features from a quantum circuit.
+    """Extract ALL available node and edge features from a quantum circuit.
+
+    Computes every registered node feature so that feature selection
+    can happen downstream without re-parsing the circuit.
 
     Node features (per logical qubit):
         - gate_count: total gates on this qubit
         - two_qubit_gate_count: 2-qubit gates involving this qubit
         - degree: number of distinct qubits interacting via 2-qubit gates
-        - circuit_depth_participation: fraction of depth where qubit is active
+        - depth_participation: fraction of depth where qubit is active
+        - weighted_degree: sum of interaction counts with all neighbors
+        - single_qubit_gate_ratio: (gate_count - 2q_count) / gate_count
+        - critical_path_fraction: fraction of critical path length on this qubit
 
     Edge features (per qubit pair with 2-qubit interaction):
         - interaction_count: number of 2-qubit gates between pair
@@ -48,8 +75,8 @@ def extract_circuit_features(circuit: QuantumCircuit) -> dict[str, Any]:
         circuit: A QuantumCircuit instance.
 
     Returns:
-        Dict with keys: node_features, edge_list, edge_features,
-        num_qubits.
+        Dict with keys: node_features (dict[str, list[float]]),
+        edge_list, edge_features, num_qubits.
     """
     dag = circuit_to_dag(circuit)
     num_qubits = circuit.num_qubits
@@ -85,15 +112,41 @@ def extract_circuit_features(circuit: QuantumCircuit) -> dict[str, Any]:
                 key = (min(q0, q1), max(q0, q1))
                 pair_interactions[key].append(layer_idx)
 
-    # Node features
+    # --- Node features ---
     degree = [len(n) for n in neighbors]
     depth_participation = [len(al) / total_depth for al in active_layers]
 
-    node_features = torch.tensor(
-        [[gate_count[i], two_qubit_gate_count[i], degree[i], depth_participation[i]]
-         for i in range(num_qubits)],
-        dtype=torch.float32,
-    )
+    # Weighted degree: sum of interaction counts per qubit
+    weighted_degree = [0.0] * num_qubits
+    for (q0, q1), interactions in pair_interactions.items():
+        count = len(interactions)
+        weighted_degree[q0] += count
+        weighted_degree[q1] += count
+
+    # Single-qubit gate ratio
+    single_qubit_gate_ratio = [
+        (gate_count[i] - two_qubit_gate_count[i]) / max(gate_count[i], 1)
+        for i in range(num_qubits)
+    ]
+
+    # Critical path fraction: per-qubit participation in DAG critical path
+    # Skip for very large circuits (>5000 ops) to avoid O(n^2) traversal
+    op_count = dag.size()
+    if op_count <= 5000:
+        critical_path_fraction = _compute_critical_path_fraction(dag, circuit, num_qubits)
+    else:
+        critical_path_fraction = [1.0 / max(num_qubits, 1)] * num_qubits
+
+    # Store all node features as a dict of lists
+    node_features_dict: dict[str, list[float]] = {
+        "gate_count": [float(x) for x in gate_count],
+        "two_qubit_gate_count": [float(x) for x in two_qubit_gate_count],
+        "degree": [float(x) for x in degree],
+        "depth_participation": depth_participation,
+        "weighted_degree": weighted_degree,
+        "single_qubit_gate_ratio": single_qubit_gate_ratio,
+        "critical_path_fraction": critical_path_fraction,
+    }
 
     # Edge features
     edge_list = sorted(pair_interactions.keys())
@@ -112,45 +165,183 @@ def extract_circuit_features(circuit: QuantumCircuit) -> dict[str, Any]:
     )
 
     return {
-        "node_features": node_features,
+        "node_features_dict": node_features_dict,
         "edge_list": edge_list,
         "edge_features": edge_features,
         "num_qubits": num_qubits,
     }
 
 
+def _compute_critical_path_fraction(
+    dag: Any, circuit: QuantumCircuit, num_qubits: int,
+) -> list[float]:
+    """Compute per-qubit participation in the DAG critical path.
+
+    Uses a per-qubit depth tracking approach: for each qubit, tracks the
+    cumulative depth of operations. The critical path length is the maximum
+    depth across all qubits. Each qubit's fraction is its max depth / critical path.
+
+    This is O(n) in the number of gates, avoiding expensive DAG traversal.
+
+    Args:
+        dag: DAGCircuit from circuit_to_dag.
+        circuit: Original QuantumCircuit.
+        num_qubits: Number of logical qubits.
+
+    Returns:
+        List of floats (one per qubit), each in [0, 1].
+    """
+    # Per-qubit depth: track how deep each qubit is in the circuit
+    qubit_depth = [0] * num_qubits
+
+    for node in dag.topological_op_nodes():
+        qubit_indices = [circuit.qubits.index(q) for q in node.qargs]
+        # This op starts after the latest qubit it touches is free
+        start = max(qubit_depth[qi] for qi in qubit_indices)
+        new_depth = start + 1
+        for qi in qubit_indices:
+            qubit_depth[qi] = new_depth
+
+    critical_path_length = max(qubit_depth) if qubit_depth else 1
+
+    return [d / max(critical_path_length, 1) for d in qubit_depth]
+
+
+def compute_rwpe(edge_list: list[tuple[int, int]], num_nodes: int, k: int) -> torch.Tensor:
+    """Compute Random Walk Positional Encoding.
+
+    RWPE_i = [RW^1_ii, RW^2_ii, ..., RW^k_ii]
+    where RW is the random walk transition matrix (row-normalized adjacency).
+
+    Args:
+        edge_list: List of undirected edges (i, j).
+        num_nodes: Number of nodes in the graph.
+        k: Number of random walk steps.
+
+    Returns:
+        Tensor of shape (num_nodes, k) with self-return probabilities.
+    """
+    if num_nodes == 0 or k == 0:
+        return torch.zeros((num_nodes, k), dtype=torch.float32)
+
+    # Build adjacency matrix
+    A = torch.zeros(num_nodes, num_nodes, dtype=torch.float32)
+    for i, j in edge_list:
+        A[i, j] = 1.0
+        A[j, i] = 1.0
+
+    # Row-normalize to get transition matrix
+    D = A.sum(dim=1, keepdim=True).clamp(min=1.0)
+    M = A / D
+
+    # Compute k-step self-return probabilities
+    rwpe = torch.zeros(num_nodes, k, dtype=torch.float32)
+    Mk = M.clone()
+    for step in range(k):
+        rwpe[:, step] = Mk.diagonal()
+        if step < k - 1:
+            Mk = Mk @ M
+
+    return rwpe
+
+
 def build_circuit_graph(
     circuit: QuantumCircuit,
+    node_feature_names: list[str] | None = None,
+    rwpe_k: int = 0,
     eps: float = 1e-8,
 ) -> Data:
     """Build a PyG Data object for a quantum circuit.
 
-    Node features (4-dim) are z-score normalized within the circuit.
-    Same dimensions for both single-circuit and multi-programming.
+    Node features are selected by name from the feature registry,
+    z-score normalized within the circuit, then optionally concatenated
+    with RWPE (not z-score normalized).
 
     Args:
         circuit: A QuantumCircuit instance.
+        node_feature_names: List of feature names to include.
+            Defaults to DEFAULT_NODE_FEATURES if None.
+        rwpe_k: Number of RWPE steps (0 = disabled).
         eps: Epsilon for z-score normalization.
 
     Returns:
         PyG Data with x, edge_index, edge_attr, num_qubits.
     """
-    feats = extract_circuit_features(circuit)
-    x = feats["node_features"]  # (num_qubits, 4)
+    if node_feature_names is None:
+        node_feature_names = DEFAULT_NODE_FEATURES
 
-    # Z-score normalize node features within circuit (across qubits, dim=0)
+    feats = extract_circuit_features(circuit)
+    return build_circuit_graph_from_raw(
+        node_features_dict=feats["node_features_dict"],
+        edge_list=feats["edge_list"],
+        edge_features=feats["edge_features"],
+        num_qubits=feats["num_qubits"],
+        node_feature_names=node_feature_names,
+        rwpe_k=rwpe_k,
+        eps=eps,
+    )
+
+
+def build_circuit_graph_from_raw(
+    node_features_dict: dict[str, list[float]],
+    edge_list: list[tuple[int, int]],
+    edge_features: torch.Tensor,
+    num_qubits: int,
+    node_feature_names: list[str] | None = None,
+    rwpe_k: int = 0,
+    eps: float = 1e-8,
+) -> Data:
+    """Build a PyG Data object from pre-extracted raw features.
+
+    This enables feature selection at load time without re-parsing QASM.
+
+    Args:
+        node_features_dict: Dict mapping feature name -> list of values per qubit.
+        edge_list: List of (src, dst) edge pairs.
+        edge_features: Raw edge feature tensor (num_edges, 3).
+        num_qubits: Number of logical qubits.
+        node_feature_names: Which node features to include.
+        rwpe_k: Number of RWPE steps (0 = disabled).
+        eps: Epsilon for z-score normalization.
+
+    Returns:
+        PyG Data with x, edge_index, edge_attr, num_qubits.
+    """
+    if node_feature_names is None:
+        node_feature_names = DEFAULT_NODE_FEATURES
+
+    # Validate feature names
+    available = set(node_features_dict.keys())
+    for name in node_feature_names:
+        if name not in available:
+            raise ValueError(
+                f"Unknown circuit node feature '{name}'. "
+                f"Available: {sorted(available)}"
+            )
+
+    # Select and stack node features
+    selected = [node_features_dict[name] for name in node_feature_names]
+    x = torch.tensor(
+        list(zip(*selected)),
+        dtype=torch.float32,
+    )  # (num_qubits, num_features)
+
+    # Z-score normalize node features within circuit
     x = zscore_normalize(x, dim=0, eps=eps)
 
+    # Append RWPE if requested (not z-score normalized)
+    if rwpe_k > 0:
+        rwpe = compute_rwpe(edge_list, num_qubits, rwpe_k)
+        x = torch.cat([x, rwpe], dim=1)
+
     # Build edge_index: undirected -> both directions
-    edge_list = feats["edge_list"]
     if len(edge_list) > 0:
         src = [e[0] for e in edge_list] + [e[1] for e in edge_list]
         dst = [e[1] for e in edge_list] + [e[0] for e in edge_list]
         edge_index = torch.tensor([src, dst], dtype=torch.long)
 
-        edge_attr = feats["edge_features"]
+        edge_attr = edge_features.clone() if isinstance(edge_features, torch.Tensor) else torch.tensor(edge_features, dtype=torch.float32)
         edge_attr = torch.cat([edge_attr, edge_attr], dim=0)  # duplicate for both dirs
-        # Z-score normalize edge features within circuit (across edges, dim=0)
         edge_attr = zscore_normalize(edge_attr, dim=0, eps=eps)
     else:
         edge_index = torch.zeros((2, 0), dtype=torch.long)
@@ -160,5 +351,5 @@ def build_circuit_graph(
         x=x,
         edge_index=edge_index,
         edge_attr=edge_attr,
-        num_qubits=feats["num_qubits"],
+        num_qubits=num_qubits,
     )

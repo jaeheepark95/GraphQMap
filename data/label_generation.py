@@ -269,32 +269,22 @@ def layout_to_permutation_matrix(
     layout: list[int],
     num_physical: int,
 ) -> np.ndarray:
-    """Convert a layout to a binary permutation matrix Y (h×h).
+    """Convert a layout to a binary label matrix Y (l×h).
 
-    Y[i, layout[i]] = 1 for logical qubits.
-    Dummy rows are assigned to remaining physical qubits to complete
-    the permutation.
+    Y[i, layout[i]] = 1 for each logical qubit i.
+    No dummy rows — only logical qubits are represented.
 
     Args:
         layout: List of physical qubit assignments for each logical qubit.
         num_physical: Total number of physical qubits (h).
 
     Returns:
-        Y: (h, h) binary permutation matrix.
+        Y: (l, h) binary label matrix.
     """
     num_logical = len(layout)
-    Y = np.zeros((num_physical, num_physical), dtype=np.float32)
+    Y = np.zeros((num_logical, num_physical), dtype=np.float32)
 
-    # Assign logical qubits
-    assigned_physical = set()
     for logical_idx, physical_idx in enumerate(layout):
         Y[logical_idx, physical_idx] = 1.0
-        assigned_physical.add(physical_idx)
-
-    # Assign dummy rows to remaining physical qubits
-    remaining = [p for p in range(num_physical) if p not in assigned_physical]
-    for i, physical_idx in enumerate(remaining):
-        dummy_row = num_logical + i
-        Y[dummy_row, physical_idx] = 1.0
 
     return Y

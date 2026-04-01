@@ -459,6 +459,7 @@ def transpile_with_timing(
                 basis_gates,
                 approximation_degree=1.0,
                 coupling_map=coupling_map,
+                backend_props=backend.properties(),
             ),
             passes.Optimize1qGatesDecomposition(basis_gates),
         ]
@@ -522,6 +523,7 @@ def transpile_with_timing(
             basis_gates,
             approximation_degree=1.0,
             coupling_map=coupling_map,
+            backend_props=backend.properties(),
         ),
         passes.Optimize1qGatesDecomposition(basis_gates),
         passes.CommutativeCancellation(),
