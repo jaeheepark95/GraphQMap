@@ -95,13 +95,12 @@ class TestLabelGeneration:
     def test_layout_to_permutation_matrix(self):
         layout = [2, 0, 3]  # 3 logical -> 5 physical
         Y = layout_to_permutation_matrix(layout, num_physical=5)
-        assert Y.shape == (5, 5)
+        assert Y.shape == (3, 5)
         # Check logical qubit assignments
         assert Y[0, 2] == 1.0
         assert Y[1, 0] == 1.0
         assert Y[2, 3] == 1.0
-        # Should be a valid permutation matrix
-        assert np.allclose(Y.sum(axis=0), 1.0)
+        # Each logical qubit maps to exactly one physical qubit
         assert np.allclose(Y.sum(axis=1), 1.0)
 
     def test_permutation_matrix_identity(self):
@@ -144,7 +143,7 @@ def _make_sample(backend_name: str, num_logical: int, num_physical: int,
         edge_attr=torch.zeros((0, 3)),
     )
     hardware_data = Data(
-        x=torch.randn(num_physical, 7),
+        x=torch.randn(num_physical, 5),
         edge_index=torch.zeros((2, 0), dtype=torch.long),
         edge_attr=torch.zeros((0, 1)),
     )
@@ -198,7 +197,7 @@ class TestCollate:
         assert batch["num_physical"] == 5
         assert batch["num_logical"] == [3, 3]
         assert batch["backend_name"] == "manila"
-        assert batch["label_matrices"].shape == (2, 5, 5)
+        assert batch["label_matrices"].shape == (2, 3, 5)
 
     def test_collate_without_labels(self):
         samples = [

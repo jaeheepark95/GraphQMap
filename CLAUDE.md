@@ -16,14 +16,15 @@ Supports arbitrary multi-programming (any number of co-located circuits, total l
 - `data/` — dataset loaders, graph construction, label generation, normalization
 - `training/` — training loops, loss functions, tau scheduler, early stopping
 - `evaluation/` — PST measurement, metrics, baselines, transpiler, benchmarks
-  - `evaluation/transpiler.py` — custom PassManager builder (layout×routing combinations, per-stage timing)
+  - `evaluation/transpiler.py` — custom PassManager builder (layout×routing combinations, per-stage timing, noise-aware UnitarySynthesis)
   - `evaluation/benchmark.py` — structured benchmark runner (DataFrame output, simulator reuse)
   - `evaluation/prev_methods/` — baseline routing/layout methods (NASSC, NoiseAdaptive, QAP)
 - `configs/` — hyperparameter configs (YAML) and config loader (`config_loader.py`)
 - `runs/` — experiment outputs (timestamped, gitignored): checkpoints, metrics CSV, config snapshots, note.md, EXPERIMENTS.md
 - `scripts/` — dataset generation/processing scripts, `visualize.py` (training/eval plotting)
 - `docs/` — research specification and documentation
-- `tests/` — unit and integration tests (137 tests)
+- `scripts/diagnose_features.py` — circuit node feature quality diagnostics (effective dim, cosine sim, correlations)
+- `tests/` — unit and integration tests (151 tests)
 
 ## Dataset Structure
 All circuit data lives under `data/circuits/` with circuits, labels, backends, and splits separated.
@@ -36,7 +37,7 @@ data/circuits/
 │   ├── mqt_bench/                  # 1,219 circuits (no labels)
 │   ├── qasmbench/                  # 94 circuits (no labels, 2Q-127Q)
 │   ├── revlib/                     # 231 circuits (no labels, 3Q-127Q)
-│   └── benchmarks/                 # 23 evaluation benchmark circuits (3Q-9Q)
+│   └── benchmarks/                 # 23 evaluation benchmark circuits (3Q-13Q)
 ├── labels/                         # 4,269 total labels
 │   ├── queko/labels.json           # 540 τ⁻¹ true optimal labels
 │   └── mlqd/labels.json            # 3,729 OLSQ2 solver labels
@@ -102,7 +103,11 @@ python scripts/visualize.py runs/stage1/<RUN> runs/stage2/<RUN>
 python scripts/visualize.py --eval runs/eval/<RUN>/eval_results.csv
 
 # Tests
-pytest tests/                                       # 137 tests
+pytest tests/                                       # 151 tests
+
+# Feature diagnostics (run before training to verify feature quality)
+python scripts/diagnose_features.py --config configs/stage1.yaml
+python scripts/diagnose_features.py --features gate_count two_qubit_gate_count single_qubit_gate_ratio --rwpe-k 4
 
 # Dataset scripts
 python scripts/generate_queko_noise.py             # Generate synthetic noise profiles
@@ -155,7 +160,7 @@ runs/
 - `runs/` is gitignored
 - `checkpoint_dir`/`log_dir` in YAML configs are fallback values; overridden at runtime by `_setup_run_dir()`
 - Stage 2 `pretrained_checkpoint` must be specified via `--override` (no default path)
-- Stage 1→2 checkpoint loading uses `strict=False` (Stage 2 adds `noise_proj` layer not in Stage 1)
+- Stage 1→2 checkpoint loading uses `strict=False` (Stage 2 adds QualityScore layers not in Stage 1)
 
 ### Visualization
 Training and evaluation plots are auto-generated. Manual visualization is for comparing runs or standalone use:
@@ -186,15 +191,43 @@ python scripts/visualize.py runs/stage1/<RUN> --no-show
 - **Test (UNSEEN)**: FakeToronto(27Q), FakeBrooklyn(65Q), FakeTorino(133Q)
 - Native 2-qubit gates: cx, ecr, or cz (auto-detected via `_get_two_qubit_gate_name()`)
 
+## Circuit Node Feature System
+Circuit node features are **configurable via YAML** — no code changes needed to experiment with feature combinations. All candidate features are pre-computed during preprocessing (`scripts/preprocess_circuits.py`); feature selection happens at dataset load time.
+
+**Available features:** `gate_count`, `two_qubit_gate_count`, `degree`, `depth_participation`, `weighted_degree`, `single_qubit_gate_ratio`, `critical_path_fraction`
+**Positional encoding:** RWPE (Random Walk PE, configurable k steps)
+
+**Current default** (configs/stage1.yaml, stage2.yaml):
+```yaml
+node_features: [gate_count, two_qubit_gate_count, single_qubit_gate_ratio, critical_path_fraction]
+rwpe_k: 2    # node_input_dim = 4 + 2 = 6
+```
+
+**Cache format:** `data/circuits/cache/{source}/{filename}.pt` stores raw `node_features_dict` (all 7 features) + `edge_features`. Feature selection at load time means changing features does NOT require re-preprocessing. Old cache format (pre-built PyG Data) is detected and handled via fallback in `dataset.py`.
+
+**Feature diagnostics** (run before training):
+```bash
+python scripts/diagnose_features.py --config configs/stage1.yaml
+python scripts/diagnose_features.py --features gate_count two_qubit_gate_count single_qubit_gate_ratio --rwpe-k 2
+```
+
+**Known degeneracy in original features (gc, 2qc, deg, dp):**
+- `gate_count` ↔ `depth_participation`: |r| ≈ 1.0 in 100% of circuits (redundant)
+- `degree` constant in small fully-connected circuits → z-score makes it all-zero
+- Effective dimensionality: ~2.1 / 4; mean cosine similarity > 0.95 in 83-93% of circuits
+- Current features (gc, 2qc, sqr, cpf + RWPE2): eff dim 3.7 / 6, max |r| = 0.87
+
 ## Training Strategy
 - **Stage 1**: Supervised CE loss on labeled data (MLQD + QUEKO → QUEKO fine-tuning)
   - Phase 1: Train on all 3,846 labeled circuits with τ annealing (1.0→0.05)
   - Phase 2: Fine-tune on 486 QUEKO circuits with reduced LR (1/10)
+  - **Note**: Stage 1 effectiveness is under investigation — may be removed in favor of Stage 2 only
 - **Stage 2**: Unsupervised surrogate losses on all 6,887 circuits
   - Loss components configured via YAML registry pattern (see Loss Registry below)
   - Default: L_surr (error-weighted distance) + α·L_node (node quality MLP)
   - τ annealing (1.0→0.05, exponential), warm-up 2 epochs
   - Large backend (50Q+) oversampling via `large_backend_boost`
+  - Can run with or without Stage 1 pretrained checkpoint
 
 ### Loss Registry (Stage 2)
 Loss components are modular and configured declaratively in YAML. Each component is registered via `@register_loss()` decorator in `training/losses.py`.
@@ -202,11 +235,12 @@ Loss components are modular and configured declaratively in YAML. Each component
 **Available components:**
 | Name | Loss | Description | Bounds |
 |------|------|-------------|--------|
-| `error_distance` | L_surr | Error-weighted shortest path distance (Floyd-Warshall on cx_error) | [0, ∞) |
+| `error_distance` | L_surr | Gate-frequency-weighted error distance (Floyd-Warshall on cx_error) | [0, ∞) |
 | `adjacency` | L_adj | Binary adjacency matching with gate-frequency weighting | [-1, 0] |
 | `hop_distance` | L_hop | Normalized hop distance penalty | [0, 1] |
 | `node_quality` | L_node | Learnable MLP qubit quality score | [-1, 0] |
 | `separation` | L_sep | Multi-programming circuit separation | [-1, 0] |
+| `exclusion` | L_excl | Column-wise one-to-one mapping penalty (penalizes shared physical qubits) | [l/h, l] |
 
 **YAML config format:**
 ```yaml
@@ -225,17 +259,23 @@ loss:
 - Each run's `config.yaml` records exact loss configuration for reproducibility
 - Metrics CSV columns are dynamic — reflect active components
 
+## Known Issues & Active Investigation
+- **Score matrix row collapse**: Circuit information collapses through GNN→cross-attention, making score matrix rows indistinguishable. Root cause: insufficient node feature differentiation at GNN input. Addressed by feature registry + RWPE, but not fully resolved.
+- **Stage 2 surrogate loss saturation**: Both `error_distance` and `node_quality` saturate early (epoch ~10), leaving 90+ epochs without meaningful gradient signal. `node_quality` reaches -1.0 (its bound) almost immediately.
+- **Val PST oscillation**: PST validation fluctuates widely across epochs (0.12-0.30) rather than converging, suggesting surrogate loss does not correlate well with actual PST.
+- **Stage 1 effectiveness**: Stage 1 supervised pretraining may not improve final PST over Stage 2 from scratch. Under investigation — Stage 2 from scratch with new features achieved best Val PST 0.2410 vs 0.3044 with Stage 1 pretrain, but both show high variance.
+
 ## Critical Rules
 - All quantum circuits are pre-normalized to basis gates {cx, id, rz, sx, x} via `scripts/normalize_gates.py`
 - All quantum circuits loaded from .qasm files (OPENQASM 2.0)
 - Hardware noise features MUST be z-score normalized WITHIN each backend
-- Circuit node features MUST be z-score normalized WITHIN each circuit
+- Circuit node features MUST be z-score normalized WITHIN each circuit (RWPE is NOT z-score normalized)
 - Circuit edge features MUST be z-score normalized WITHIN each circuit (multi-programming: group-level via `renormalize_group_edges`)
-- Sinkhorn MUST use log-domain implementation (numerical stability at low τ)
+- Score normalization: SoftmaxNorm (row-wise softmax) is the primary method → P (batch, l, h) row-stochastic
+  - SinkhornLayer (log-domain, dummy padding l×h → h×h → doubly stochastic P (batch, h, h)) is kept in `models/sinkhorn.py` for future experimentation
 - Stage 1 uses existing labels: QUEKO (τ⁻¹), MLQD (OLSQ2)
 - Stage 2 uses unsupervised surrogate losses on all circuits
-- Score Matrix uses Cross-Attention + learned projection + noise-aware bias, NOT simple dot product
-- Dummy padding for rectangular l×h → h×h before Sinkhorn
+- Score Matrix uses Cross-Attention + learned projection, NOT simple dot product (noise_bias disabled by default)
 - All hyperparameters configurable via YAML
 - Batching groups samples by (backend, num_logical) for uniform tensor shapes
 - PST measurement: P(correct output) = primary metric
@@ -243,8 +283,10 @@ loss:
 - PST simulation: on tensor_network failure (large/deep circuits on 100Q+ backends), simulators are recreated to recover GPU state
 - Evaluation order: baselines run before model to prevent GPU state corruption from model-generated deep circuits
 - PST measurement: optimization_level configurable (default 3), 8192 shots
-- Transpilation: custom PassManager builder supporting layout×routing combinations (sabre, nassc, dense, noise_adaptive, trivial, qap)
-- Benchmark circuits: 23 standard circuits (3Q-9Q), stored in `data/circuits/qasm/benchmarks/`, deduplicated from training sets
+- Transpilation: all evaluation paths (baselines + model) use unified `transpile_with_timing()` from `evaluation/transpiler.py`
+- Transpilation: custom PassManager with noise-aware UnitarySynthesis (`backend_props`) for all methods
+- Transpilation: supported layout×routing combinations (sabre, nassc, dense, noise_adaptive, trivial, qap)
+- Benchmark circuits: 23 standard circuits (3Q-13Q), stored in `data/circuits/qasm/benchmarks/`, deduplicated from training sets
 - Multi-programming: model handles arbitrary circuit count; training scenarios configured via YAML (no fixed limit on circuit count)
 
 ## Dependencies

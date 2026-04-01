@@ -73,11 +73,9 @@ Input: Quantum circuit (.qasm) + Target hardware (FakeBackendV2)
   ↓
 [Score Head] → S (l×h) = (C'·W_q) × (H'·W_k)ᵀ / √d_k
   ↓
-[Dummy Padding] → S_padded (h×h) by appending (h-l) dummy rows (zeros)
+[Row-wise Softmax(S/τ)] → P (l×h) row-stochastic matrix
   ↓
-[Log-domain Sinkhorn] → P (h×h) doubly stochastic matrix
-  ↓
-[Hungarian Algorithm] → Discrete one-to-one mapping (use top l rows only)
+[Hungarian Algorithm] → Discrete one-to-one mapping
   ↓
 Output: Initial layout (logical qubit → physical qubit mapping)
   ↓
@@ -90,14 +88,14 @@ Output: Initial layout (logical qubit → physical qubit mapping)
 
 Same as above except:
 - **No Hungarian algorithm** during training — P matrix is used directly for loss computation
-- **Sinkhorn temperature τ** is annealed during both Stage 1 and Stage 2
+- **Softmax temperature τ** is annealed during both Stage 1 and Stage 2
 
 ### Multi-Programming Pipeline
 
 For multiple circuits (e.g., C₁ with l₁ qubits, C₂ with l₂ qubits):
 1. Merge circuit graphs into a single **disconnected graph** (no edges between circuits) — node features stay at **4 dimensions** (same as single-circuit)
 2. Circuit GNN output becomes (l₁+l₂)×d
-3. Rest of pipeline is identical — Sinkhorn's doubly stochastic constraint automatically prevents mapping conflicts
+3. Rest of pipeline is identical — softmax row-stochastic output combined with Hungarian algorithm prevents mapping conflicts
 4. **No architectural modifications required** — single-circuit is simply a special case of multi-programming with one circuit
 
 ---
@@ -110,20 +108,61 @@ For multiple circuits (e.g., C₁ with l₁ qubits, C₂ with l₂ qubits):
 
 **Edge:** Undirected. An edge exists between logical qubits i and j if any 2-qubit gate connects them. Multiple gates on the same pair are merged into a single edge.
 
-**Node Features (per logical qubit):**
+**Node Features (per logical qubit) — configurable via YAML:**
 
-| Feature | Description |
-|---------|-------------|
-| `gate_count` | Total number of gates on this qubit (includes both 1Q and 2Q gates) |
-| `two_qubit_gate_count` | Number of 2-qubit gates involving this qubit (each gate counted on both qubits symmetrically) |
-| `degree` | Number of distinct qubits this qubit interacts with via 2-qubit gates |
-| `circuit_depth_participation` | Fraction of circuit depth in which this qubit is active (not idle) |
+Node features are selected from a registry in `data/circuit_graph.py`. The YAML config specifies which features to use and in what order. All features are computed during preprocessing; selection happens at load time.
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `gate_count` | Total number of gates on this qubit (includes both 1Q and 2Q gates) | ✓ |
+| `two_qubit_gate_count` | Number of 2-qubit gates involving this qubit (symmetric) | ✓ |
+| `degree` | Number of distinct qubits this qubit interacts with via 2-qubit gates | |
+| `depth_participation` | Fraction of circuit depth in which this qubit is active (not idle) | |
+| `weighted_degree` | Sum of interaction counts across all connected edges | |
+| `single_qubit_gate_ratio` | (gate_count - 2q_count) / gate_count | ✓ |
+| `critical_path_fraction` | Fraction of DAG critical path length involving this qubit | ✓ |
+
+**Positional Encoding (optional, appended after node features):**
+
+| Feature | Description | Config |
+|---------|-------------|--------|
+| `rwpe` | Random Walk Positional Encoding: k-step self-return probabilities | `rwpe_k: 2` |
+
+RWPE computes `[M^1_ii, M^2_ii, ..., M^k_ii]` where M is the row-normalized adjacency (random walk transition matrix). This gives each node a structural fingerprint based on its local topology, helping the GNN distinguish structurally similar nodes. RWPE is **not z-score normalized** (values are probabilities in [0, 1]).
+
+**RWPE k selection:** k=1 is always zero (no self-loops), so it is wasted. k=2 provides the largest effective dimension jump (+0.97). k≥3 adds diminishing returns with increasing dead columns. **k=2 is optimal** for this dataset.
+
+| k | Total dim | Eff. dim | Dead cols | Efficiency |
+|---|-----------|----------|-----------|------------|
+| 0 | 4 | 2.73 | 0.65 | 68% |
+| 2 | 6 | 3.70 | 1.71 | 62% |
+| 4 | 8 | 4.18 | 2.37 | 52% |
+
+**YAML config format:**
+```yaml
+model:
+  circuit_gnn:
+    node_features:        # select from registry
+      - gate_count
+      - two_qubit_gate_count
+      - single_qubit_gate_ratio
+      - critical_path_fraction
+    rwpe_k: 2             # append 2-step RWPE
+    # node_input_dim is auto-computed: len(node_features) + rwpe_k = 6
+```
+
+**Feature diagnostics:** Run `python scripts/diagnose_features.py --config configs/stage1.yaml` to measure effective dimensionality, cosine similarity, and column correlations before training.
+
+**Known feature degeneracy issues (motivating the registry):**
+- `gate_count` ↔ `depth_participation` correlation: |r| > 0.95 in 100% of circuits tested. These two features are nearly redundant — they carry ~1 effective dimension of information, not 2.
+- `degree` becomes constant (all qubits identical) in small fully-connected circuits → z-score makes it all-zero, losing information entirely.
+- Empirical effective dimensionality: ~2 out of 4 features (QUEKO: 2.50, MLQD: 2.03).
+- Node cosine similarity > 0.95 in 83-93% of circuits → GNN input barely distinguishes qubits.
 
 **Node feature design notes:**
-- `gate_count` includes `two_qubit_gate_count` (i.e., `gate_count` ≥ `two_qubit_gate_count`), so the two features are correlated. The incremental information from `gate_count` is the single-qubit gate count, which partially overlaps with `circuit_depth_participation`. This redundancy is tolerated — the GNN learns which combinations are informative, and 4 features is a small enough dimension that overfitting is not a concern.
-- `degree` and `two_qubit_gate_count` are also correlated (more interactions → more unique neighbors), but degree specifically captures "hub" structure (fan-out) while `two_qubit_gate_count` captures total interaction load.
 - 2-qubit gate counts are applied **symmetrically** to both control and target qubits. For initial layout, the interaction frequency (not the control/target role) is what drives placement decisions — both qubits experience the same decoherence during the gate.
-- **Ablation candidate:** whether `gate_count` adds value beyond `two_qubit_gate_count` + `circuit_depth_participation`.
+- `weighted_degree` complements `degree`: degree counts unique neighbors, weighted_degree sums interaction counts. A qubit with 2 neighbors but 50 interactions is very different from one with 2 neighbors and 2 interactions.
+- `critical_path_fraction` identifies bottleneck qubits that constrain circuit depth — these should be placed on high-quality physical qubits.
 
 **Edge Features (per qubit pair):**
 
@@ -140,7 +179,7 @@ For multiple circuits (e.g., C₁ with l₁ qubits, C₂ with l₂ qubits):
 
 **Multi-Programming Note:**
 
-Multi-programming uses the same 4 node features as single-circuit. Circuit graphs are merged into a disconnected graph without additional features. The GNN naturally distinguishes circuits through disconnected components, and Sinkhorn prevents mapping conflicts. No per-circuit global summary features are used — this keeps single-circuit and multi-programming unified under the same input dimensions.
+Multi-programming uses the same 4 node features as single-circuit. Circuit graphs are merged into a disconnected graph without additional features. The GNN naturally distinguishes circuits through disconnected components, and Hungarian decoding prevents mapping conflicts. No per-circuit global summary features are used — this keeps single-circuit and multi-programming unified under the same input dimensions.
 
 **Circuit Node Feature Normalization:** Z-score normalized **within each circuit** (across qubits, dim=0). This captures *relative* qubit importance within the circuit — which qubit is busier than others — rather than absolute counts. This is intentional: hardware features are also normalized within-backend, so the model learns to match "relatively busy logical qubit → relatively good physical qubit" in a consistent scale.
 
@@ -212,11 +251,10 @@ Cross-Attention Layer 2:
   H' = LayerNorm(H' + FFN(H'))
 
 Score Head: S = (C'·W_q) × (H'·W_k)ᵀ / √d_k  → l×h
-Dummy Padding → h×h
-Log-domain Sinkhorn(S/τ) → P (h×h)
+Row-wise Softmax(S/τ) → P (l×h) row-stochastic
 
 [Training] P used directly for loss
-[Inference] Hungarian(P) → discrete mapping (top l rows only)
+[Inference] Hungarian(P) → discrete mapping
 ```
 
 ### 4.2 Dual GNN Encoder (GATv2)
@@ -265,7 +303,7 @@ h_out = GATv2Layer(h_in) + h_in  # Applied on layers 2, 3
 
 **Input dimensions:**
 - Circuit GNN input: `num_circuit_node_features` (4: gate_count, 2q_count, degree, depth_participation — same for single and multi-programming)
-- Hardware GNN input: `num_hardware_node_features` (7: T1, T2, readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio)
+- Hardware GNN input: `num_hardware_node_features` (5: readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio)
 - Circuit edge features: 3 (interaction_count, earliest, latest)
 - Hardware edge features: 1 (cx_error)
 
@@ -308,58 +346,38 @@ bias_j = Linear(hw_node_features_j)
 
 - `W_q`: learnable matrix d → d_k (d_k = 64)
 - `W_k`: learnable matrix d → d_k (d_k = 64)
-- Scaled by `√d_k` for numerical stability before Sinkhorn
-- `bias_j`: per-physical-qubit bias learned from hardware noise features (7-dim → 1), encourages mapping to low-error qubits (similar to QAP's readout/gate error cost terms)
-- `noise_bias_dim`: configurable (0 to disable, 7 to enable with all hardware features)
+- Scaled by `√d_k` for numerical stability before softmax
+- `noise_bias_dim`: configurable (default 0, disabled). When enabled, adds per-physical-qubit bias from hardware features. Disabled by default to avoid gradient conflict with Hardware GNN (same features flowing through two paths to score matrix).
 
 **Output:** S matrix of shape (l × h)
 
-### 4.5 Dummy Padding
+### 4.5 Score Normalization: SoftmaxNorm
 
-Since l < h, append (h - l) dummy rows of zeros to S, creating an h×h square matrix.
-
-**Dummy row initial values:** 0 (or small constant)
-
-**Rationale for dummy padding over rectangular Sinkhorn:**
-1. Standard Sinkhorn convergence guarantees preserved
-2. Hungarian algorithm directly compatible (works on square matrices)
-3. Gradient flow unaffected (dummy rows not connected to learnable params)
-4. Simple implementation: `torch.nn.functional.pad`
-
-### 4.6 Log-Domain Sinkhorn
-
-**CRITICAL: Use log-domain implementation for numerical stability at low τ.**
+Row-wise softmax converts the score matrix S (l×h) into a row-stochastic matrix P (l×h).
+No dummy padding needed — each row independently sums to 1.
 
 ```python
-def log_sinkhorn(log_alpha, max_iter=20, tol=1e-6):
-    """
-    log_alpha: h×h matrix (= S_padded / τ, already in log domain)
-    """
-    for i in range(max_iter):
-        # Row normalization in log domain
-        log_alpha = log_alpha - torch.logsumexp(log_alpha, dim=1, keepdim=True)
-        # Column normalization in log domain
-        log_alpha = log_alpha - torch.logsumexp(log_alpha, dim=0, keepdim=True)
-        
-        # Early stopping check
-        if (log_alpha.exp().sum(dim=1) - 1).abs().max() < tol:
-            break
-    
-    return log_alpha.exp()  # Return P matrix
+P = F.softmax(S / tau, dim=-1)  # (batch, l, h)
 ```
 
-**Sinkhorn Hyperparameters:**
+**Temperature τ:**
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| τ_max (initial) | 1.0 (Stage 1), 0.5 (Stage 2) | Soft distribution at training start |
+| τ_max (initial) | 1.0 | Soft distribution at training start |
 | τ_min (final) | 0.05 | Near one-hot; minimizes train-inference gap |
 | τ Schedule | Exponential decay | `τ(epoch) = τ_max · (τ_min/τ_max)^(epoch/total_epochs)` |
-| Stage 1 | Annealing from 1.0 to 0.05 | Full range for learning basic mappings |
-| Stage 2 | Annealing from 1.0 to 0.05 | Starts softer for gradient flow with surrogate losses |
-| Max Iterations | 20 | |
-| Early Stop Tolerance | 1e-6 | |
-| Implementation | Log-domain | Prevents overflow at low τ |
+
+### 4.6 Legacy: Log-Domain Sinkhorn (kept for experimentation)
+
+SinkhornLayer with dummy padding (l×h → h×h) and log-domain normalization is preserved in
+`models/sinkhorn.py` for future experimentation. It produces a doubly stochastic matrix P (h×h).
+
+**Key differences from SoftmaxNorm:**
+- Requires dummy padding (h-l zero rows) to make the matrix square
+- Produces doubly stochastic P (rows AND columns sum to 1)
+- Log-domain implementation prevents overflow at low τ
+- Hungarian decoding uses top l rows only
 
 ### 4.7 Hungarian Algorithm (Inference Only)
 
@@ -374,6 +392,8 @@ Use `scipy.optimize.linear_sum_assignment` with cost matrix `(1 - P)` (since Hun
 > **Note:** RL fine-tuning has been excluded from scope. The training consists of 2 stages only.
 
 ### 5.1 Stage 1: Supervised Pre-training
+
+> **Status: Under investigation.** Early experiments suggest Stage 1 pretraining may not improve final PST over Stage 2 from scratch. See "Experimental Findings" below.
 
 **Objective:** Learn the basic sense of what constitutes a good qubit mapping.
 
@@ -392,7 +412,7 @@ Ground truth layout π is converted to binary permutation matrix Y (h×h):
 L_sup = -Σ_i Σ_j Y_ij · log(P_ij)
 ```
 
-**Sinkhorn τ:** Annealed from τ_max=1.0 to τ_min=0.05 via exponential decay.
+**Softmax τ:** Annealed from τ_max=1.0 to τ_min=0.05 via exponential decay.
 
 **MLQD + QUEKO → QUEKO-only Transition:**
 - Criterion: Validation cross-entropy loss early stopping (patience = 15 epochs main, 10 epochs QUEKO)
@@ -405,7 +425,7 @@ L_sup = -Σ_i Σ_j Y_ij · log(P_ij)
 
 **Data:** All available circuits including QASMBench and RevLib (no labels required). Labeled datasets (MQT Bench, MLQD, QUEKO) can also be included for surrogate fine-tuning.
 
-**Sinkhorn τ:** Fixed at 0.05.
+**Softmax τ:** Fixed at 0.05.
 
 **Optimizer:** AdamW with cosine annealing. Warm-up 5 epochs.
 
@@ -431,10 +451,10 @@ loss:
 Uses precomputed error-accumulated shortest path distances (Floyd-Warshall on 2Q gate error rates).
 
 ```
-L_surr = (1/|E_circuit|) · Σ_{(i,j)∈E_circuit} Σ_{p,q} P_ip · P_jq · d_error(p,q)
+L_surr = (1/W) · Σ_{(i,j)∈E_circuit} f_ij · Σ_{p,q} P_ip · P_jq · d_error(p,q)
 ```
 
-Where d_error(p,q) = error-weighted shortest path between physical qubits p and q. Directly encodes the total error cost of SWAP chains. Fully differentiable w.r.t. P. Bounded in [0, ∞).
+Where f_ij = 2Q gate count for pair (i,j), W = Σ f_ij. d_error(p,q) = error-weighted shortest path between physical qubits p and q. Gate-frequency weighting ensures frequently-interacting pairs contribute proportionally more. Fully differentiable w.r.t. P. Bounded in [0, ∞).
 
 #### adjacency — L_adj: Adjacency Matching Loss (Gate-Frequency Weighted)
 
@@ -462,7 +482,7 @@ Where d_hop_norm = d_hw / max(d_hw), normalized to [0, 1].
 Drives important logical qubits to high-quality physical qubits via learnable MLP.
 
 ```python
-q_score(p) = sigmoid(MLP(hw_features_p))    # MLP: Linear(7→16) → ELU → Linear(16→1)
+q_score(p) = sigmoid(MLP(hw_features_p))    # MLP: Linear(5→16) → ELU → Linear(16→1)
 ```
 
 ```
@@ -512,6 +532,42 @@ L_2 = Σ_k weight_k · component_k(P, ...)
 3. Run `qiskit.transpile(initial_layout=layout, routing_method=configurable)`
 4. Run noise simulation on FakeBackendV2
 5. Compute PST
+
+### 5.4 Experimental Findings (2026-04)
+
+#### Feature Ablation
+
+Original node features (gate_count, two_qubit_gate_count, degree, depth_participation) suffered from severe degeneracy:
+- `gate_count` ↔ `depth_participation` correlation |r| ≈ 1.0 in 100% of circuits
+- `degree` constant (→ zero after z-score) in 26% of benchmark circuits
+- Effective dimensionality: ~2.1 / 4
+
+Replacement features (gate_count, two_qubit_gate_count, single_qubit_gate_ratio, critical_path_fraction + RWPE k=2) improved effective dimensionality to 3.7 / 6 and eliminated perfect correlations (max |r| = 0.87).
+
+Note: `weighted_degree` was found to be mathematically identical to `two_qubit_gate_count` (r = 1.0), providing no independent information.
+
+#### Stage 1 Supervised Learning Results
+
+| Experiment | Features | Stage 1 Best Val Loss (Phase 1 / Phase 2) |
+|------------|----------|-------------------------------------------|
+| 1-A | old (gc,2qc,deg,dp) | 35.70 / 55.36 |
+| 1-C | new (gc,2qc,sqr,cpf+RWPE2) | 37.73 / 69.65 |
+
+Old features performed better in Stage 1 supervised learning. This is expected — Stage 1 is essentially label memorization, and the original features (including degree, which directly reflects graph topology) may be more aligned with the specific label encoding scheme.
+
+#### Stage 2 Surrogate Learning Results
+
+| Experiment | Features | Pretrained | Best Val PST | Notes |
+|------------|----------|------------|-------------|-------|
+| 2-A | old (4dim) | Stage 1 ✓ | 0.3044 | PST oscillates 0.12–0.30 |
+| 2-B | new (6dim) | No (scratch) | 0.2410 | PST collapses after ep 64 |
+| Baseline (QAP+NASSC) | — | — | 0.3785 | Target to beat |
+
+**Key observations:**
+1. **Surrogate loss saturation**: Both `error_distance` and `node_quality` saturate within ~10 epochs. `node_quality` reaches its bound (-1.0) almost immediately, providing zero gradient signal for remaining epochs.
+2. **Val PST oscillation**: PST fluctuates widely (0.12–0.30) across epochs rather than converging, suggesting poor correlation between surrogate loss and actual PST.
+3. **Stage 1 pretrain effect**: Provides ~0.06 PST advantage (0.3044 vs 0.2410), but both still below QAP+NASSC baseline (0.3785).
+4. **Stage 1 value is questionable**: The supervised pretraining advantage may come from weight initialization quality rather than learned mapping knowledge.
 
 ---
 
@@ -695,8 +751,7 @@ Use **PyTorch Geometric standard batching**: multiple graphs merged into a singl
 
 **Samples using the same hardware backend are grouped into the same mini-batch.** This ensures:
 - All samples in a batch have identical h (physical qubit count)
-- Score Matrix / Sinkhorn / Loss computed as 3D tensor `(batch_size × h × h)` in parallel
-- Dummy padding amount varies per sample but matrix size is uniform
+- Score Matrix / Softmax / Loss computed as 3D tensor `(batch_size × l × h)` in parallel
 
 ### Dynamic Batch Size
 
@@ -751,7 +806,7 @@ The model supports **arbitrary multi-programming** — any number of circuits ca
 6. PST = noisy_counts[ideal_bitstring] / total_shots
 7. Supports multi-register circuits (space-separated bitstrings → per-register PST averaged)
 
-**Simulation method priority:** tensor_network+GPU → tensor_network+CPU → statevector (small circuits only)
+**Simulation method priority:** tensor_network+GPU → tensor_network+CPU (raises error if neither available)
 **Default shots:** 8192
 
 **Robustness:** On large backends (100Q+), model-generated layouts may produce very deep transpiled circuits that crash the tensor_network simulator (`CUTENSORNET_STATUS_INVALID_VALUE`). This corrupts GPU state for subsequent simulations. Mitigations:
@@ -759,6 +814,8 @@ The model supports **arbitrary multi-programming** — any number of circuits ca
 - **Simulator recovery:** On simulation failure, simulators are recreated and the failed run is recorded as NaN (excluded from averaging via `nanmean`).
 
 ### Transpilation
+
+All evaluation paths (baselines and model) use a unified transpilation function (`transpile_with_timing()` in `evaluation/transpiler.py`). This ensures identical pass pipelines, noise-aware `UnitarySynthesis` (with `backend_props`), and consistent per-stage timing/metadata collection across all methods.
 
 Custom PassManager builder (`evaluation/transpiler.py`) supporting all combinations:
 
@@ -774,7 +831,7 @@ Custom PassManager builder (`evaluation/transpiler.py`) supporting all combinati
 | `qap` | `sabre` | QAP-based layout (MQM) + standard routing |
 | `qap` | `nassc` | QAP-based layout (MQM) + noise-aware routing |
 
-Per-stage timing measured: init, layout, routing, optimization, scheduling.
+Per-stage timing measured: init, layout, routing, optimization, scheduling. Metadata includes `map_cx` (2Q gate count after routing, before optimization) for SWAP count estimation.
 
 ### Benchmark Circuits
 
@@ -859,7 +916,7 @@ These items are not yet finalized and need to be decided during implementation:
 - **Confirmed:** AdamW + Cosine Annealing LR scheduler
 - **Stage 1 LR:** 1e-3, weight decay 1e-4, cosine eta_min 1e-6
 - **Stage 2 LR:** 5e-4, weight decay 1e-4, cosine eta_min 1e-5, warmup 2 epochs
-- **Stage 2 Sinkhorn τ:** exponential decay from 1.0 to 0.05 (starts softer for wider exploration with surrogate losses)
+- **Stage 2 Softmax τ:** exponential decay from 1.0 to 0.05 (starts softer for wider exploration with surrogate losses)
 - **Gradient clipping (Stage 2):** max_norm 2.0
 
 ### Reproducibility Settings (Decided)
@@ -879,7 +936,7 @@ from qiskit_ibm_runtime.fake_provider import FakeBrisbane  # example (non-V2, us
 backend = FakeToronto()
 
 # Per-qubit properties:
-# T1, T2, readout_error, single-qubit gate errors, t1_cx_ratio, t2_cx_ratio
+# readout_error, single-qubit gate errors, degree, t1_cx_ratio, t2_cx_ratio
 # Extract from backend.properties() or backend.target
 
 # Per-edge properties:
@@ -909,7 +966,7 @@ d_error = floyd_warshall(adj)  # h×h matrix, precomputed once per backend
 
 ```python
 class QualityScore(nn.Module):
-    def __init__(self, num_features=7, hidden_dim=16):
+    def __init__(self, num_features=5, hidden_dim=16):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(num_features, hidden_dim),
@@ -919,30 +976,23 @@ class QualityScore(nn.Module):
 
     def forward(self, node_features):
         """
-        node_features: (h, 7) tensor
-        Columns: [T1_norm, T2_norm, readout_error_norm, single_qubit_error_norm,
+        node_features: (h, 5) tensor
+        Columns: [readout_error_norm, single_qubit_error_norm,
                   degree_norm, t1_cx_ratio_norm, t2_cx_ratio_norm]
         All pre-normalized within backend (z-score)
         """
         return torch.sigmoid(self.mlp(node_features).squeeze(-1))  # (h,), [0, 1]
 ```
 
-### Sinkhorn with Dummy Padding
+### Score Normalization (SoftmaxNorm)
 
 ```python
-def forward(self, S, l, h, tau):
+def forward(self, S, num_logical, num_physical, tau):
     """
     S: (batch, l, h) raw score matrix
-    Returns: P (batch, h, h) doubly stochastic matrix
+    Returns: P (batch, l, h) row-stochastic matrix
     """
-    # Dummy padding
-    dummy = torch.zeros(S.shape[0], h - l, h, device=S.device)
-    S_padded = torch.cat([S, dummy], dim=1)  # (batch, h, h)
-    
-    # Log-domain Sinkhorn
-    log_alpha = S_padded / tau
-    P = log_sinkhorn(log_alpha, max_iter=20, tol=1e-6)
-    return P
+    return F.softmax(S / tau, dim=-1)
 ```
 
 ### Multi-Programming Graph Merging
@@ -1002,14 +1052,12 @@ def hungarian_decode(P, l):
 | | FFN Hidden | 128 |
 | | Dropout | 0.1 |
 | **Score Head** | d_k | 64 |
-| | noise_bias_dim | 7 (0 to disable) |
-| **QualityScore** | Architecture | MLP: 7 → 16 → 1 + sigmoid |
+| | noise_bias_dim | 0 (disabled by default) |
+| **QualityScore** | Architecture | MLP: 5 → 16 → 1 + sigmoid |
 | | Hidden dim | 16 |
-| **Sinkhorn** | τ_max | 1.0 |
+| **SoftmaxNorm** | τ_max | 1.0 |
 | | τ_min | 0.05 |
 | | Schedule | Exponential decay (Stage 1), Fixed (Stage 2) |
-| | Max Iterations | 20 |
-| | Tolerance | 1e-6 |
 | **Stage 2 Loss** | Components | Configurable via YAML registry |
 | | Default | error_distance (1.0) + node_quality (0.3) |
 | | Available | error_distance, adjacency, hop_distance, node_quality, separation |

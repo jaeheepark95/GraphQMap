@@ -18,6 +18,9 @@ checkpoints/
 logs/
 runs/
 
+# Claude Code memory
+memory/
+
 # Python
 __pycache__/
 *.pyc

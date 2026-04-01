@@ -6,7 +6,7 @@ import torch
 from qiskit import QuantumCircuit
 from torch_geometric.data import Data
 
-from data.circuit_graph import build_circuit_graph, extract_circuit_features
+from data.circuit_graph import build_circuit_graph, compute_rwpe, extract_circuit_features
 from data.hardware_graph import (
     build_hardware_graph,
     extract_edge_properties,
@@ -77,7 +77,7 @@ class TestHardwareGraph:
 
     def test_build_hardware_graph_shape(self, manila_backend):
         data = build_hardware_graph(manila_backend)
-        assert data.x.shape == (5, 7)  # 5 qubits, 7 features
+        assert data.x.shape == (5, 5)  # 5 qubits, 5 features
         assert data.edge_index.shape[0] == 2
         assert data.edge_index.shape[1] == 8  # 4 undirected edges * 2 directions
         assert data.edge_attr.shape[0] == 8
@@ -87,7 +87,7 @@ class TestHardwareGraph:
     def test_build_hardware_graph_normalized(self, manila_backend):
         data = build_hardware_graph(manila_backend)
         # Z-score normalized: mean ~0
-        assert torch.allclose(data.x.mean(dim=0), torch.zeros(7), atol=0.1)
+        assert torch.allclose(data.x.mean(dim=0), torch.zeros(5), atol=0.1)
 
     def test_precompute_error_distance(self, manila_backend):
         d_error = precompute_error_distance(manila_backend)
@@ -125,7 +125,15 @@ class TestCircuitGraph:
 
     def test_extract_features_node_shape(self, circuit):
         feats = extract_circuit_features(circuit)
-        assert feats["node_features"].shape == (3, 4)
+        nfd = feats["node_features_dict"]
+        assert isinstance(nfd, dict)
+        assert len(nfd["gate_count"]) == 3
+        assert len(nfd["two_qubit_gate_count"]) == 3
+        assert len(nfd["degree"]) == 3
+        assert len(nfd["depth_participation"]) == 3
+        assert len(nfd["weighted_degree"]) == 3
+        assert len(nfd["single_qubit_gate_ratio"]) == 3
+        assert len(nfd["critical_path_fraction"]) == 3
         assert feats["num_qubits"] == 3
 
     def test_extract_features_edge_shape(self, circuit):
@@ -140,6 +148,30 @@ class TestCircuitGraph:
         edge_dict = dict(zip(feats["edge_list"], feats["edge_features"].tolist()))
         assert edge_dict[(0, 1)][0] == 2  # interaction_count
         assert edge_dict[(1, 2)][0] == 1
+
+    def test_extract_features_weighted_degree(self, circuit):
+        feats = extract_circuit_features(circuit)
+        wd = feats["node_features_dict"]["weighted_degree"]
+        # q0 has 2 interactions with q1 = 2, q1 has 2+1 = 3, q2 has 1
+        assert wd[0] == 2.0
+        assert wd[1] == 3.0
+        assert wd[2] == 1.0
+
+    def test_extract_features_single_qubit_gate_ratio(self, circuit):
+        feats = extract_circuit_features(circuit)
+        sqr = feats["node_features_dict"]["single_qubit_gate_ratio"]
+        # All ratios should be between 0 and 1
+        for r in sqr:
+            assert 0.0 <= r <= 1.0
+
+    def test_extract_features_critical_path_fraction(self, circuit):
+        feats = extract_circuit_features(circuit)
+        cpf = feats["node_features_dict"]["critical_path_fraction"]
+        # All fractions should be between 0 and 1
+        for f in cpf:
+            assert 0.0 <= f <= 1.0
+        # At least one qubit should participate in critical path
+        assert max(cpf) > 0
 
     def test_build_circuit_graph_shape(self, circuit):
         data = build_circuit_graph(circuit)
@@ -169,6 +201,62 @@ class TestCircuitGraph:
         assert data.x.shape == (2, 4)
         assert data.edge_index.shape[1] == 0
         assert data.edge_attr.shape[0] == 0
+
+    def test_build_with_custom_features(self, circuit):
+        """Feature selection via node_feature_names."""
+        data = build_circuit_graph(
+            circuit,
+            node_feature_names=["gate_count", "weighted_degree"],
+        )
+        assert data.x.shape == (3, 2)
+
+    def test_build_with_rwpe(self, circuit):
+        """RWPE appends k dimensions to node features."""
+        data = build_circuit_graph(circuit, rwpe_k=4)
+        assert data.x.shape == (3, 4 + 4)  # 4 default features + 4 RWPE
+
+    def test_build_with_custom_features_and_rwpe(self, circuit):
+        data = build_circuit_graph(
+            circuit,
+            node_feature_names=["two_qubit_gate_count", "weighted_degree"],
+            rwpe_k=3,
+        )
+        assert data.x.shape == (3, 2 + 3)  # 2 features + 3 RWPE
+
+    def test_build_invalid_feature_raises(self, circuit):
+        with pytest.raises(ValueError, match="Unknown circuit node feature"):
+            build_circuit_graph(circuit, node_feature_names=["nonexistent"])
+
+
+class TestRWPE:
+    def test_rwpe_shape(self):
+        edges = [(0, 1), (1, 2)]
+        rwpe = compute_rwpe(edges, num_nodes=3, k=4)
+        assert rwpe.shape == (3, 4)
+
+    def test_rwpe_empty_graph(self):
+        rwpe = compute_rwpe([], num_nodes=3, k=4)
+        assert rwpe.shape == (3, 4)
+        assert (rwpe == 0).all()
+
+    def test_rwpe_zero_k(self):
+        rwpe = compute_rwpe([(0, 1)], num_nodes=2, k=0)
+        assert rwpe.shape == (2, 0)
+
+    def test_rwpe_values_in_range(self):
+        """Self-return probabilities should be in [0, 1]."""
+        edges = [(0, 1), (1, 2), (0, 2)]
+        rwpe = compute_rwpe(edges, num_nodes=3, k=8)
+        assert (rwpe >= 0).all()
+        assert (rwpe <= 1.0 + 1e-6).all()
+
+    def test_rwpe_symmetric_graph_same_values(self):
+        """In a fully connected 3-node graph, all nodes should have identical RWPE."""
+        edges = [(0, 1), (1, 2), (0, 2)]
+        rwpe = compute_rwpe(edges, num_nodes=3, k=4)
+        # All rows should be identical
+        assert torch.allclose(rwpe[0], rwpe[1])
+        assert torch.allclose(rwpe[1], rwpe[2])
 
 
 # ---- Group-Level Edge Renormalization ----

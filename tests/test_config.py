@@ -43,7 +43,7 @@ def test_load_stage1_config():
 def test_load_stage2_config():
     cfg = load_config("configs/stage2.yaml")
     assert cfg.training.stage == 2
-    assert cfg.sinkhorn.tau_max == 0.5
+    assert cfg.sinkhorn.tau_max == 1.0
     assert cfg.sinkhorn.tau_min == 0.05
     assert cfg.sinkhorn.schedule == "exponential"
     assert cfg.loss.type == "surrogate"

@@ -111,7 +111,7 @@ class TestBaselines:
         result = evaluate_baseline(circuit, backend, method="sabre", shots=1024)
         assert "pst" in result
         assert "method" in result
-        assert result["method"] == "sabre"
+        assert result["method"] == "sabre+sabre"
         assert 0.0 <= result["pst"] <= 1.0
 
 

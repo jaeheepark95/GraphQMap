@@ -9,7 +9,7 @@ from models.gnn_encoder import GNNEncoder
 from models.graphqmap import GraphQMap
 from models.hungarian import hungarian_decode, hungarian_decode_batch
 from models.score_head import ScoreHead
-from models.sinkhorn import SinkhornLayer, log_sinkhorn
+from models.sinkhorn import SinkhornLayer, SoftmaxNorm, log_sinkhorn
 
 
 # ---- GNN Encoder ----
@@ -18,12 +18,12 @@ class TestGNNEncoder:
     @pytest.fixture
     def encoder(self):
         return GNNEncoder(
-            node_input_dim=7, edge_input_dim=1, embedding_dim=64,
+            node_input_dim=5, edge_input_dim=1, embedding_dim=64,
             num_layers=3, num_heads=4, dropout=0.0,
         )
 
     def test_output_shape(self, encoder):
-        x = torch.randn(5, 7)
+        x = torch.randn(5, 5)
         edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]])
         edge_attr = torch.randn(4, 1)
         out = encoder(x, edge_index, edge_attr)
@@ -39,23 +39,23 @@ class TestGNNEncoder:
         assert out.shape == (3, 32)
 
     def test_no_edges(self):
-        enc = GNNEncoder(node_input_dim=7, edge_input_dim=1, embedding_dim=64,
+        enc = GNNEncoder(node_input_dim=5, edge_input_dim=1, embedding_dim=64,
                          num_layers=3, num_heads=4, dropout=0.0)
-        x = torch.randn(3, 7)
+        x = torch.randn(3, 5)
         edge_index = torch.zeros((2, 0), dtype=torch.long)
         edge_attr = torch.zeros((0, 1))
         out = enc(x, edge_index, edge_attr)
         assert out.shape == (3, 64)
 
     def test_gradient_flow(self, encoder):
-        x = torch.randn(5, 7, requires_grad=True)
+        x = torch.randn(5, 5, requires_grad=True)
         edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]])
         edge_attr = torch.randn(4, 1)
         out = encoder(x, edge_index, edge_attr)
         loss = out.sum()
         loss.backward()
         assert x.grad is not None
-        assert x.grad.shape == (5, 7)
+        assert x.grad.shape == (5, 5)
 
 
 # ---- Cross-Attention ----
@@ -110,9 +110,46 @@ class TestScoreHead:
         assert H.grad is not None
 
 
-# ---- Sinkhorn ----
+# ---- Score Normalization ----
+
+class TestSoftmaxNorm:
+    def test_row_stochastic(self):
+        """Output P should be row-stochastic (rows sum to 1)."""
+        layer = SoftmaxNorm()
+        S = torch.randn(2, 3, 5)  # l=3, h=5
+        P = layer(S, num_logical=3, num_physical=5, tau=0.1)
+        assert P.shape == (2, 3, 5)
+        row_sums = P.sum(dim=-1)
+        assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-5)
+
+    def test_low_tau_stability(self):
+        """Softmax should be stable at low τ values."""
+        layer = SoftmaxNorm()
+        S = torch.randn(1, 3, 5)
+        P = layer(S, num_logical=3, num_physical=5, tau=0.05)
+        assert torch.isfinite(P).all()
+        assert (P >= 0).all()
+
+    def test_gradient_flow(self):
+        layer = SoftmaxNorm()
+        S = torch.randn(1, 3, 5, requires_grad=True)
+        P = layer(S, num_logical=3, num_physical=5, tau=0.5)
+        P.sum().backward()
+        assert S.grad is not None
+
+    def test_square_case(self):
+        """When l == h, should still work correctly."""
+        layer = SoftmaxNorm()
+        S = torch.randn(2, 5, 5)
+        P = layer(S, num_logical=5, num_physical=5, tau=0.1)
+        assert P.shape == (2, 5, 5)
+        row_sums = P.sum(dim=-1)
+        assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-5)
+
 
 class TestSinkhorn:
+    """Legacy Sinkhorn tests (kept for reference)."""
+
     def test_doubly_stochastic(self):
         """Output P should be doubly stochastic (rows and cols sum to 1)."""
         S = torch.randn(2, 5, 5)
@@ -134,44 +171,29 @@ class TestSinkhorn:
         row_sums = P.sum(dim=-1)
         assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=0.05)
 
-    def test_low_tau_stability(self):
-        """Log-domain should be stable at low τ values."""
-        S = torch.randn(1, 5, 5)
-        P = log_sinkhorn(S / 0.05, max_iter=50)
-        assert torch.isfinite(P).all()
-        assert (P >= 0).all()
-
-    def test_gradient_flow(self):
-        layer = SinkhornLayer(max_iter=20)
-        S = torch.randn(1, 3, 5, requires_grad=True)
-        P = layer(S, num_logical=3, num_physical=5, tau=0.5)
-        P.sum().backward()
-        assert S.grad is not None
-
 
 # ---- Hungarian ----
 
 class TestHungarian:
     def test_basic_decode(self):
         """Near-identity P should produce identity mapping."""
-        P = torch.eye(5) * 0.8 + 0.04  # strong diagonal
+        # (3, 5) row-stochastic with strong preference for first 3 physical qubits
+        P = torch.zeros(3, 5)
+        for i in range(3):
+            P[i, i] = 0.8
+            P[i] = P[i] + 0.04
         layout = hungarian_decode(P, num_logical=3)
         assert len(layout) == 3
-        # Should map to first 3 physical qubits
         for i in range(3):
             assert layout[i] == i
 
     def test_unique_assignments(self):
-        P = torch.rand(5, 5)
-        P = log_sinkhorn(P, max_iter=50)
+        P = torch.softmax(torch.randn(3, 5), dim=-1)
         layout = hungarian_decode(P, num_logical=3)
-        # All physical qubits should be distinct
         assert len(set(layout.values())) == 3
 
     def test_batch_decode(self):
-        P = torch.rand(4, 5, 5)
-        for i in range(4):
-            P[i] = log_sinkhorn(P[i].unsqueeze(0), max_iter=50).squeeze(0)
+        P = torch.softmax(torch.randn(4, 3, 5), dim=-1)
         layouts = hungarian_decode_batch(P, num_logical=3)
         assert len(layouts) == 4
         for layout in layouts:
@@ -186,7 +208,7 @@ class TestGraphQMap:
     def model(self):
         return GraphQMap(
             circuit_node_dim=4, circuit_edge_dim=3,
-            hardware_node_dim=7, hardware_edge_dim=1,
+            hardware_node_dim=5, hardware_edge_dim=1,
             embedding_dim=32, gnn_layers=2, gnn_heads=4,
             gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
             cross_attn_ffn_dim=64, cross_attn_dropout=0.0,
@@ -207,7 +229,7 @@ class TestGraphQMap:
 
         hw_graphs = []
         for _ in range(batch_size):
-            x = torch.randn(num_physical, 7)
+            x = torch.randn(num_physical, 5)
             src = list(range(num_physical - 1))
             dst = list(range(1, num_physical))
             edge_index = torch.tensor([src + dst, dst + src], dtype=torch.long)
@@ -222,14 +244,14 @@ class TestGraphQMap:
         circuit_batch, hw_batch = self._make_batch(2, 3, 5)
         P = model(circuit_batch, hw_batch, batch_size=2, num_logical=3,
                   num_physical=5, tau=0.5)
-        assert P.shape == (2, 5, 5)
+        assert P.shape == (2, 3, 5)
 
-    def test_forward_doubly_stochastic(self, model):
+    def test_forward_row_stochastic(self, model):
         circuit_batch, hw_batch = self._make_batch(2, 3, 5)
         P = model(circuit_batch, hw_batch, batch_size=2, num_logical=3,
                   num_physical=5, tau=0.5)
         row_sums = P.sum(dim=-1)
-        assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=0.1)
+        assert torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-5)
 
     def test_predict(self, model):
         circuit_batch, hw_batch = self._make_batch(2, 3, 5)

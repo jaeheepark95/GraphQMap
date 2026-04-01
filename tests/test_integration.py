@@ -59,7 +59,7 @@ class TestEndToEnd:
         return GraphQMap(
             circuit_node_dim=4,
             circuit_edge_dim=3,
-            hardware_node_dim=7,
+            hardware_node_dim=5,
             hardware_edge_dim=1,
             embedding_dim=32,
             gnn_layers=2,
@@ -84,7 +84,7 @@ class TestEndToEnd:
         # Forward
         P = model(circuit_batch, hw_batch, batch_size=1,
                   num_logical=3, num_physical=5, tau=0.5)
-        assert P.shape == (1, 5, 5)
+        assert P.shape == (1, 3, 5)
 
         # Predict
         layouts = model.predict(circuit_batch, hw_batch, batch_size=1,
@@ -105,7 +105,7 @@ class TestEndToEnd:
         label_result = generate_label(circuit, backend,
                                       num_sabre_seeds=3, num_random=2, rng_seed=42)
         Y = layout_to_permutation_matrix(label_result.layout, num_physical=5)
-        Y_tensor = torch.tensor(Y).unsqueeze(0)  # (1, 5, 5)
+        Y_tensor = torch.tensor(Y).unsqueeze(0)  # (1, 3, 5)
 
         circuit_batch = Batch.from_data_list([circuit_graph])
         hw_batch = Batch.from_data_list([hw_graph])
@@ -151,16 +151,16 @@ class TestEndToEnd:
         circuit_edge_weights = feats["edge_features"][:, 0].tolist()
 
         # Qubit importance
-        importance = feats["node_features"][:, 1]  # two_qubit_gate_count
+        importance = torch.tensor(feats["node_features_dict"]["two_qubit_gate_count"])
 
-        # Hardware node features for q_score (all 7 features)
-        hw_features = hw_graph.x  # T1, T2, readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
+        # Hardware node features for q_score (5 features)
+        hw_features = hw_graph.x  # readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
 
         circuit_batch = Batch.from_data_list([circuit_graph])
         hw_batch = Batch.from_data_list([hw_graph])
 
         # Setup
-        quality_score = QualityScore(num_features=7)
+        quality_score = QualityScore(num_features=5)
         criterion = Stage2Loss(
             components=[
                 {"name": "error_distance", "weight": 1.0},
@@ -261,7 +261,7 @@ class TestEndToEnd:
         # Same model works for both single and multi-programming
         model_mp = GraphQMap(
             circuit_node_dim=4, circuit_edge_dim=3,
-            hardware_node_dim=7, hardware_edge_dim=1,
+            hardware_node_dim=5, hardware_edge_dim=1,
             embedding_dim=32, gnn_layers=2, gnn_heads=4,
             gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
             cross_attn_ffn_dim=64, cross_attn_dropout=0.0,
@@ -286,7 +286,11 @@ class TestEndToEnd:
 
         backend = get_backend("manila")
         circuit = _make_circuit(3, 3, seed=99)
-        circuit_graph = build_circuit_graph(circuit)
+        node_fnames = getattr(cfg.model.circuit_gnn, "node_features", None)
+        rwpe_k = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
+        circuit_graph = build_circuit_graph(
+            circuit, node_feature_names=node_fnames, rwpe_k=rwpe_k,
+        )
         hw_graph = build_hardware_graph(backend)
 
         circuit_batch = Batch.from_data_list([circuit_graph])
@@ -314,7 +318,7 @@ class TestEndToEnd:
 
         model = GraphQMap(
             circuit_node_dim=4, circuit_edge_dim=3,
-            hardware_node_dim=7, hardware_edge_dim=1,
+            hardware_node_dim=5, hardware_edge_dim=1,
             embedding_dim=32, gnn_layers=2, gnn_heads=4,
             gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
             cross_attn_ffn_dim=64, cross_attn_dropout=0.0,
