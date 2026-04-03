@@ -1,0 +1,55 @@
+final_checkpoint: last
+stages:
+  - name: stage1_synthetic_warmup
+    epochs: 22
+    lr: 1.0e-5
+    batch_size: 8
+    num_workers: 0
+    dataset:
+      manifest_path: data/manifests/full/source_manifests/queko/train.jsonl
+      allowed_sources: [queko]
+    sampler:
+      kind: source_balanced
+      epoch_samples: 1024
+
+  - name: stage2_mixed_synthetic_real
+    epochs: 53
+    lr: 1.0e-5
+    batch_size: 8
+    num_workers: 0
+    load_from: previous_best
+    dataset:
+      manifest_paths:
+        - data/manifests/full/source_manifests/queko/train.jsonl
+        - data/manifests/full/source_manifests/qasmbench/train.jsonl
+      allowed_sources: [queko, qasmbench]
+    sampler:
+      kind: group_balanced
+      epoch_samples: 1024
+      groups:
+        synthetic: [queko]
+        real: [qasmbench]
+      group_weights:
+        synthetic: 0.7
+        real: 0.3
+
+  - name: stage3_real_calibration
+    epochs: 15
+    lr: 5.0e-6
+    batch_size: 8
+    num_workers: 0
+    load_from: stage2_mixed_synthetic_real:best
+    dataset:
+      manifest_paths:
+        - data/manifests/full/source_manifests/queko/train.jsonl
+        - data/manifests/full/source_manifests/qasmbench/train.jsonl
+      allowed_sources: [queko, qasmbench]
+    sampler:
+      kind: group_balanced
+      epoch_samples: 1024
+      groups:
+        synthetic: [queko]
+        real: [qasmbench]
+      group_weights:
+        synthetic: 0.5
+        real: 0.5

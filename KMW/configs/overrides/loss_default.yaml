@@ -1,0 +1,4 @@
+lambda_p: 1.0
+lambda_s: 0.1
+lambda_d: 0.1
+kappa: 1.0

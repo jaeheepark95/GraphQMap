@@ -1,0 +1,411 @@
+{
+  "script": {
+    "script_name": "build_manifest_full.py",
+    "generation_timestamp": "2026-03-23T13:20:06.462732+00:00",
+    "project_root": "/home/guest3/KMWs_workspace/GraphQMap/KMW",
+    "circuits_root": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/circuits_v2/qasm",
+    "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full",
+    "seed": 20260323,
+    "train_ratio": 0.8,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1,
+    "min_qubits": 2,
+    "max_qubits": 27,
+    "allow_no_2q": false
+  },
+  "sources": [
+    {
+      "source_name": "queko",
+      "source_role": "train_side",
+      "source_root": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/circuits_v2/qasm/queko",
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/source_manifests/queko",
+      "discovered_row_count": 900,
+      "included_row_count": 630,
+      "split_counts": {
+        "train": {
+          "total": 720,
+          "included": 504
+        },
+        "val": {
+          "total": 90,
+          "included": 62
+        },
+        "test": {
+          "total": 90,
+          "included": 64
+        }
+      }
+    },
+    {
+      "source_name": "mlqd",
+      "source_role": "train_side",
+      "source_root": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/circuits_v2/qasm/mlqd",
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/source_manifests/mlqd",
+      "discovered_row_count": 4443,
+      "included_row_count": 9,
+      "split_counts": {
+        "train": {
+          "total": 3554,
+          "included": 6
+        },
+        "val": {
+          "total": 444,
+          "included": 3
+        },
+        "test": {
+          "total": 445,
+          "included": 0
+        }
+      }
+    },
+    {
+      "source_name": "mqt_bench",
+      "source_role": "train_side",
+      "source_root": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/circuits_v2/qasm/mqt_bench",
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/source_manifests/mqt_bench",
+      "discovered_row_count": 1219,
+      "included_row_count": 672,
+      "split_counts": {
+        "train": {
+          "total": 975,
+          "included": 540
+        },
+        "val": {
+          "total": 122,
+          "included": 75
+        },
+        "test": {
+          "total": 122,
+          "included": 57
+        }
+      }
+    },
+    {
+      "source_name": "qasmbench",
+      "source_role": "heldout",
+      "source_root": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/circuits_v2/qasm/qasmbench",
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/source_manifests/qasmbench",
+      "discovered_row_count": 94,
+      "included_row_count": 57,
+      "split_counts": {
+        "train": {
+          "total": 75,
+          "included": 45
+        },
+        "val": {
+          "total": 9,
+          "included": 6
+        },
+        "test": {
+          "total": 10,
+          "included": 6
+        }
+      }
+    },
+    {
+      "source_name": "revlib",
+      "source_role": "heldout",
+      "source_root": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/circuits_v2/qasm/revlib",
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/source_manifests/revlib",
+      "discovered_row_count": 231,
+      "included_row_count": 214,
+      "split_counts": {
+        "train": {
+          "total": 185,
+          "included": 171
+        },
+        "val": {
+          "total": 23,
+          "included": 23
+        },
+        "test": {
+          "total": 23,
+          "included": 20
+        }
+      }
+    },
+    {
+      "source_name": "benchmarks",
+      "source_role": "benchmark",
+      "source_root": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/circuits_v2/qasm/benchmarks",
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/source_manifests/benchmarks",
+      "discovered_row_count": 23,
+      "included_row_count": 23,
+      "split_counts": {
+        "train": {
+          "total": 18,
+          "included": 18
+        },
+        "val": {
+          "total": 2,
+          "included": 2
+        },
+        "test": {
+          "total": 3,
+          "included": 3
+        }
+      }
+    }
+  ],
+  "recipes": [
+    {
+      "recipe_name": "smoke_mqt",
+      "source_names": [
+        "mqt_bench"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/smoke_mqt",
+      "split_counts": {
+        "train": {
+          "total": 975,
+          "included": 540
+        },
+        "val": {
+          "total": 122,
+          "included": 75
+        },
+        "test": {
+          "total": 122,
+          "included": 57
+        }
+      }
+    },
+    {
+      "recipe_name": "train_queko",
+      "source_names": [
+        "queko"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/train_queko",
+      "split_counts": {
+        "train": {
+          "total": 720,
+          "included": 504
+        },
+        "val": {
+          "total": 90,
+          "included": 62
+        },
+        "test": {
+          "total": 90,
+          "included": 64
+        }
+      }
+    },
+    {
+      "recipe_name": "train_mlqd",
+      "source_names": [
+        "mlqd"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/train_mlqd",
+      "split_counts": {
+        "train": {
+          "total": 3554,
+          "included": 6
+        },
+        "val": {
+          "total": 444,
+          "included": 3
+        },
+        "test": {
+          "total": 445,
+          "included": 0
+        }
+      }
+    },
+    {
+      "recipe_name": "train_mqt_bench",
+      "source_names": [
+        "mqt_bench"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/train_mqt_bench",
+      "split_counts": {
+        "train": {
+          "total": 975,
+          "included": 540
+        },
+        "val": {
+          "total": 122,
+          "included": 75
+        },
+        "test": {
+          "total": 122,
+          "included": 57
+        }
+      }
+    },
+    {
+      "recipe_name": "train_queko_mlqd",
+      "source_names": [
+        "queko",
+        "mlqd"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/train_queko_mlqd",
+      "split_counts": {
+        "train": {
+          "total": 4274,
+          "included": 510
+        },
+        "val": {
+          "total": 534,
+          "included": 65
+        },
+        "test": {
+          "total": 535,
+          "included": 64
+        }
+      }
+    },
+    {
+      "recipe_name": "train_queko_mqt_bench",
+      "source_names": [
+        "queko",
+        "mqt_bench"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/train_queko_mqt_bench",
+      "split_counts": {
+        "train": {
+          "total": 1695,
+          "included": 1044
+        },
+        "val": {
+          "total": 212,
+          "included": 137
+        },
+        "test": {
+          "total": 212,
+          "included": 121
+        }
+      }
+    },
+    {
+      "recipe_name": "train_mlqd_mqt_bench",
+      "source_names": [
+        "mlqd",
+        "mqt_bench"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/train_mlqd_mqt_bench",
+      "split_counts": {
+        "train": {
+          "total": 4529,
+          "included": 546
+        },
+        "val": {
+          "total": 566,
+          "included": 78
+        },
+        "test": {
+          "total": 567,
+          "included": 57
+        }
+      }
+    },
+    {
+      "recipe_name": "train_queko_mlqd_mqt_bench",
+      "source_names": [
+        "queko",
+        "mlqd",
+        "mqt_bench"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/train_queko_mlqd_mqt_bench",
+      "split_counts": {
+        "train": {
+          "total": 5249,
+          "included": 1050
+        },
+        "val": {
+          "total": 656,
+          "included": 140
+        },
+        "test": {
+          "total": 657,
+          "included": 121
+        }
+      }
+    },
+    {
+      "recipe_name": "heldout_qasmbench",
+      "source_names": [
+        "qasmbench"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/heldout_qasmbench",
+      "split_counts": {
+        "train": {
+          "total": 75,
+          "included": 45
+        },
+        "val": {
+          "total": 9,
+          "included": 6
+        },
+        "test": {
+          "total": 10,
+          "included": 6
+        }
+      }
+    },
+    {
+      "recipe_name": "heldout_revlib",
+      "source_names": [
+        "revlib"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/heldout_revlib",
+      "split_counts": {
+        "train": {
+          "total": 185,
+          "included": 171
+        },
+        "val": {
+          "total": 23,
+          "included": 23
+        },
+        "test": {
+          "total": 23,
+          "included": 20
+        }
+      }
+    },
+    {
+      "recipe_name": "heldout_qasmbench_revlib",
+      "source_names": [
+        "qasmbench",
+        "revlib"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/heldout_qasmbench_revlib",
+      "split_counts": {
+        "train": {
+          "total": 260,
+          "included": 216
+        },
+        "val": {
+          "total": 32,
+          "included": 29
+        },
+        "test": {
+          "total": 33,
+          "included": 26
+        }
+      }
+    },
+    {
+      "recipe_name": "benchmark_benchmarks",
+      "source_names": [
+        "benchmarks"
+      ],
+      "output_dir": "/home/guest3/KMWs_workspace/GraphQMap/KMW/data/manifests/full/recipes/benchmark_benchmarks",
+      "split_counts": {
+        "train": {
+          "total": 18,
+          "included": 18
+        },
+        "val": {
+          "total": 2,
+          "included": 2
+        },
+        "test": {
+          "total": 3,
+          "included": 3
+        }
+      }
+    }
+  ],
+  "split_strategy": "per_source_random_v1"
+}

@@ -1,0 +1,11 @@
+epochs: 60 
+batch_size: 8
+num_workers: 0
+lr: 1.0e-5
+weight_decay: 0.0
+scheduler_patience: 5
+scheduler_factor: 0.5
+grad_clip_norm: 1.0
+sinkhorn_tau: 1.0
+sinkhorn_iters: 30
+save_epoch_checkpoints: true

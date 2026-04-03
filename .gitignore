@@ -1,13 +1,26 @@
 # Dataset (large files, generated/downloaded)
-data/circuits/qasm/
-data/circuits/labels/
-data/circuits/backends/
-data/circuits/splits/
-data/circuits/queko/
-!data/circuits/README.md
+**/data/circuits/qasm/
+**/data/circuits/labels/
+**/data/circuits/backends/
+**/data/circuits/splits/
+**/data/circuits/queko/
+!**/data/circuits/README.md
+
+# Dataset v2
+**/data/circuits_v2/
+
+# Data cache
+**/data/cache/
+
+# Artifacts (model checkpoints, routed outputs, eval results)
+**/artifacts/
 
 # Temporary downloads
 tmp_downloads/
+
+# Model weights
+*.pt
+*.pth
 
 # Training outputs
 checkpoints/
@@ -27,7 +40,12 @@ build/
 .idea/
 *.swp
 *.swo
+.claude/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Large data files
+*.qasm
+*.qpy

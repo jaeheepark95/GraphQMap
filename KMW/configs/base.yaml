@@ -1,0 +1,36 @@
+backend: FakeTorontoV2
+
+model:
+  in_channels: 5
+  token_dim: 128
+
+loss:
+  lambda_p: 1.0
+  lambda_s: 0.1
+  lambda_d: 0.1
+  kappa: 1.0
+
+training:
+  epochs: 50
+  batch_size: 8
+  num_workers: 0
+  lr: 1.0e-5
+  weight_decay: 0.0
+  scheduler_patience: 5
+  scheduler_factor: 0.5
+  grad_clip_norm: 1.0
+  sinkhorn_tau: 1.0
+  sinkhorn_iters: 30
+  seed: 20260402
+  save_epoch_checkpoints: true
+
+paths:
+  run_dir: artifacts/fullrun_queko_qasm_kmw2_staged_seed2026
+  checkpoint_name: model_final.pth
+  eval_dir: artifacts/fullrun_queko_qasm_kmw2_staged_seed2026/eval
+
+runtime:
+  device: cuda
+
+dataset:
+  manifest_path: data/manifests/full/source_manifests/queko/train.jsonl

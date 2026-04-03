@@ -1,13 +1,13 @@
-"""Generate MQT Bench quantum circuits and export as .qasm files.
+# Generate MQT Bench quantum circuits and export as .qasm files.
 
-Generates circuits across all available MQT Bench algorithm types
-with qubit counts from 2 to 127. For parameterized circuits
-(VQE, QAOA), multiple variants are generated with different seeds/reps.
+# Generates circuits across all available MQT Bench algorithm types
+# with qubit counts from 2 to 127. For parameterized circuits
+# (VQE, QAOA), multiple variants are generated with different seeds/reps.
 
-Includes a per-circuit timeout to skip circuits that take too long to generate.
+# Includes a per-circuit timeout to skip circuits that take too long to generate.
 
-Output: data/circuits/qasm/mqt_bench/{algorithm}_{num_qubits}[_variant].qasm
-"""
+# Output: data/circuits/qasm/mqt_bench/{algorithm}_{num_qubits}[_variant].qasm
+
 
 import importlib
 import os

@@ -1,0 +1,2 @@
+manifest_path: data/manifests/full/source_manifests/qasmbench/val.jsonl
+pst_callable: kmw2.metrics.pst:pst_v2

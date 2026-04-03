@@ -1,0 +1,9 @@
+paths:
+  run_dir: artifacts/fullrun_queko_qasm_kmw2_staged_seed2026
+  checkpoint_name: model_final.pth
+
+validation:
+  manifest_path: data/manifests/full/source_manifests/qasmbench/val.jsonl
+
+staged_training:
+  final_checkpoint: last
