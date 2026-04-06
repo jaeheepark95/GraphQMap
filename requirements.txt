@@ -1,18 +1,25 @@
-# Core ML
-torch>=2.0
-torch-geometric>=2.4
-numpy
+# GraphQMap Dependencies
+# Install guide:
+#   1. pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+#   2. pip install -r requirements.txt
+# Note: PyTorch must be installed first with the correct CUDA index URL.
+
+# Core ML (torch installed separately — see above)
+torch-geometric>=2.4,<3.0
+numpy>=1.23,<2.0
 
 # Quantum
-qiskit>=1.0
-qiskit-ibm-runtime
-qiskit-aer
-rustworkx
+qiskit>=1.2,<2.0
+qiskit-ibm-runtime>=0.29,<1.0
+qiskit-aer-gpu>=0.15,<1.0
+cuquantum-cu12>=24.8,<25.0
+rustworkx>=0.15
 
 # Data & computation
-scipy
+scipy>=1.5
 pandas
 pyyaml
+networkx
 
 # Visualization
 matplotlib
