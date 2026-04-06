@@ -20,7 +20,7 @@ from models.cross_attention import CrossAttentionModule
 from models.gnn_encoder import GNNEncoder
 from models.hungarian import hungarian_decode_batch
 from models.score_head import ScoreHead
-from models.sinkhorn import SoftmaxNorm
+from models.sinkhorn import SinkhornLayer, SoftmaxNorm
 
 
 class GraphQMap(nn.Module):
@@ -43,6 +43,7 @@ class GraphQMap(nn.Module):
         noise_bias_dim: Hardware feature dim for score head bias (0 to disable).
         sinkhorn_max_iter: Maximum Sinkhorn iterations.
         sinkhorn_tol: Sinkhorn convergence tolerance.
+        score_norm: Score normalization type ("softmax" or "sinkhorn").
     """
 
     def __init__(
@@ -63,6 +64,7 @@ class GraphQMap(nn.Module):
         noise_bias_dim: int = 0,
         sinkhorn_max_iter: int = 20,
         sinkhorn_tol: float = 1e-6,
+        score_norm: str = "softmax",
     ) -> None:
         super().__init__()
 
@@ -98,8 +100,13 @@ class GraphQMap(nn.Module):
             d_model=embedding_dim, d_k=score_d_k, noise_bias_dim=noise_bias_dim,
         )
 
-        # Score normalization (row-wise softmax, no dummy padding)
-        self.sinkhorn = SoftmaxNorm()
+        # Score normalization
+        if score_norm == "sinkhorn":
+            self.sinkhorn = SinkhornLayer(
+                max_iter=sinkhorn_max_iter, tol=sinkhorn_tol,
+            )
+        else:
+            self.sinkhorn = SoftmaxNorm()
 
     def encode(
         self,
@@ -171,8 +178,12 @@ class GraphQMap(nn.Module):
         # Score matrix (with optional noise bias)
         S = self.score_head(C_prime, H_prime, hw_node_features)  # (batch, l, h)
 
-        # Row-wise softmax normalization
-        P = self.sinkhorn(S, num_logical, num_physical, tau)  # (batch, l, h)
+        # Score normalization
+        P = self.sinkhorn(S, num_logical, num_physical, tau)
+
+        # Sinkhorn returns (batch, h, h) with dummy rows; extract logical rows
+        if P.shape[1] != num_logical:
+            P = P[:, :num_logical, :]  # (batch, l, h)
 
         return P
 
@@ -243,4 +254,5 @@ class GraphQMap(nn.Module):
             noise_bias_dim=getattr(cfg.model.score_head, "noise_bias_dim", 0),
             sinkhorn_max_iter=cfg.sinkhorn.max_iter,
             sinkhorn_tol=cfg.sinkhorn.tolerance,
+            score_norm=getattr(cfg.sinkhorn, "score_norm", "softmax"),
         )

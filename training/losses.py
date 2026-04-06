@@ -194,6 +194,118 @@ class HopDistanceLoss(nn.Module):
         return total_loss / len(circuit_edge_pairs)
 
 
+@register_loss("swap_count")
+class SwapCountLoss(nn.Module):
+    """L_swap: SWAP count estimation loss with gate-frequency weighting.
+
+    L_swap = (1/W) * sum_{(i,j) in E} f_ij * sum_{p,q} P_ip * P_jq * d_swap(p,q)
+
+    where d_swap(p,q) = 3 * max(d_hop(p,q) - 1, 0).
+    Factor 3 because each SWAP decomposes into 3 CX gates.
+    Adjacent qubits have d_swap=0 (no SWAP needed).
+
+    Args:
+        normalize: If True, divide d_swap by its max value to normalize to [0, 1].
+            This brings the loss scale in line with adjacency (~0.0-0.3 range)
+            instead of raw CX counts (0-60+ range).
+    """
+
+    def __init__(self, normalize: bool = False) -> None:
+        super().__init__()
+        self.normalize = normalize
+
+    def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """Compute SWAP count loss.
+
+        Required kwargs: d_hw, circuit_edge_pairs.
+        Optional kwargs: circuit_edge_weights (gate frequency per edge).
+        """
+        d_hw = kwargs["d_hw"]
+        circuit_edge_pairs = kwargs["circuit_edge_pairs"]
+        circuit_edge_weights = kwargs.get("circuit_edge_weights", [])
+
+        if not circuit_edge_pairs:
+            return torch.tensor(0.0, device=P.device, requires_grad=True)
+
+        # d_swap = 3 * max(hop - 1, 0): adjacent=0, 2-hop=3, 3-hop=6, ...
+        d_swap = 3.0 * (d_hw - 1).clamp(min=0)
+
+        if self.normalize:
+            d_max = d_swap.max().clamp(min=1e-8)
+            d_swap = d_swap / d_max
+
+        if not circuit_edge_weights:
+            circuit_edge_weights = [1.0] * len(circuit_edge_pairs)
+
+        total_loss = torch.tensor(0.0, device=P.device)
+        total_weight = 0.0
+
+        for (i, j), w in zip(circuit_edge_pairs, circuit_edge_weights):
+            P_i = P[:, i, :]
+            P_j = P[:, j, :]
+            cost = (P_i @ d_swap * P_j).sum(dim=-1)
+            total_loss = total_loss + w * cost.mean()
+            total_weight += w
+
+        return total_loss / max(total_weight, 1e-8)
+
+
+@register_loss("soft_proximity")
+class SoftProximityLoss(nn.Module):
+    """L_soft: Exponential decay proximity reward with gate-frequency weighting.
+
+    L_soft = -(1/W) * sum_{(i,j) in E} f_ij * sum_{p,q} P_ip * P_jq * reward(p,q)
+
+    where reward(p,q) = exp(-alpha * max(d_hop(p,q) - 1, 0)).
+    Adjacent: reward=1.0, 2-hop: reward=exp(-alpha), 3-hop: reward=exp(-2*alpha).
+
+    Unlike adjacency (binary 0/1), provides non-zero gradient for non-adjacent
+    qubits. alpha controls decay: alpha->inf recovers adjacency, alpha->0 gives
+    uniform reward.
+
+    Bounded in [-1, 0].
+
+    Args:
+        alpha: Exponential decay rate (default: 2.0).
+    """
+
+    def __init__(self, alpha: float = 2.0) -> None:
+        super().__init__()
+        self.alpha = alpha
+
+    def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """Compute soft proximity loss.
+
+        Required kwargs: d_hw, circuit_edge_pairs.
+        Optional kwargs: circuit_edge_weights (gate frequency per edge).
+        """
+        d_hw = kwargs["d_hw"]
+        circuit_edge_pairs = kwargs["circuit_edge_pairs"]
+        circuit_edge_weights = kwargs.get("circuit_edge_weights", [])
+
+        if not circuit_edge_pairs:
+            return torch.tensor(0.0, device=P.device, requires_grad=True)
+
+        # reward(p,q) = exp(-alpha * max(hop - 1, 0))
+        reward = torch.exp(-self.alpha * (d_hw - 1).clamp(min=0))
+
+        if not circuit_edge_weights:
+            circuit_edge_weights = [1.0] * len(circuit_edge_pairs)
+
+        total_reward = torch.tensor(0.0, device=P.device)
+        total_weight = 0.0
+
+        for (i, j), w in zip(circuit_edge_pairs, circuit_edge_weights):
+            P_i = P[:, i, :]
+            P_j = P[:, j, :]
+            score = (P_i @ reward * P_j).sum(dim=-1)
+            total_reward = total_reward + w * score.mean()
+            total_weight += w
+
+        loss = -total_reward / max(total_weight, 1e-8)
+        return loss
+
+
 @register_loss("node_quality", requires_quality_score=True)
 class NodeQualityLoss(nn.Module):
     """L_node: NISQ node quality loss.
@@ -299,7 +411,8 @@ class Stage2Loss(nn.Module):
     the weighted sum of all active components.
 
     Args:
-        components: List of dicts with 'name' and 'weight' keys.
+        components: List of dicts with 'name', 'weight', and optional 'params' keys.
+            params is a dict of keyword arguments passed to the loss constructor.
         quality_score: Learnable QualityScore module (required if any
             component needs it).
     """
@@ -317,6 +430,7 @@ class Stage2Loss(nn.Module):
         for comp in components:
             name = comp["name"]
             weight = comp.get("weight", 1.0)
+            params = comp.get("params", {})
 
             if name not in _LOSS_REGISTRY:
                 raise ValueError(
@@ -330,9 +444,9 @@ class Stage2Loss(nn.Module):
                     raise ValueError(
                         f"Loss component '{name}' requires quality_score but none provided."
                     )
-                self.losses[name] = cls(quality_score=quality_score)
+                self.losses[name] = cls(quality_score=quality_score, **params)
             else:
-                self.losses[name] = cls()
+                self.losses[name] = cls(**params)
 
             self.component_names.append(name)
             self.component_weights.append(weight)

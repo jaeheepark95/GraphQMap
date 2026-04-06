@@ -13,10 +13,10 @@ model:
     node_features:
       - gate_count
       - two_qubit_gate_count
-      - single_qubit_gate_ratio
-      - critical_path_fraction
-    rwpe_k: 2                  # Random Walk PE steps (0 = disabled)
-    # node_input_dim is auto-computed: len(node_features) + rwpe_k = 6
+      - degree
+      - depth_participation
+    rwpe_k: 0                  # No RWPE (old feature set)
+    # node_input_dim is auto-computed: len(node_features) + rwpe_k = 4
     edge_input_dim: 3
     num_layers: 3
     num_heads: 4
@@ -47,6 +47,7 @@ model:
 
 # ---- Sinkhorn ----
 sinkhorn:
+  score_norm: sinkhorn         # "sinkhorn" or "softmax"
   tau_max: 1.0               # start soft for gradient flow
   tau_min: 0.05              # final sharp temperature
   schedule: exponential      # exponential decay from tau_max to tau_min
@@ -69,13 +70,13 @@ training:
 
   max_epochs: 100
   early_stopping:
-    monitor: val_pst             # not used for early stopping; kept for config compatibility
+    monitor: val_pst          # actual PST, NOT surrogate loss
     patience: 10
-    min_delta: 0.005
+    min_delta: 0.005          # 0.5% PST improvement threshold
 
-  # PST validation schedule (used for best checkpoint selection, no early stopping)
+  # PST validation schedule
   pst_validation:
-    interval: 5               # measure every N epochs; best PST checkpoint saved
+    interval: 5               # measure every N epochs
     num_circuits: 200          # representative circuits for validation
     convergence_checks: 3      # stop if N consecutive < min_delta
 
@@ -88,7 +89,7 @@ loss:
   components:
     - name: error_distance       # L_surr: error-weighted shortest path distance (primary)
       weight: 1.0
-    - name: node_quality         # L_node: NISQ node quality (bounded [-1,0])
+    - name: adjacency            # L_adj: adjacency matching
       weight: 0.3
 
 

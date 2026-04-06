@@ -95,7 +95,11 @@ def get_layout_from_transpiled(circuit, backend, layout_method, routing_method, 
 
 def get_model_layout(model, circuit, backend, hw_graph, cfg):
     """Get layout from GraphQMap model prediction."""
-    circuit_graph = build_circuit_graph(circuit)
+    node_features = getattr(cfg.model.circuit_gnn, "node_features", None)
+    rwpe_k = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
+    circuit_graph = build_circuit_graph(
+        circuit, node_feature_names=node_features, rwpe_k=rwpe_k,
+    )
     circuit_batch = Batch.from_data_list([circuit_graph])
     hw_batch = Batch.from_data_list([hw_graph])
 

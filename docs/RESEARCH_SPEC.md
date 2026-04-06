@@ -153,11 +153,25 @@ model:
 
 **Feature diagnostics:** Run `python scripts/diagnose_features.py --config configs/stage1.yaml` to measure effective dimensionality, cosine similarity, and column correlations before training.
 
+**Feature analysis findings (from `scripts/benchmark_feature_analysis.py` and `scripts/diagnose_features.py`):**
+
+*Benchmark circuits (23 circuits, 3-13Q):*
+- Current default (gc, 2qc, sqr, cpf + RWPE2): EffDim 4.1/6, Indist 8.5% — best among tested sets
+- `gc ↔ 2qc` |r|>0.8 in 52% of benchmarks. `sqr ↔ cpf` rarely correlated (9%)
+- `cpf` degenerates for large dense circuits (rd84_253: all qubits cpf=0.083)
+
+*Training circuits (6,882 cached, 497 sampled):*
+- Current default: EffDim 3.7/6, Indist **17.1%** (vs benchmark 8.5%)
+- **`sqr` constant in 39% of circuits** (57% of MLQD) — 2Q-gate-only circuits, sqr=0
+- `cpf` constant in 19% of circuits (67% of xlarge 21Q+)
+- **MQT parametric circuits (VQE/QNN/GHZ): 40-100% indist**, no feature set helps → removed by filtering
+- After filtering (5,769 circuits): mean indist **8.3%**, bad (>30%) circuits **0%**
+
 **Known feature degeneracy issues (motivating the registry):**
-- `gate_count` ↔ `depth_participation` correlation: |r| > 0.95 in 100% of circuits tested. These two features are nearly redundant — they carry ~1 effective dimension of information, not 2.
-- `degree` becomes constant (all qubits identical) in small fully-connected circuits → z-score makes it all-zero, losing information entirely.
-- Empirical effective dimensionality: ~2 out of 4 features (QUEKO: 2.50, MLQD: 2.03).
-- Node cosine similarity > 0.95 in 83-93% of circuits → GNN input barely distinguishes qubits.
+- `gate_count` ↔ `depth_participation` correlation: |r| > 0.95 in 100% of circuits. Redundant.
+- `weighted_degree` = `two_qubit_gate_count` (r=1.0). Zero independent information.
+- `degree` constant in 26% of benchmark circuits (fully-connected 3Q).
+- RWPE k=1 always zero (no self-loops); k=2 first dim dead. Only second dim useful.
 
 **Node feature design notes:**
 - 2-qubit gate counts are applied **symmetrically** to both control and target qubits. For initial layout, the interaction frequency (not the control/target role) is what drives placement decisions — both qubits experience the same decoherence during the gate.
@@ -202,19 +216,19 @@ Multi-programming uses the same 4 node features as single-circuit. Circuit graph
 
 **Edge:** Undirected. Edges from FakeBackendV2 coupling map.
 
-**Node Features (per physical qubit):**
+**Node Features (per physical qubit) — current 5-dim:**
 
 | Feature | Description | Direction |
 |---------|-------------|-----------|
-| `T1` | Energy relaxation time | Higher = better |
-| `T2` | Phase relaxation time | Higher = better |
 | `readout_error` | Measurement error rate | Lower = better |
 | `single_qubit_error` | Average single-qubit gate error rate (sx, x) | Lower = better |
 | `degree` | Coupling map connectivity degree | Structural info |
 | `t1_cx_ratio` | T1 / mean_cx_duration — number of 2Q gates fitting within T1 | Higher = better |
 | `t2_cx_ratio` | T2 / mean_cx_duration — number of 2Q gates fitting within T2 | Higher = better |
 
-`t1_cx_ratio` and `t2_cx_ratio` are computed per qubit as T1 (or T2) divided by the mean cx_duration across all edges connected to that qubit. These composite features capture the **physically meaningful** quantity for layout: how many 2-qubit gate cycles the qubit can sustain before decoherence. Raw T1/T2 and cx_duration alone require the model to learn this division implicitly.
+`t1_cx_ratio` and `t2_cx_ratio` are computed per qubit as T1 (or T2) divided by the mean cx_duration across all edges connected to that qubit. These composite features capture the **physically meaningful** quantity for layout: how many 2-qubit gate cycles the qubit can sustain before decoherence. Raw T1/T2 were previously included but removed — their information is fully captured by the ratio features.
+
+> **Historical note:** Previous best experiment (PST 0.3440) used 7-dim HW features (raw T1, T2 included) with noise_bias_dim=7. If regression is observed, consider restoring to 7-dim. See CLAUDE.md "Rollback plan".
 
 **Edge Features (per physical connection):**
 
@@ -302,10 +316,12 @@ h_out = GATv2Layer(h_in) + h_in  # Applied on layers 2, 3
 | Residual Connections | Layers 2, 3 | |
 
 **Input dimensions:**
-- Circuit GNN input: `num_circuit_node_features` (4: gate_count, 2q_count, degree, depth_participation — same for single and multi-programming)
-- Hardware GNN input: `num_hardware_node_features` (5: readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio)
+- Circuit GNN input: `len(node_features) + rwpe_k` (current default: 4 + 2 = 6: gc, 2qc, sqr, cpf + RWPE2)
+- Hardware GNN input: 5 (readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio)
 - Circuit edge features: 3 (interaction_count, earliest, latest)
 - Hardware edge features: 1 (cx_error)
+
+> **Historical note:** Previous best experiment (PST 0.3440) used old 4-feature circuit input (gc, 2qc, deg, dp), 7-dim HW input (with raw T1, T2), and noise_bias_dim=7. Current defaults reflect later changes — see CLAUDE.md "Experiment History" for rollback details.
 
 ### 4.3 Cross-Attention Interaction Module
 
@@ -351,14 +367,29 @@ bias_j = Linear(hw_node_features_j)
 
 **Output:** S matrix of shape (l × h)
 
-### 4.5 Score Normalization: SoftmaxNorm
+### 4.5 Score Normalization (Configurable)
 
-Row-wise softmax converts the score matrix S (l×h) into a row-stochastic matrix P (l×h).
-No dummy padding needed — each row independently sums to 1.
+Two normalization modes, selectable via `sinkhorn.score_norm` in YAML:
 
+**SoftmaxNorm (`score_norm: softmax`, current default):**
+Row-wise softmax → P (batch, l, h) row-stochastic. No dummy padding.
 ```python
 P = F.softmax(S / tau, dim=-1)  # (batch, l, h)
 ```
+
+**SinkhornLayer (`score_norm: sinkhorn`):**
+Log-domain Sinkhorn with dummy padding l×h → h×h → doubly stochastic P.
+- Pads h-l dummy zero rows to make matrix square
+- Alternates row/column log-normalization for `max_iter` iterations
+- Produces doubly stochastic P (rows AND columns sum to 1)
+- Output sliced to top l rows: P[:, :l, :] for loss and Hungarian
+- Log-domain prevents overflow at low τ
+
+**Sinkhorn vs Softmax trade-offs:**
+- Sinkhorn enforces one-to-one exclusivity (column sums ≈ 1), which may produce better discrete mappings
+- Softmax is simpler and avoids dummy padding instability when l << h
+- Historical best result (PST 0.3440) used Sinkhorn; later experiments switched to Softmax
+- Both are available and selectable without code changes
 
 **Temperature τ:**
 
@@ -367,17 +398,6 @@ P = F.softmax(S / tau, dim=-1)  # (batch, l, h)
 | τ_max (initial) | 1.0 | Soft distribution at training start |
 | τ_min (final) | 0.05 | Near one-hot; minimizes train-inference gap |
 | τ Schedule | Exponential decay | `τ(epoch) = τ_max · (τ_min/τ_max)^(epoch/total_epochs)` |
-
-### 4.6 Legacy: Log-Domain Sinkhorn (kept for experimentation)
-
-SinkhornLayer with dummy padding (l×h → h×h) and log-domain normalization is preserved in
-`models/sinkhorn.py` for future experimentation. It produces a doubly stochastic matrix P (h×h).
-
-**Key differences from SoftmaxNorm:**
-- Requires dummy padding (h-l zero rows) to make the matrix square
-- Produces doubly stochastic P (rows AND columns sum to 1)
-- Log-domain implementation prevents overflow at low τ
-- Hungarian decoding uses top l rows only
 
 ### 4.7 Hungarian Algorithm (Inference Only)
 
@@ -434,14 +454,19 @@ L_sup = -Σ_i Σ_j Y_ij · log(P_ij)
 Stage 2 uses a **modular loss registry** (`@register_loss()` in `training/losses.py`). Components are configured declaratively in YAML — no code changes needed to switch loss combinations. Each component receives P and all available kwargs (d_error, d_hw, hw_node_features, etc.).
 
 ```yaml
-# configs/stage2.yaml
+# configs/stage2_sinkhorn_adj.yaml (current best)
 loss:
   type: surrogate
   components:
     - name: error_distance    # select registered components
       weight: 1.0             # multiplier in total loss
-    - name: node_quality
+    - name: adjacency
       weight: 0.3
+    # Components with constructor params use 'params' dict:
+    # - name: soft_proximity
+    #   weight: 0.3
+    #   params:
+    #     alpha: 2.0
 ```
 
 **Available components:**
@@ -456,6 +481,8 @@ L_surr = (1/W) · Σ_{(i,j)∈E_circuit} f_ij · Σ_{p,q} P_ip · P_jq · d_erro
 
 Where f_ij = 2Q gate count for pair (i,j), W = Σ f_ij. d_error(p,q) = error-weighted shortest path between physical qubits p and q. Gate-frequency weighting ensures frequently-interacting pairs contribute proportionally more. Fully differentiable w.r.t. P. Bounded in [0, ∞).
 
+**Known limitations:** (1) Uses additive error sums via Floyd-Warshall, but quantum fidelity is multiplicative: F = Π(1-ε). Correct edge weight would be -log(1-ε). (2) Does not model SWAP 3× CX overhead: a hop=2 path costs ~4× a direct CX (1 SWAP + 1 CX = 4 CX), but d_error only sums 2 edge errors. (3) Raw error values (0.01-0.05) produce weak gradient signals → saturates by epoch 3. See `swap_count` for a physics-corrected alternative.
+
 #### adjacency — L_adj: Adjacency Matching Loss (Gate-Frequency Weighted)
 
 Directly measures whether interacting logical qubits are mapped to adjacent physical qubits.
@@ -467,6 +494,8 @@ L_adj = -(1/W) · Σ_{(i,j)∈E_circuit} w_ij · Σ_{p,q} P_ip · P_jq · A_hw(p
 
 Where w_ij = number of 2-qubit gates on edge (i,j), W = Σ w_ij. Output bounded in [-1, 0].
 
+**Known limitations:** (1) Binary signal — zero gradient for all non-adjacent pairs, regardless of distance (hop=2 and hop=10 contribute identically). (2) Coupling density is low on large backends (27Q: ~9%, 127Q: ~1.7%), so >98% of A_hw is 0 → extremely sparse gradient. (3) Ignores edge error rate differences — all adjacent pairs treated equally. See `soft_proximity` for a smooth alternative.
+
 #### hop_distance — L_hop: Hop Distance Tiebreaker
 
 Continuous distance signal for non-adjacent placements. Differentiates distance-2 from distance-10.
@@ -477,7 +506,32 @@ L_hop = (1/|E_circuit|) · Σ_{(i,j)∈E_circuit} Σ_{p,q} P_ip · P_jq · d_hop
 
 Where d_hop_norm = d_hw / max(d_hw), normalized to [0, 1].
 
-#### node_quality — L_node: NISQ Node Quality Loss
+#### swap_count — L_swap: SWAP Count Estimation Loss
+
+Directly estimates the number of additional CX gates from SWAP operations. Based on the observation that each SWAP decomposes into 3 CX gates, and adjacent qubits need 0 SWAPs.
+
+```
+L_swap = (1/W) · Σ_{(i,j)∈E_circuit} f_ij · Σ_{p,q} P_ip · P_jq · d_swap(p,q)
+```
+
+Where d_swap(p,q) = 3 · max(d_hop(p,q) - 1, 0). Adjacent qubits: d_swap=0 (no SWAP needed). 2-hop: d_swap=3 (1 SWAP = 3 CX). 3-hop: d_swap=6. Gate-frequency weighted like error_distance. Bounded in [0, ∞).
+
+**Design rationale:** Addresses key L_surr limitations: (1) L_surr uses additive error sums, but fidelity is multiplicative — a hop=2 path costs ~4× (not 2×) a direct CX due to SWAP overhead. (2) Raw error rates (0.01-0.05) produce weak gradient signals. L_swap directly models SWAP cost with large dynamic range (0-60+ for 127Q backends). The 3× factor converts SWAP count to CX count (each SWAP = 3 CX gates). Inspired by colleague's MQM approach using D = max(hop-1, 0).
+
+#### soft_proximity — L_soft: Exponential Decay Proximity Loss
+
+Smooth replacement for adjacency that provides non-zero gradient for non-adjacent qubits. Solves adjacency's key limitation: binary A_hw gives exactly 0 gradient for all non-adjacent pairs. On large backends, coupling density is very low (27Q: ~9%, 127Q: ~1.7%), so >98% of A_hw is 0 → extremely sparse gradient. L_adj also cannot distinguish hop=2 from hop=10 (both contribute 0).
+
+```
+reward(p,q) = exp(-α · max(d_hop(p,q) - 1, 0))
+L_soft = -(1/W) · Σ_{(i,j)∈E_circuit} f_ij · Σ_{p,q} P_ip · P_jq · reward(p,q)
+```
+
+Where α controls exponential decay rate (default 2.0). Adjacent: reward=1.0, 2-hop: reward=exp(-α)≈0.135, 3-hop: reward=exp(-2α)≈0.018. α→∞ recovers binary adjacency, α→0 gives uniform reward. Gate-frequency weighted. Bounded in [-1, 0].
+
+**Constructor param:** `alpha` (float, default 2.0), configurable via YAML `params` dict.
+
+#### node_quality — L_node: NISQ Node Quality Loss (deprecated)
 
 Drives important logical qubits to high-quality physical qubits via learnable MLP.
 
@@ -490,6 +544,8 @@ L_node = -Σ_i w_norm(i) · Σ_p P_ip · q_score(p)
 ```
 
 Where w_norm(i) = importance of qubit i normalized to sum to 1. Bounded in [-1, 0]. QualityScore MLP trained jointly with model.
+
+**Known issue — deprecated:** Collapses to trivial solution (-1.0) by epoch 1-2, providing zero gradient thereafter. Root cause: qubit mapping is fundamentally an edge problem (SWAP routing), not a node problem. The MLP learns a single circuit-agnostic ranking (low noise → high score) which is trivially solvable. Additionally, readout/1Q errors (what L_node optimizes) contribute far less to PST than 2Q gate errors from routing: 1Q error is 10-100× smaller than 2Q error. Can also conflict with edge losses when high-quality qubits are topologically distant. **Not recommended for use.**
 
 #### separation — L_sep: Multi-Programming Separation Loss
 
@@ -505,18 +561,22 @@ L_sep = -(1/|E_cross|) · Σ_{(i,j)∈cross-circuit} Σ_{p,q} P_ip · P_jq · d_
 L_2 = Σ_k weight_k · component_k(P, ...)
 ```
 
-**Current default configuration:**
+**Current best configuration (Val PST 0.3588):**
 
 | Component | Weight | Rationale |
 |-----------|--------|-----------|
-| error_distance | 1.0 | Primary: unified error-weighted distance captures both adjacency and error quality |
-| node_quality | 0.3 | Drives mapping to low-error qubits |
+| error_distance | 1.0 | Primary: error-weighted distance (saturates early but provides initial signal) |
+| adjacency | 0.3 | Only non-saturating loss; binary signal provides gradient throughout training |
+
+**Under investigation (Phase 1):** `swap_count` replacing error_distance, `soft_proximity` replacing adjacency. See experiment plan in CLAUDE.md.
+
+**Loss gradient analysis:** Both error_distance and adjacency gradients have the same structure: ∂L/∂P_ip depends on neighbor mapping P_jq and hardware structure only — circuit qubit i's properties never appear. This means no per-node circuit signal exists in current losses.
 
 **CRITICAL: All terms are per-pair/per-qubit normalized** (divided by pair count or qubit count). This ensures scales are comparable regardless of circuit/hardware size.
 
 **Verification:** Log each term during training. No single term should dominate by >10×.
 
-**Experimenting with loss combinations:** Modify YAML only. CLI override: `--override loss.components.0.weight=2.0`. Each run's `config.yaml` records exact configuration.
+**Experimenting with loss combinations:** Modify YAML only. Components with constructor parameters use `params` dict. CLI override: `--override loss.components.0.weight=2.0`. Each run's `config.yaml` records exact configuration.
 
 ### 5.3 Stage Transition Criteria
 
@@ -524,14 +584,23 @@ L_2 = Σ_k weight_k · component_k(P, ...)
 |------------|-----------|---------|
 | MLQD + QUEKO → QUEKO-only | Validation CE loss early stopping | Patience 10 epochs; LR reduced to 1/10 |
 | Stage 1 → Stage 2 | Validation PST convergence | Measure actual PST every 5–10 epochs on 50–100 representative circuits (Hungarian → transpile → noise sim); stop when 3 consecutive measurements improve < 0.5% |
-| Stage 2 termination | Validation PST early stopping | Based on actual PST, NOT surrogate loss; surrogate loss improving while PST degrades = overfitting signal |
+| Stage 2 termination | No early stopping; train full max_epochs | Best checkpoint selected by val PST; val surrogate loss monitored but not used for selection |
 
-**Validation PST measurement procedure:**
+**Validation surrogate loss procedure (monitoring only):**
+1. Compute surrogate loss on 396 held-out val circuits every epoch
+2. Same loss components as training (e.g., error_distance + adjacency)
+3. Logged to metrics CSV for analysis; NOT used for checkpoint selection (saturates by epoch 4-13)
+
+**Validation PST measurement procedure (used for best checkpoint selection):**
 1. Take P matrix from model
 2. Apply Hungarian → discrete layout
-3. Run `qiskit.transpile(initial_layout=layout, routing_method=configurable)`
+3. Run `qiskit.transpile(initial_layout=layout, routing_method='sabre')`
 4. Run noise simulation on FakeBackendV2
 5. Compute PST
+6. Measured every `pst_validation.interval` epochs; best PST checkpoint saved
+
+**Checkpoint strategy rationale (2026-04-05):**
+Val surrogate loss reaches minimum by epoch 4-13 but PST best occurs at epoch 30-90. Controlled comparison (11 runs) showed PST-based checkpoint selection significantly outperforms val surrogate loss-based selection (eval avg 0.547-0.589 vs 0.395-0.517). No early stopping is used — models train for full max_epochs.
 
 ### 5.4 Experimental Findings (2026-04)
 
@@ -557,17 +626,46 @@ Old features performed better in Stage 1 supervised learning. This is expected �
 
 #### Stage 2 Surrogate Learning Results
 
-| Experiment | Features | Pretrained | Best Val PST | Notes |
-|------------|----------|------------|-------------|-------|
-| 2-A | old (4dim) | Stage 1 ✓ | 0.3044 | PST oscillates 0.12–0.30 |
-| 2-B | new (6dim) | No (scratch) | 0.2410 | PST collapses after ep 64 |
-| Baseline (QAP+NASSC) | — | — | 0.3785 | Target to beat |
+**Historical runs (pre-filtering, 6,887 circuits):**
+
+| Experiment | Score Norm | Loss | Features | Best Val PST | Notes |
+|------------|-----------|------|----------|-------------|-------|
+| scratch_error_dist_adj | **Sinkhorn** | err_dist + adj | old 4dim, HW 7dim, bias=7 | **0.3440** | Previous best |
+| stage2_200epochs | Sinkhorn | err_dist + node_q | old 4dim | 0.3572 | Best but 200ep |
+| scratch_default | Sinkhorn | err_dist + node_q | old 4dim | 0.3495 | |
+| s2_old_feat_pretrained | Softmax | err_dist + node_q | old 4dim | 0.3044 | With Stage 1 |
+| s2_new_feat_scratch | Softmax | err_dist + node_q | new 6dim | 0.2410 | New features |
+| Baseline (QAP+NASSC) | — | — | — | **0.3785** | Target to beat |
+
+**Current best (filtered 5,769 circuits, 2026-04-02):**
+
+| Experiment | Score Norm | Loss | Features | Best Val PST |
+|------------|-----------|------|----------|-------------|
+| filtered_sinkhorn_adj | Sinkhorn | err_dist(1.0) + adj(0.3) | new 6dim, HW 5dim, bias=0 | **0.3588** |
+| filtered_seed42_gpu0 | Softmax | err_dist + node_q | new 6dim, HW 5dim, bias=0 | 0.2727 |
+
+**Phase 1: Edge loss optimization (2026-04-03):**
+
+All use Sinkhorn, new 6dim features, HW 5dim, bias=0, filtered 5,769 circuits.
+
+| Exp | Loss Config | Config File |
+|-----|-------------|-------------|
+| E1 | err_dist(1.0) + adj(**0.7**) | stage2_sinkhorn_adj.yaml + override |
+| E2 | err_dist(1.0) + adj(**1.0**) | stage2_sinkhorn_adj.yaml + override |
+| E3 | **swap(1.0)** + adj(0.3) | stage2_swap_adj.yaml |
+| E4 | **swap(1.0)** standalone | stage2_swap_only.yaml |
+| E5 | err_dist(1.0) + **soft(0.3, α=2)** | stage2_soft_proximity.yaml |
+| E6 | **soft(1.0, α=2)** standalone | stage2_soft_only.yaml |
 
 **Key observations:**
-1. **Surrogate loss saturation**: Both `error_distance` and `node_quality` saturate within ~10 epochs. `node_quality` reaches its bound (-1.0) almost immediately, providing zero gradient signal for remaining epochs.
-2. **Val PST oscillation**: PST fluctuates widely (0.12–0.30) across epochs rather than converging, suggesting poor correlation between surrogate loss and actual PST.
-3. **Stage 1 pretrain effect**: Provides ~0.06 PST advantage (0.3044 vs 0.2410), but both still below QAP+NASSC baseline (0.3785).
-4. **Stage 1 value is questionable**: The supervised pretraining advantage may come from weight initialization quality rather than learned mapping knowledge.
+1. **Surrogate loss saturation**: `error_distance` saturates by epoch 3 (drops from ~0.14 to ~0.01). `node_quality` collapses to -1.0 by epoch 1-2. `adjacency` is the only loss providing meaningful gradient throughout 100 epochs (-0.10 → -0.28).
+2. **Val PST oscillation**: PST fluctuates widely (0.12–0.36) across epochs rather than converging, suggesting poor correlation between surrogate loss and actual PST.
+3. **Sinkhorn >> Softmax (confirmed)**: Controlled experiment: Sinkhorn 0.3588 vs Softmax 0.2727 (+0.086). All experiments now use Sinkhorn.
+4. **New features >> Old features (confirmed)**: gc,2qc,sqr,cpf+RWPE2 → 0.3588 vs gc,2qc,deg,dp → 0.2473 (+0.111).
+5. **HW 5dim > 7dim+noise_bias (confirmed)**: 0.3588 vs 0.2604. t1/t2 raw values + noise_bias hurt.
+6. **node_quality harmful**: Without 0.3588 vs with 0.3474. Learned MLP collapses to trivial solution.
+7. **Stage 1 no longer in use**: Supervised pretraining adds complexity without clear benefit. All current experiments run Stage 2 from scratch.
+5. **Feature-indistinguishable filtering**: 1,118 circuits removed (16.2%) — primarily MQT Bench parametric circuits. Effect on training quality under evaluation.
 
 ---
 
@@ -575,13 +673,13 @@ Old features performed better in Stage 1 supervised learning. This is expected �
 
 ### Available Datasets
 
-| Dataset | Volume | Stage | Label Source | Notes |
-|---------|--------|-------|--------------|-------|
-| **MQT Bench** | 1,219 circuits | Stage 2 (Unsupervised) | None | 29 algorithm types, 2-127Q. No mapped labels available. Generated via `scripts/generate_mqt_bench.py` |
-| **MLQD** | 4,443 circuits (3,729 labeled) | Stage 1 (Supervised) | OLSQ2 solver labels (extracted) | 5 backends: Aspen-4, Grid5x5, Melbourne, Rochester, Sycamore |
-| **QUEKO** | 900 circuits (540 labeled) | Stage 1 (Supervised, fine-tuning) | τ⁻¹ (true optimal) | 3 categories: BNTF (180), BSS (360, labeled), BIGD (360, no labels). 4 hardware topologies |
-| **QASMBench** | 94 circuits | Stage 2 (Unsupervised) | None | 2Q-127Q filtered. No labels. Surrogate loss training |
-| **RevLib** | 231 circuits | Stage 2 (Unsupervised) | None | Reversible circuits, 3Q-127Q. Converted from .real via Real2QASM |
+| Dataset | Original | After Filtering | Stage | Label Source | Notes |
+|---------|:--------:|:---------------:|-------|--------------|-------|
+| **MQT Bench** | 1,219 | **433** | Stage 2 (Unsupervised) | None | 786 removed (VQE/QNN/GHZ parametric). 29 algorithm types |
+| **MLQD** | 4,443 | **4,168** | Stage 1 + 2 | OLSQ2 solver labels | 275 removed (ising/dnn). 3,116 labeled remain |
+| **QUEKO** | 900 | **894** | Stage 1 + 2 | τ⁻¹ (true optimal) | Nearly unaffected. 483 labeled remain |
+| **QASMBench** | 94 | **55** | Stage 2 (Unsupervised) | None | 39 removed. 2Q-127Q |
+| **RevLib** | 231 | **219** | Stage 2 (Unsupervised) | None | 12 removed. 3Q-127Q |
 
 ### Dataset Directory Structure
 
@@ -606,12 +704,14 @@ data/circuits/
 │   ├── queko_sycamore.json      # Google Sycamore (54Q) — QUEKO + MLQD
 │   └── mlqd_grid5x5.json       # 5x5 Grid (25Q) — MLQD only
 └── splits/                          # Defines which circuits are used in each stage
-    ├── stage1_supervised.json       # 3,846 labeled circuits → Stage 1 training
-    ├── stage1_queko_only.json       # 486 QUEKO circuits → Stage 1 fine-tuning phase
-    ├── stage1_unsupervised.json     # 2,618 unlabeled circuits → Stage 2 only
-    ├── stage2_all.json              # 6,887 all circuits → Stage 2 surrogate loss
-    ├── val.json                     # 423 labeled validation
-    └── val_queko_only.json          # 54 QUEKO validation
+    ├── stage1_supervised.json       # 3,599 labeled circuits → Stage 1 training
+    ├── stage1_queko_only.json       # 483 QUEKO circuits → Stage 1 fine-tuning phase
+    ├── stage1_unsupervised.json     # 1,774 unlabeled circuits → Stage 2 only
+    ├── stage2_all.json              # 5,769 all circuits → Stage 2 surrogate loss
+    ├── val.json                     # 396 labeled validation
+    ├── val_queko_only.json          # 52 QUEKO validation
+    ├── filter_log.json              # Feature-indistinguishable removal log
+    └── original/                    # Pre-filter backup of all splits
 ```
 
 **Design rationale:**
@@ -644,6 +744,22 @@ All raw circuit datasets undergo the following preprocessing before use in train
 - **Why:** These are fully-connected circuits (QFT, QPE at 60-127Q with up to 8,001 edges) that cause GNN message passing memory/compute explosion and batch size imbalance. The labeled datasets (QUEKO/MLQD) have max 88/24 edges respectively — 1,000 provides 11× headroom while filtering extreme outliers.
 - After filtering, max edges = 996
 
+**Step 5: Feature-Indistinguishable Filtering** (`scripts/filter_indistinguishable.py`)
+- For each circuit, compute pairwise cosine similarity between qubit feature vectors (current default features + RWPE k=2, after z-score normalization)
+- Remove circuits where > 30% of qubit pairs have cosine similarity > 0.95 ("indistinguishable")
+- These circuits provide zero/misleading gradient signal: the GNN cannot learn meaningful qubit-to-physical mappings when features don't distinguish qubits
+- Removal log: `data/circuits/splits/filter_log.json`
+- Original splits backed up to `data/circuits/splits/original/`
+
+**Why this threshold:** At 50% threshold, only 607 circuits removed (8.8%), missing many "poor" quality circuits (30-50% indist rate). At 30%, 1,118 removed (16.2%) with acceptable labeled data loss (247 supervised, 27 val). The 30% threshold ensures training data has sufficiently differentiated features for GNN learning.
+
+**Primary removal targets:**
+- MQT Bench VQE/QNN/GHZ/W-state: parametric circuits with repeating layer structure → all qubits have identical features
+- MLQD ising circuits: 38.4% bad rate due to uniform interaction patterns
+- MLQD dnn (2Q): very small circuits with degenerate features
+
+**Note on MLQD sqr=0:** 57% of MLQD circuits have constant `single_qubit_gate_ratio` = 0 (2Q-gate-only circuits). These are NOT removed because other features (gc, 2qc, cpf) still differentiate qubits — only 58 MLQD circuits exceed the 50% indist threshold.
+
 **Preprocessing summary:**
 
 | Step | Circuits Removed | Reason |
@@ -652,18 +768,19 @@ All raw circuit datasets undergo the following preprocessing before use in train
 | Untranspilable | 34 | OOM / timeout during transpile |
 | Benchmark dedup | 19 | Evaluation fairness |
 | Extreme filtering | 183 | edges > 1,000, GNN scalability |
-| **Total removed** | **236** | |
+| Feature-indistinguishable | 1,118 | indist rate > 30%, no gradient signal |
+| **Total removed** | **1,396** | |
 
 **Original → Final circuit counts:**
 
-| Dataset | Original | Final | Removed |
-|---------|:--------:|:-----:|:-------:|
-| QUEKO | 900 | 900 | 0 |
-| MLQD | 4,443 | 4,443 | 0 |
-| MQT Bench | 1,448 | 1,219 | 229 |
-| QASMBench | 111 | 94 | 17 |
-| RevLib | 263 | 231 | 32 |
-| **Total** | **7,165** | **6,887** | **278** |
+| Dataset | Original | After Steps 1-4 | After Step 5 (Final) | Step 5 Removed |
+|---------|:--------:|:-----:|:-------:|:-------:|
+| QUEKO | 900 | 900 | 894 | 6 |
+| MLQD | 4,443 | 4,443 | 4,168 | 275 |
+| MQT Bench | 1,448 | 1,219 | 433 | 786 |
+| QASMBench | 111 | 94 | 55 | 39 |
+| RevLib | 263 | 231 | 219 | 12 |
+| **Total** | **7,165** | **6,887** | **5,769** | **1,118** |
 
 #### QUEKO Backend Handling
 
@@ -885,7 +1002,7 @@ When evaluating multiple backends (e.g. `--backend toronto brooklyn torino`), al
 
 | Ablation | Tests |
 |----------|-------|
-| Loss component ablation | L_surr vs L_adj+L_hop; error_distance vs adjacency as primary |
+| Loss component ablation | error_distance vs swap_count; adjacency vs soft_proximity; standalone vs combined |
 | Stage 1 only vs. Stage 1+2 | Surrogate fine-tuning contribution |
 | Single-hardware vs. Multi-hardware training | Hardware-agnostic claim |
 
@@ -1059,8 +1176,8 @@ def hungarian_decode(P, l):
 | | τ_min | 0.05 |
 | | Schedule | Exponential decay (Stage 1), Fixed (Stage 2) |
 | **Stage 2 Loss** | Components | Configurable via YAML registry |
-| | Default | error_distance (1.0) + node_quality (0.3) |
-| | Available | error_distance, adjacency, hop_distance, node_quality, separation |
+| | Current best | error_distance (1.0) + adjacency (0.3) |
+| | Available | error_distance, adjacency, hop_distance, swap_count, soft_proximity, node_quality, separation, exclusion |
 | **Batching** | Max total nodes | 512 (tune to GPU) |
 | | large_backend_boost | 2.0 (oversample 50Q+ backends) |
 | **Multi-prog** | Scenarios | Configurable (default: [1, 2, 4] with proportions [0.5, 0.3, 0.2]) |
@@ -1076,6 +1193,6 @@ def hungarian_decode(P, l):
 | **Transitions** | MLQD+QUEKO→QUEKO | Val CE early stop, patience 15 |
 | | QUEKO fine-tuning end | Val CE early stop, patience 10 |
 | | Stage 1→2 | Manual (after Stage 1 completes) |
-| | Stage 2 end | Val PST early stopping, patience 10, min_delta 0.5% |
+| | Stage 2 end | No early stopping; full max_epochs, best checkpoint by val PST |
 | **Reproducibility** | Training seed | 42 |
 | | Evaluation seed | 43 |

@@ -16,6 +16,7 @@ import numpy as np
 
 from configs.config_loader import parse_args_with_config
 from data.dataset import create_dataloader, load_split
+from data.hardware_graph import configure_hw_features
 from models.graphqmap import GraphQMap
 from training.trainer import Stage1Trainer, Stage2Trainer
 
@@ -181,6 +182,10 @@ def main() -> None:
 
     _set_seed(cfg.seed)
 
+    # Configure HW feature dimensionality (7dim includes t1/t2)
+    hw_input_dim = getattr(cfg.model.hardware_gnn, "node_input_dim", 5)
+    configure_hw_features(include_t1_t2=(hw_input_dim == 7))
+
     logger.info("=== GraphQMap Training — Stage %d ===", stage)
     logger.info("Device: %s", device)
     logger.info("Run directory: %s", cfg.checkpoint_dir.rsplit("/checkpoints", 1)[0])
@@ -269,9 +274,27 @@ def main() -> None:
             num_workers=num_workers, seed=cfg.seed,
         )
 
-        # PST validation function using benchmark circuits on a test backend
+        # Validation data for surrogate loss early stopping
+        val_loader = None
+        val_split = getattr(cfg.data.splits, "val", None)
+        if val_split:
+            logger.info("Loading Stage 2 validation data...")
+            val_ds = load_split(
+                val_split,
+                data_root=data_root,
+                training_backends=training_backends,
+                include_stage2_fields=True,
+                **feature_kwargs,
+            )
+            logger.info("Val: %d samples", len(val_ds))
+            val_loader = create_dataloader(
+                val_ds, max_total_nodes=max_nodes, shuffle=False,
+                num_workers=num_workers, seed=cfg.seed,
+            )
+
+        # PST validation function using benchmark circuits on a test backend (monitoring only)
         val_pst_fn = _build_val_pst_fn(cfg, device)
-        trainer.run(train_loader, val_pst_fn=val_pst_fn)
+        trainer.run(train_loader, val_loader=val_loader, val_pst_fn=val_pst_fn)
         _generate_plots(cfg)
 
     else:

@@ -23,6 +23,21 @@ from data.normalization import zscore_normalize
 
 SYNTHETIC_BACKENDS_DIR = Path(__file__).parent / "circuits" / "backends"
 
+# Module-level configuration for HW feature dimensionality.
+# When True, t1 and t2 are prepended to node features (7dim instead of 5dim).
+_include_t1_t2: bool = False
+
+
+def configure_hw_features(include_t1_t2: bool = False) -> None:
+    """Set hardware feature mode. Call before building any hardware graphs.
+
+    Args:
+        include_t1_t2: If True, include raw t1/t2 in node features (7dim).
+                       If False, use 5dim (readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio).
+    """
+    global _include_t1_t2
+    _include_t1_t2 = include_t1_t2
+
 # Backend name -> class name mapping for qiskit_ibm_runtime.fake_provider
 BACKEND_REGISTRY: dict[str, str] = {
     # --- 5Q backends ---
@@ -290,8 +305,9 @@ def extract_edge_properties(backend: Any) -> tuple[list[tuple[int, int]], np.nda
 def build_hardware_graph(backend: Any, eps: float = 1e-8) -> Data:
     """Build a PyG Data object for a hardware backend.
 
-    Node features (5): readout_error, single_qubit_error, degree,
-                       t1_cx_ratio, t2_cx_ratio
+    Node features (5 or 7): [t1, t2,] readout_error, single_qubit_error,
+                       degree, t1_cx_ratio, t2_cx_ratio
+    Set via configure_hw_features(include_t1_t2=True) for 7dim.
     Edge features (1): cx_error
     All features z-score normalized within the backend.
 
@@ -305,14 +321,18 @@ def build_hardware_graph(backend: Any, eps: float = 1e-8) -> Data:
     qubit_props = extract_qubit_properties(backend)
     edge_list, edge_feats = extract_edge_properties(backend)
 
-    # Stack node features: (num_qubits, 5)
-    node_features = np.stack([
+    # Stack node features: (num_qubits, 5 or 7)
+    feat_list = []
+    if _include_t1_t2:
+        feat_list.extend([qubit_props["t1"], qubit_props["t2"]])
+    feat_list.extend([
         qubit_props["readout_error"],
         qubit_props["single_qubit_error"],
         qubit_props["degree"],
         qubit_props["t1_cx_ratio"],
         qubit_props["t2_cx_ratio"],
-    ], axis=1).astype(np.float32)
+    ])
+    node_features = np.stack(feat_list, axis=1).astype(np.float32)
 
     x = torch.from_numpy(node_features)
     # Z-score normalize within backend (along dim=0, across qubits)
@@ -399,24 +419,27 @@ def precompute_hop_distance(backend: Any) -> np.ndarray:
 def get_hw_node_features(backend: Any) -> np.ndarray:
     """Get quality-score input features for a Qiskit FakeBackendV2.
 
-    Returns (h, 5) array: [readout_error, single_qubit_error, degree,
-                           t1_cx_ratio, t2_cx_ratio].
+    Returns (h, 5 or 7) array depending on configure_hw_features().
     Values are z-score normalized within the backend.
 
     Args:
         backend: A FakeBackendV2 instance.
 
     Returns:
-        (h, 5) numpy array for QualityScore module input.
+        (h, 5 or 7) numpy array for QualityScore module input.
     """
     props = extract_qubit_properties(backend)
-    raw = np.stack([
+    feat_list = []
+    if _include_t1_t2:
+        feat_list.extend([props["t1"], props["t2"]])
+    feat_list.extend([
         props["readout_error"],
         props["single_qubit_error"],
         props["degree"],
         props["t1_cx_ratio"],
         props["t2_cx_ratio"],
-    ], axis=1).astype(np.float32)
+    ])
+    raw = np.stack(feat_list, axis=1).astype(np.float32)
 
     mean = raw.mean(axis=0, keepdims=True)
     std = raw.std(axis=0, keepdims=True) + 1e-8
@@ -446,8 +469,7 @@ def build_hardware_graph_from_synthetic(name: str, eps: float = 1e-8) -> Data:
     qprops = profile["qubit_properties"]
     eprops = profile["edge_properties"]
 
-    # Node features: (n, 5) — readout_error, sq_gate_error, degree,
-    #                           t1_cx_ratio, t2_cx_ratio
+    # Node features: (n, 5 or 7) depending on configure_hw_features()
     degree = np.zeros(n)
     neighbor_map: list[set[int]] = [set() for _ in range(n)]
     for p, q in coupling_map:
@@ -474,13 +496,21 @@ def build_hardware_graph_from_synthetic(name: str, eps: float = 1e-8) -> Data:
     t1_cx_ratio = np.where(mean_cx_duration > 0, t1_arr / mean_cx_duration, 0.0)
     t2_cx_ratio = np.where(mean_cx_duration > 0, t2_arr / mean_cx_duration, 0.0)
 
-    node_features = np.zeros((n, 5), dtype=np.float32)
+    ndim = 7 if _include_t1_t2 else 5
+    node_features = np.zeros((n, ndim), dtype=np.float32)
     for i in range(n):
         qp = qprops[str(i)]
-        node_features[i] = [
-            qp["readout_error"], qp["sq_gate_error"], degree[i],
-            t1_cx_ratio[i], t2_cx_ratio[i],
-        ]
+        if _include_t1_t2:
+            node_features[i] = [
+                t1_arr[i], t2_arr[i],
+                qp["readout_error"], qp["sq_gate_error"], degree[i],
+                t1_cx_ratio[i], t2_cx_ratio[i],
+            ]
+        else:
+            node_features[i] = [
+                qp["readout_error"], qp["sq_gate_error"], degree[i],
+                t1_cx_ratio[i], t2_cx_ratio[i],
+            ]
 
     x = torch.from_numpy(node_features)
     x = zscore_normalize(x, dim=0, eps=eps)
@@ -556,15 +586,14 @@ def precompute_hop_distance_synthetic(name: str) -> np.ndarray:
 def get_hw_node_features_synthetic(name: str) -> np.ndarray:
     """Get quality-score input features for a synthetic backend.
 
-    Returns (h, 5) array: [readout_error, single_qubit_error, degree,
-                           t1_cx_ratio, t2_cx_ratio].
+    Returns (h, 5 or 7) array depending on configure_hw_features().
     Values are z-score normalized within the backend.
 
     Args:
         name: Synthetic backend name.
 
     Returns:
-        (h, 5) numpy array for QualityScore module input.
+        (h, 5 or 7) numpy array for QualityScore module input.
     """
     profile = _load_synthetic_backend(name)
     n = profile["num_qubits"]
@@ -599,13 +628,21 @@ def get_hw_node_features_synthetic(name: str) -> np.ndarray:
     t1_cx_ratio = np.where(mean_cx_duration > 0, t1_arr / mean_cx_duration, 0.0)
     t2_cx_ratio = np.where(mean_cx_duration > 0, t2_arr / mean_cx_duration, 0.0)
 
-    raw = np.zeros((n, 5), dtype=np.float32)
+    ndim = 7 if _include_t1_t2 else 5
+    raw = np.zeros((n, ndim), dtype=np.float32)
     for i in range(n):
         qp = qprops[str(i)]
-        raw[i] = [
-            qp["readout_error"], qp["sq_gate_error"], degree[i],
-            t1_cx_ratio[i], t2_cx_ratio[i],
-        ]
+        if _include_t1_t2:
+            raw[i] = [
+                t1_arr[i], t2_arr[i],
+                qp["readout_error"], qp["sq_gate_error"], degree[i],
+                t1_cx_ratio[i], t2_cx_ratio[i],
+            ]
+        else:
+            raw[i] = [
+                qp["readout_error"], qp["sq_gate_error"], degree[i],
+                t1_cx_ratio[i], t2_cx_ratio[i],
+            ]
 
     # Z-score normalize within backend
     mean = raw.mean(axis=0, keepdims=True)

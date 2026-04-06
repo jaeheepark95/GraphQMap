@@ -162,9 +162,15 @@ def parse_args_with_config() -> Config:
         keys = key.split(".")
         d = cfg_dict
         for k in keys[:-1]:
-            d = d.setdefault(k, {})
+            if isinstance(d, list):
+                d = d[int(k)]
+            else:
+                d = d.setdefault(k, {})
         # Auto-cast value
-        d[keys[-1]] = _auto_cast(value)
+        if isinstance(d, list):
+            d[int(keys[-1])] = _auto_cast(value)
+        else:
+            d[keys[-1]] = _auto_cast(value)
 
     # Setup timestamped run directory
     _setup_run_dir(cfg_dict, args.name, args.config)

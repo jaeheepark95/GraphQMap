@@ -24,7 +24,7 @@ from torch_geometric.data import Batch
 
 from configs.config_loader import load_config
 from data.circuit_graph import build_circuit_graph
-from data.hardware_graph import build_hardware_graph, get_backend
+from data.hardware_graph import build_hardware_graph, configure_hw_features, get_backend
 from evaluation.benchmark import (
     BENCHMARK_CIRCUIT_DIR,
     BENCHMARK_CIRCUITS,
@@ -397,6 +397,10 @@ def main() -> None:
             parser.error("--config is required for model evaluation")
 
         cfg = load_config(args.config)
+
+        # Configure HW feature dimensionality (7dim includes t1/t2)
+        hw_input_dim = getattr(cfg.model.hardware_gnn, "node_input_dim", 5)
+        configure_hw_features(include_t1_t2=(hw_input_dim == 7))
 
         # Collect all results across backends
         all_rows = []

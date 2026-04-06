@@ -7,15 +7,10 @@ data/circuits/cache/
 data/circuits/queko/
 !data/circuits/README.md
 
-# Temporary downloads
-tmp_downloads/
-
 # Reference code (colleague repos)
 references/
 
 # Training outputs
-checkpoints/
-logs/
 runs/
 
 # Claude Code memory

@@ -1,8 +1,21 @@
+# Core ML
 torch>=2.0
 torch-geometric>=2.4
+numpy
+
+# Quantum
 qiskit>=1.0
 qiskit-ibm-runtime
+qiskit-aer
+rustworkx
+
+# Data & computation
 scipy
-networkx
+pandas
 pyyaml
+
+# Visualization
+matplotlib
+
+# Testing
 pytest

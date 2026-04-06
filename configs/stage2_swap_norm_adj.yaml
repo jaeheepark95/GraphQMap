@@ -47,6 +47,7 @@ model:
 
 # ---- Sinkhorn ----
 sinkhorn:
+  score_norm: sinkhorn         # "sinkhorn" or "softmax"
   tau_max: 1.0               # start soft for gradient flow
   tau_min: 0.05              # final sharp temperature
   schedule: exponential      # exponential decay from tau_max to tau_min
@@ -69,26 +70,26 @@ training:
 
   max_epochs: 100
   early_stopping:
-    monitor: val_pst             # not used for early stopping; kept for config compatibility
+    monitor: val_pst          # actual PST, NOT surrogate loss
     patience: 10
-    min_delta: 0.005
+    min_delta: 0.005          # 0.5% PST improvement threshold
 
-  # PST validation schedule (used for best checkpoint selection, no early stopping)
+  # PST validation schedule
   pst_validation:
-    interval: 5               # measure every N epochs; best PST checkpoint saved
+    interval: 5               # measure every N epochs
     num_circuits: 200          # representative circuits for validation
     convergence_checks: 3      # stop if N consecutive < min_delta
 
 # ---- Loss ----
-# Components are registered loss modules. Add/remove/reorder freely.
-# Each component: name (from registry), weight (multiplier in total loss).
-# Available: error_distance, adjacency, hop_distance, node_quality, separation
+# E7: swap_count(normalized) + adjacency — fix E3's scale problem
 loss:
   type: surrogate
   components:
-    - name: error_distance       # L_surr: error-weighted shortest path distance (primary)
+    - name: swap_count             # L_swap normalized to [0,1] — same scale as adj
       weight: 1.0
-    - name: node_quality         # L_node: NISQ node quality (bounded [-1,0])
+      params:
+        normalize: true
+    - name: adjacency
       weight: 0.3
 
 

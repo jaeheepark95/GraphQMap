@@ -47,6 +47,7 @@ model:
 
 # ---- Sinkhorn ----
 sinkhorn:
+  score_norm: sinkhorn         # "sinkhorn" or "softmax"
   tau_max: 1.0               # start soft for gradient flow
   tau_min: 0.05              # final sharp temperature
   schedule: exponential      # exponential decay from tau_max to tau_min
@@ -88,7 +89,7 @@ loss:
   components:
     - name: error_distance       # L_surr: error-weighted shortest path distance (primary)
       weight: 1.0
-    - name: node_quality         # L_node: NISQ node quality (bounded [-1,0])
+    - name: adjacency            # L_adj: adjacency matching
       weight: 0.3
 
 
