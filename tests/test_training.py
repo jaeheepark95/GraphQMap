@@ -91,21 +91,21 @@ class TestEarlyStopping:
 
 class TestQualityScore:
     def test_output_shape(self):
-        qs = QualityScore(num_features=5)
-        features = torch.randn(10, 5)
+        qs = QualityScore(num_features=6)
+        features = torch.randn(10, 6)
         scores = qs(features)
         assert scores.shape == (10,)
 
     def test_output_range(self):
-        qs = QualityScore(num_features=5)
-        features = torch.randn(100, 5)
+        qs = QualityScore(num_features=6)
+        features = torch.randn(100, 6)
         scores = qs(features)
         assert (scores >= 0).all()
         assert (scores <= 1).all()
 
     def test_gradient_flow(self):
-        qs = QualityScore(num_features=5)
-        features = torch.randn(10, 5)
+        qs = QualityScore(num_features=6)
+        features = torch.randn(10, 6)
         scores = qs(features)
         scores.sum().backward()
         # All MLP parameters should have gradients
@@ -174,7 +174,7 @@ class TestLossRegistry:
         assert "exclusion" in available
 
     def test_unknown_loss_raises(self):
-        qs = QualityScore(num_features=5)
+        qs = QualityScore(num_features=6)
         with pytest.raises(ValueError, match="Unknown loss component"):
             Stage2Loss(components=[{"name": "nonexistent", "weight": 1.0}], quality_score=qs)
 
@@ -302,19 +302,19 @@ class TestAdjacencyMatchingLoss:
 
 class TestNodeQualityLoss:
     def test_basic(self):
-        qs = QualityScore(num_features=5)
+        qs = QualityScore(num_features=6)
         loss_fn = NodeQualityLoss(qs)
         P = torch.rand(2, 3, 5)
-        features = torch.randn(5, 5)
+        features = torch.randn(5, 6)
         importance = torch.tensor([3.0, 2.0, 1.0])
         loss = loss_fn(P, hw_node_features=features, qubit_importance=importance, num_logical=3)
         assert loss.shape == ()
 
     def test_gradient_to_quality_score(self):
-        qs = QualityScore(num_features=5)
+        qs = QualityScore(num_features=6)
         loss_fn = NodeQualityLoss(qs)
         P = torch.rand(1, 3, 5, requires_grad=True)
-        features = torch.randn(5, 5)
+        features = torch.randn(5, 6)
         importance = torch.tensor([1.0, 1.0, 1.0])
         loss = loss_fn(P, hw_node_features=features, qubit_importance=importance, num_logical=3)
         loss.backward()
@@ -345,7 +345,7 @@ class TestStage2Loss:
         return dict(
             d_hw=self._make_d_hw(n),
             d_error=self._make_d_error(n),
-            hw_node_features=torch.randn(n, 5),
+            hw_node_features=torch.randn(n, 6),
             circuit_edge_pairs=[(0, 1), (1, 2)],
             circuit_edge_weights=[3.0, 1.0],
             qubit_importance=torch.tensor([2.0, 1.0, 1.0]),
@@ -355,7 +355,7 @@ class TestStage2Loss:
 
     def test_original_config(self):
         """Test the original loss: error_distance + node_quality."""
-        qs = QualityScore(num_features=5)
+        qs = QualityScore(num_features=6)
         loss_fn = Stage2Loss(
             components=[
                 {"name": "error_distance", "weight": 1.0},
@@ -373,7 +373,7 @@ class TestStage2Loss:
 
     def test_adj_hop_config(self):
         """Test adjacency + hop + node config."""
-        qs = QualityScore(num_features=5)
+        qs = QualityScore(num_features=6)
         loss_fn = Stage2Loss(
             components=[
                 {"name": "adjacency", "weight": 1.0},
@@ -402,7 +402,7 @@ class TestStage2Loss:
         assert len(result) == 2  # total + error_distance
 
     def test_component_names_tracked(self):
-        qs = QualityScore(num_features=5)
+        qs = QualityScore(num_features=6)
         loss_fn = Stage2Loss(
             components=[
                 {"name": "error_distance", "weight": 1.0},
@@ -415,7 +415,7 @@ class TestStage2Loss:
 
     def test_weighted_sum(self):
         """Total should equal weighted sum of components."""
-        qs = QualityScore(num_features=5)
+        qs = QualityScore(num_features=6)
         loss_fn = Stage2Loss(
             components=[
                 {"name": "error_distance", "weight": 2.0},
@@ -431,7 +431,7 @@ class TestStage2Loss:
 
     def test_with_separation(self):
         """Test that separation loss works when cross_circuit_pairs provided."""
-        qs = QualityScore(num_features=5)
+        qs = QualityScore(num_features=6)
         loss_fn = Stage2Loss(
             components=[
                 {"name": "error_distance", "weight": 1.0},

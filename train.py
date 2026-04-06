@@ -59,9 +59,11 @@ def _get_training_backends(cfg) -> list[str]:
 def _build_val_pst_fn(cfg, device: torch.device):
     """Build a PST validation function for Stage 2.
 
-    Uses a subset of benchmark circuits on the first test backend to
-    measure actual PST during training. Simulators are created once
-    and reused across validation calls.
+    Uses benchmark circuits on ALL test backends to measure actual PST
+    during training. NASSC routing is used instead of SABRE for
+    deterministic measurement (eliminates routing non-determinism).
+
+    Simulators are created once per backend and reused across calls.
     """
     from torch_geometric.data import Batch
 
@@ -71,30 +73,39 @@ def _build_val_pst_fn(cfg, device: torch.device):
     from evaluation.pst import compute_pst, create_ideal_simulator, create_noisy_simulator
     from evaluation.transpiler import transpile_with_timing
 
-    # Use first test backend for validation
-    val_backend_name = cfg.backends.test[0]
-    if val_backend_name.startswith("Fake"):
-        val_backend_name = val_backend_name[4:].lower()
-    backend = get_backend(val_backend_name)
-    num_physical = backend.target.num_qubits
-    hw_graph = build_hardware_graph(backend)
     tau = getattr(cfg.sinkhorn, "tau_min", getattr(cfg.sinkhorn, "tau", 0.05))
 
-    ideal_sim = create_ideal_simulator(backend)
-    noisy_sim = create_noisy_simulator(backend)
+    # Set up all test backends
+    val_backends = []
+    for bname in cfg.backends.test:
+        name = bname[4:].lower() if bname.startswith("Fake") else bname
+        backend = get_backend(name)
+        num_physical = backend.target.num_qubits
+        hw_graph = build_hardware_graph(backend)
+        ideal_sim = create_ideal_simulator(backend)
+        noisy_sim = create_noisy_simulator(backend)
 
-    # Preload benchmark circuits that fit this backend
-    val_circuits = []
-    for cname in BENCHMARK_CIRCUITS:
-        try:
-            circ = load_benchmark_circuit(cname, measure=True)
-            if 2 <= circ.num_qubits <= num_physical:
-                val_circuits.append((cname, circ))
-        except Exception:
-            continue
+        # Preload benchmark circuits that fit this backend
+        circuits = []
+        for cname in BENCHMARK_CIRCUITS:
+            try:
+                circ = load_benchmark_circuit(cname, measure=True)
+                if 2 <= circ.num_qubits <= num_physical:
+                    circuits.append((cname, circ))
+            except Exception:
+                continue
 
-    logger.info("PST validation: %d circuits on %s (%dQ)",
-                len(val_circuits), val_backend_name, num_physical)
+        val_backends.append({
+            "name": name,
+            "backend": backend,
+            "num_physical": num_physical,
+            "hw_graph": hw_graph,
+            "ideal_sim": ideal_sim,
+            "noisy_sim": noisy_sim,
+            "circuits": circuits,
+        })
+        logger.info("PST validation: %d circuits on %s (%dQ)",
+                    len(circuits), name, num_physical)
 
     def val_pst_fn(model, epoch: int) -> float:
         model.eval()
@@ -102,46 +113,51 @@ def _build_val_pst_fn(cfg, device: torch.device):
 
         node_fnames = getattr(cfg.model.circuit_gnn, "node_features", None)
         rk = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
+        edim = getattr(cfg.model.circuit_gnn, "edge_input_dim", None)
 
-        for cname, circuit in val_circuits:
-            num_logical = circuit.num_qubits
-            circuit_graph = build_circuit_graph(
-                circuit, node_feature_names=node_fnames, rwpe_k=rk,
-            )
-            circuit_batch = Batch.from_data_list([circuit_graph]).to(device)
-            hw_batch = Batch.from_data_list([hw_graph]).to(device)
+        for vb in val_backends:
+            hw_batch = Batch.from_data_list([vb["hw_graph"]]).to(device)
 
-            with torch.no_grad():
-                layouts = model.predict(
-                    circuit_batch, hw_batch,
-                    batch_size=1,
-                    num_logical=num_logical,
-                    num_physical=num_physical,
-                    tau=tau,
+            for cname, circuit in vb["circuits"]:
+                num_logical = circuit.num_qubits
+                circuit_graph = build_circuit_graph(
+                    circuit, node_feature_names=node_fnames, rwpe_k=rk,
+                    edge_dim=edim,
                 )
-            layout = list(layouts[0].values())
+                circuit_batch = Batch.from_data_list([circuit_graph]).to(device)
 
-            try:
-                tc, _ = transpile_with_timing(
-                    circuit, backend,
-                    initial_layout=layout,
-                    layout_method="given",
-                    routing_method="sabre",
-                    seed=cfg.seed,
-                )
-                ideal_counts = ideal_sim.run(tc, shots=4096).result().get_counts()
+                with torch.no_grad():
+                    layouts = model.predict(
+                        circuit_batch, hw_batch,
+                        batch_size=1,
+                        num_logical=num_logical,
+                        num_physical=vb["num_physical"],
+                        tau=tau,
+                    )
+                layout = list(layouts[0].values())
 
-                # Average over multiple noisy reps to reduce measurement noise
-                rep_psts = []
-                for _ in range(3):
-                    noisy_counts = noisy_sim.run(tc, shots=4096).result().get_counts()
-                    p = compute_pst(noisy_counts, ideal_counts)
-                    if isinstance(p, list):
-                        p = sum(p) / len(p)
-                    rep_psts.append(p)
-                pst_values.append(float(np.mean(rep_psts)))
-            except Exception as e:
-                logger.warning("  PST val skip %s: %s", cname, e)
+                try:
+                    tc, _ = transpile_with_timing(
+                        circuit, vb["backend"],
+                        initial_layout=layout,
+                        layout_method="given",
+                        routing_method="nassc",
+                    )
+                    ideal_counts = vb["ideal_sim"].run(tc, shots=4096).result().get_counts()
+
+                    rep_psts = []
+                    for _ in range(3):
+                        noisy_counts = vb["noisy_sim"].run(tc, shots=4096).result().get_counts()
+                        p = compute_pst(noisy_counts, ideal_counts)
+                        if isinstance(p, list):
+                            p = sum(p) / len(p)
+                        rep_psts.append(p)
+                    pst_values.append(float(np.mean(rep_psts)))
+                except Exception as e:
+                    logger.warning("  PST val skip %s/%s: %s", vb["name"], cname, e)
+                    # Recreate simulators to recover from GPU state corruption
+                    vb["ideal_sim"] = create_ideal_simulator(vb["backend"])
+                    vb["noisy_sim"] = create_noisy_simulator(vb["backend"])
 
         model.train()
         avg_pst = float(np.mean(pst_values)) if pst_values else 0.0
@@ -182,9 +198,13 @@ def main() -> None:
 
     _set_seed(cfg.seed)
 
-    # Configure HW feature dimensionality (7dim includes t1/t2)
-    hw_input_dim = getattr(cfg.model.hardware_gnn, "node_input_dim", 5)
-    configure_hw_features(include_t1_t2=(hw_input_dim == 7))
+    # Configure HW feature dimensionality (default 6dim; 8dim includes raw t1/t2)
+    hw_input_dim = getattr(cfg.model.hardware_gnn, "node_input_dim", 6)
+    exclude_degree = getattr(cfg.model.hardware_gnn, "exclude_degree", False)
+    configure_hw_features(
+        include_t1_t2=(hw_input_dim in (7, 8)),
+        exclude_degree=exclude_degree,
+    )
 
     logger.info("=== GraphQMap Training — Stage %d ===", stage)
     logger.info("Device: %s", device)
@@ -198,7 +218,9 @@ def main() -> None:
     # Circuit feature config (from YAML, passed to dataset loaders)
     node_feature_names = getattr(cfg.model.circuit_gnn, "node_features", None)
     rwpe_k = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
-    feature_kwargs = {"node_feature_names": node_feature_names, "rwpe_k": rwpe_k}
+    edge_dim = getattr(cfg.model.circuit_gnn, "edge_input_dim", None)
+    feature_kwargs = {"node_feature_names": node_feature_names, "rwpe_k": rwpe_k,
+                      "edge_dim": edge_dim}
 
     if stage == 1:
         model = GraphQMap.from_config(cfg)

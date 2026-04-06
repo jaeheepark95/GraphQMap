@@ -200,11 +200,13 @@ class LazyMappingDataset(Dataset):
         self,
         node_feature_names: list[str] | None = None,
         rwpe_k: int = 0,
+        edge_dim: int | None = None,
     ) -> None:
         self._entries: list[_SampleMetadata] = []
         self._backend_indices: dict[str, list[int]] = {}
         self.node_feature_names = node_feature_names or DEFAULT_NODE_FEATURES
         self.rwpe_k = rwpe_k
+        self.edge_dim = edge_dim
 
     def add_entry(self, meta: _SampleMetadata) -> None:
         """Add a sample metadata entry."""
@@ -233,6 +235,7 @@ class LazyMappingDataset(Dataset):
                 num_qubits=cache_data["num_logical"],
                 node_feature_names=self.node_feature_names,
                 rwpe_k=self.rwpe_k,
+                edge_dim=self.edge_dim,
             )
         else:
             # Legacy cache format: pre-built PyG Data
@@ -531,6 +534,7 @@ def load_split(
     lazy: bool = True,
     node_feature_names: list[str] | None = None,
     rwpe_k: int = 0,
+    edge_dim: int | None = None,
 ) -> MappingDataset | LazyMappingDataset:
     """Build a dataset from a splits JSON file.
 
@@ -547,6 +551,7 @@ def load_split(
         lazy: If True, use lazy loading from cached .pt files.
         node_feature_names: Circuit node features to use (None = defaults).
         rwpe_k: Number of RWPE steps (0 = disabled).
+        edge_dim: Number of circuit edge feature dimensions (None = use all).
 
     Returns:
         MappingDataset or LazyMappingDataset.
@@ -555,6 +560,7 @@ def load_split(
         return _load_split_lazy(
             split_path, data_root, training_backends, include_stage2_fields,
             node_feature_names=node_feature_names, rwpe_k=rwpe_k,
+            edge_dim=edge_dim,
         )
     return _load_split_eager(
         split_path, data_root, training_backends, include_stage2_fields,
@@ -569,6 +575,7 @@ def _load_split_lazy(
     include_stage2_fields: bool,
     node_feature_names: list[str] | None = None,
     rwpe_k: int = 0,
+    edge_dim: int | None = None,
 ) -> LazyMappingDataset:
     """Load split with lazy loading from cached .pt files.
 
@@ -606,6 +613,7 @@ def _load_split_lazy(
     dataset = LazyMappingDataset(
         node_feature_names=node_feature_names,
         rwpe_k=rwpe_k,
+        edge_dim=edge_dim,
     )
     rng = np.random.RandomState(42)
     loaded, skipped = 0, 0

@@ -249,8 +249,10 @@ def evaluate_model(args, cfg) -> None:
         # --- Model evaluation (both routing variants) ---
         node_fnames = getattr(cfg.model.circuit_gnn, "node_features", None)
         rk = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
+        edge_dim = getattr(cfg.model.circuit_gnn, "edge_input_dim", None)
         circuit_graph = build_circuit_graph(
             circuit, node_feature_names=node_fnames, rwpe_k=rk,
+            edge_dim=edge_dim,
         )
         circuit_batch = Batch.from_data_list([circuit_graph])
         hw_batch = Batch.from_data_list([hw_graph])
@@ -398,9 +400,13 @@ def main() -> None:
 
         cfg = load_config(args.config)
 
-        # Configure HW feature dimensionality (7dim includes t1/t2)
-        hw_input_dim = getattr(cfg.model.hardware_gnn, "node_input_dim", 5)
-        configure_hw_features(include_t1_t2=(hw_input_dim == 7))
+        # Configure HW feature dimensionality (default 6dim; 8dim includes raw t1/t2)
+        hw_input_dim = getattr(cfg.model.hardware_gnn, "node_input_dim", 6)
+        exclude_degree = getattr(cfg.model.hardware_gnn, "exclude_degree", False)
+        configure_hw_features(
+            include_t1_t2=(hw_input_dim in (7, 8)),
+            exclude_degree=exclude_degree,
+        )
 
         # Collect all results across backends
         all_rows = []

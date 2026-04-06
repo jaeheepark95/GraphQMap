@@ -69,25 +69,38 @@ class TestHardwareGraph:
         assert (props["t2_cx_ratio"] >= 0).all()
 
     def test_extract_edge_properties(self, manila_backend):
-        edge_list, edge_feats = extract_edge_properties(manila_backend)
+        edge_list, edge_error, edge_duration = extract_edge_properties(manila_backend)
         # Manila has 4 undirected edges: 0-1, 1-2, 2-3, 3-4
         assert len(edge_list) == 4
-        assert edge_feats.shape == (4, 1)  # cx_error only
-        assert (edge_feats > 0).all()
+        assert edge_error.shape == (4,)
+        assert edge_duration.shape == (4,)
+        assert (edge_error > 0).all()
+        assert (edge_duration > 0).all()
+
+    def test_extract_qubit_properties_t2_t1_ratio(self, manila_backend):
+        props = extract_qubit_properties(manila_backend)
+        assert "t2_t1_ratio" in props
+        assert props["t2_t1_ratio"].shape == (5,)
+        # T2/T1 should be in (0, 2] range
+        assert (props["t2_t1_ratio"] > 0).all()
+        assert (props["t2_t1_ratio"] <= 2.0 + 1e-6).all()
 
     def test_build_hardware_graph_shape(self, manila_backend):
         data = build_hardware_graph(manila_backend)
-        assert data.x.shape == (5, 5)  # 5 qubits, 5 features
+        assert data.x.shape == (5, 6)  # 5 qubits, 6 features (5 z-scored + 1 raw)
         assert data.edge_index.shape[0] == 2
         assert data.edge_index.shape[1] == 8  # 4 undirected edges * 2 directions
         assert data.edge_attr.shape[0] == 8
-        assert data.edge_attr.shape[1] == 1  # cx_error only
+        assert data.edge_attr.shape[1] == 2  # z-scored: 2q_error + raw: edge_coherence_ratio
         assert data.num_qubits == 5
 
     def test_build_hardware_graph_normalized(self, manila_backend):
         data = build_hardware_graph(manila_backend)
-        # Z-score normalized: mean ~0
-        assert torch.allclose(data.x.mean(dim=0), torch.zeros(5), atol=0.1)
+        # Z-score normalized columns (first 5): mean ~0
+        assert torch.allclose(data.x[:, :5].mean(dim=0), torch.zeros(5), atol=0.1)
+        # Raw column (T2/T1 ratio, last column): NOT z-scored, values in (0, 2]
+        assert (data.x[:, 5] > 0).all()
+        assert (data.x[:, 5] <= 2.0 + 1e-6).all()
 
     def test_precompute_error_distance(self, manila_backend):
         d_error = precompute_error_distance(manila_backend)
@@ -140,7 +153,7 @@ class TestCircuitGraph:
         feats = extract_circuit_features(circuit)
         # Edges: (0,1) and (1,2)
         assert len(feats["edge_list"]) == 2
-        assert feats["edge_features"].shape == (2, 3)
+        assert feats["edge_features"].shape == (2, 5)
 
     def test_extract_features_interaction_count(self, circuit):
         feats = extract_circuit_features(circuit)
@@ -178,7 +191,7 @@ class TestCircuitGraph:
         assert data.x.shape == (3, 4)  # 3 qubits, 4 features
         assert data.edge_index.shape[0] == 2
         assert data.edge_index.shape[1] == 4  # 2 edges * 2 directions
-        assert data.edge_attr.shape == (4, 3)
+        assert data.edge_attr.shape == (4, 5)
         assert data.num_qubits == 3
 
     def test_build_circuit_graph_normalized(self, circuit):
@@ -190,7 +203,7 @@ class TestCircuitGraph:
         data = build_circuit_graph(circuit)
         # Edge features should also be z-score normalized (mean ~0)
         assert data.edge_attr.shape[0] > 0
-        assert torch.allclose(data.edge_attr.mean(dim=0), torch.zeros(3), atol=0.1)
+        assert torch.allclose(data.edge_attr.mean(dim=0), torch.zeros(5), atol=0.1)
 
     def test_single_qubit_circuit(self):
         """Circuit with no 2-qubit gates should have no edges."""

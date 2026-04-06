@@ -24,19 +24,23 @@ from data.normalization import zscore_normalize
 SYNTHETIC_BACKENDS_DIR = Path(__file__).parent / "circuits" / "backends"
 
 # Module-level configuration for HW feature dimensionality.
-# When True, t1 and t2 are prepended to node features (7dim instead of 5dim).
 _include_t1_t2: bool = False
+_exclude_degree: bool = False
 
 
-def configure_hw_features(include_t1_t2: bool = False) -> None:
+def configure_hw_features(
+    include_t1_t2: bool = False,
+    exclude_degree: bool = False,
+) -> None:
     """Set hardware feature mode. Call before building any hardware graphs.
 
     Args:
-        include_t1_t2: If True, include raw t1/t2 in node features (7dim).
-                       If False, use 5dim (readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio).
+        include_t1_t2: If True, include raw t1/t2 in z-scored features (+2 dim).
+        exclude_degree: If True, exclude degree from z-scored features (-1 dim).
     """
-    global _include_t1_t2
+    global _include_t1_t2, _exclude_degree
     _include_t1_t2 = include_t1_t2
+    _exclude_degree = exclude_degree
 
 # Backend name -> class name mapping for qiskit_ibm_runtime.fake_provider
 BACKEND_REGISTRY: dict[str, str] = {
@@ -228,6 +232,11 @@ def extract_qubit_properties(backend: Any) -> dict[str, np.ndarray]:
     t1_cx_ratio = np.where(mean_cx_duration > 0, t1 / mean_cx_duration, 0.0)
     t2_cx_ratio = np.where(mean_cx_duration > 0, t2 / mean_cx_duration, 0.0)
 
+    # T2/T1 ratio: decoherence type indicator (dimensionless, not z-scored)
+    # T2/T1 ≈ 2 → relaxation-limited, T2/T1 ≈ 1 → dephasing-dominated
+    # Clipped to [0, 2] — theoretical bound T2 ≤ 2*T1; outliers from noisy calibration data
+    t2_t1_ratio = np.clip(np.where(t1 > 0, t2 / t1, 0.0), 0.0, 2.0)
+
     return {
         "t1": t1,
         "t2": t2,
@@ -236,6 +245,7 @@ def extract_qubit_properties(backend: Any) -> dict[str, np.ndarray]:
         "degree": degree,
         "t1_cx_ratio": t1_cx_ratio,
         "t2_cx_ratio": t2_cx_ratio,
+        "t2_t1_ratio": t2_t1_ratio,
     }
 
 
@@ -263,7 +273,9 @@ def _get_two_qubit_gate_name(backend: Any) -> str:
     )
 
 
-def extract_edge_properties(backend: Any) -> tuple[list[tuple[int, int]], np.ndarray]:
+def extract_edge_properties(
+    backend: Any,
+) -> tuple[list[tuple[int, int]], np.ndarray, np.ndarray]:
     """Extract per-edge 2-qubit gate properties from a backend.
 
     Supports backends with cx, ecr, or cz as the native 2-qubit gate.
@@ -272,44 +284,53 @@ def extract_edge_properties(backend: Any) -> tuple[list[tuple[int, int]], np.nda
         backend: A FakeBackendV2 instance.
 
     Returns:
-        Tuple of (edge_list, edge_features).
+        Tuple of (edge_list, edge_error, edge_duration).
         edge_list: List of (src, dst) tuples (undirected, each pair once).
-        edge_features: Array of shape (num_edges, 1) with [2q_error].
+        edge_error: Array of shape (num_edges,) with 2q gate error.
+        edge_duration: Array of shape (num_edges,) with 2q gate duration.
     """
     target = backend.target
     gate_name = _get_two_qubit_gate_name(backend)
     cx_props = target[gate_name]
 
-    # Collect undirected edges (deduplicate by sorting)
-    edge_dict: dict[tuple[int, int], list[float]] = {}
+    # Collect undirected edges (deduplicate by sorting, average both directions)
+    edge_dict: dict[tuple[int, int], dict[str, list[float]]] = {}
     for qargs, props in cx_props.items():
         if props is None:
             continue
         a, b = qargs
         key = (min(a, b), max(a, b))
-        cx_error = props.error if props.error is not None else 0.0
+        error = props.error if props.error is not None else 0.0
+        duration = props.duration if props.duration is not None else 0.0
         if key not in edge_dict:
-            edge_dict[key] = [cx_error]
+            edge_dict[key] = {"errors": [error], "durations": [duration]}
         else:
-            # Average the two directions
-            edge_dict[key][0] = (edge_dict[key][0] + cx_error) / 2
+            edge_dict[key]["errors"].append(error)
+            edge_dict[key]["durations"].append(duration)
 
     edge_list = sorted(edge_dict.keys())
-    edge_features = np.array([edge_dict[e] for e in edge_list], dtype=np.float32)
-    if edge_features.ndim == 1:
-        edge_features = edge_features.reshape(-1, 1)
+    edge_error = np.array(
+        [np.mean(edge_dict[e]["errors"]) for e in edge_list], dtype=np.float32
+    )
+    edge_duration = np.array(
+        [np.mean(edge_dict[e]["durations"]) for e in edge_list], dtype=np.float32
+    )
 
-    return edge_list, edge_features
+    return edge_list, edge_error, edge_duration
 
 
 def build_hardware_graph(backend: Any, eps: float = 1e-8) -> Data:
     """Build a PyG Data object for a hardware backend.
 
-    Node features (5 or 7): [t1, t2,] readout_error, single_qubit_error,
-                       degree, t1_cx_ratio, t2_cx_ratio
-    Set via configure_hw_features(include_t1_t2=True) for 7dim.
-    Edge features (1): cx_error
-    All features z-score normalized within the backend.
+    Node features (6 or 8):
+      z-scored: [t1, t2,] readout_error, single_qubit_error,
+                degree, t1_cx_ratio, t2_cx_ratio
+      raw:      t2_t1_ratio
+    Set via configure_hw_features(include_t1_t2=True) for 8dim (default 6dim).
+
+    Edge features (2):
+      z-scored: 2q_gate_error
+      raw:      edge_coherence_ratio (cx_duration / min(T1,T2) of endpoints)
 
     Args:
         backend: A FakeBackendV2 instance.
@@ -319,41 +340,60 @@ def build_hardware_graph(backend: Any, eps: float = 1e-8) -> Data:
         PyG Data object with x, edge_index, edge_attr, and num_qubits.
     """
     qubit_props = extract_qubit_properties(backend)
-    edge_list, edge_feats = extract_edge_properties(backend)
+    edge_list, edge_error, edge_duration = extract_edge_properties(backend)
 
-    # Stack node features: (num_qubits, 5 or 7)
-    feat_list = []
+    # -- Node features --
+    # Z-scored features: (num_qubits, 5 or 7)
+    zscore_feat_list = []
     if _include_t1_t2:
-        feat_list.extend([qubit_props["t1"], qubit_props["t2"]])
-    feat_list.extend([
+        zscore_feat_list.extend([qubit_props["t1"], qubit_props["t2"]])
+    zscore_feat_list.extend([
         qubit_props["readout_error"],
         qubit_props["single_qubit_error"],
-        qubit_props["degree"],
+    ])
+    if not _exclude_degree:
+        zscore_feat_list.append(qubit_props["degree"])
+    zscore_feat_list.extend([
         qubit_props["t1_cx_ratio"],
         qubit_props["t2_cx_ratio"],
     ])
-    node_features = np.stack(feat_list, axis=1).astype(np.float32)
+    node_zscore = np.stack(zscore_feat_list, axis=1).astype(np.float32)
+    node_zscore = zscore_normalize(torch.from_numpy(node_zscore), dim=0, eps=eps)
 
-    x = torch.from_numpy(node_features)
-    # Z-score normalize within backend (along dim=0, across qubits)
-    x = zscore_normalize(x, dim=0, eps=eps)
+    # Raw features: (num_qubits, 1) — T2/T1 ratio (dimensionless, not z-scored)
+    node_raw = torch.from_numpy(
+        qubit_props["t2_t1_ratio"].reshape(-1, 1).astype(np.float32)
+    )
 
-    # Build edge_index: undirected -> add both directions
+    x = torch.cat([node_zscore, node_raw], dim=1)
+
+    # -- Edge features --
+    num_qubits = backend.target.num_qubits
     if len(edge_list) > 0:
         src = [e[0] for e in edge_list] + [e[1] for e in edge_list]
         dst = [e[1] for e in edge_list] + [e[0] for e in edge_list]
         edge_index = torch.tensor([src, dst], dtype=torch.long)
 
-        # Edge features: duplicate for both directions
-        edge_attr = torch.from_numpy(edge_feats)
-        edge_attr = torch.cat([edge_attr, edge_attr], dim=0)
-        # Z-score normalize edge features within backend
-        edge_attr = zscore_normalize(edge_attr, dim=0, eps=eps)
+        # Z-scored: 2q_gate_error
+        edge_error_t = torch.from_numpy(edge_error.reshape(-1, 1))
+        edge_error_t = torch.cat([edge_error_t, edge_error_t], dim=0)
+        edge_error_t = zscore_normalize(edge_error_t, dim=0, eps=eps)
+
+        # Raw: edge_coherence_ratio = cx_duration / min(T1_u, T1_v, T2_u, T2_v)
+        t1 = qubit_props["t1"]
+        t2 = qubit_props["t2"]
+        coherence_ratio = np.zeros(len(edge_list), dtype=np.float32)
+        for i, (u, v) in enumerate(edge_list):
+            min_coherence = min(t1[u], t1[v], t2[u], t2[v])
+            if min_coherence > 0:
+                coherence_ratio[i] = edge_duration[i] / min_coherence
+        coherence_t = torch.from_numpy(coherence_ratio.reshape(-1, 1))
+        coherence_t = torch.cat([coherence_t, coherence_t], dim=0)
+
+        edge_attr = torch.cat([edge_error_t, coherence_t], dim=1)
     else:
         edge_index = torch.zeros((2, 0), dtype=torch.long)
-        edge_attr = torch.zeros((0, 1), dtype=torch.float32)
-
-    num_qubits = backend.target.num_qubits
+        edge_attr = torch.zeros((0, 2), dtype=torch.float32)
 
     return Data(
         x=x,
@@ -419,31 +459,40 @@ def precompute_hop_distance(backend: Any) -> np.ndarray:
 def get_hw_node_features(backend: Any) -> np.ndarray:
     """Get quality-score input features for a Qiskit FakeBackendV2.
 
-    Returns (h, 5 or 7) array depending on configure_hw_features().
-    Values are z-score normalized within the backend.
+    Returns (h, 6 or 8) array depending on configure_hw_features().
+    Z-scored: [t1, t2,] readout_error, sq_error, degree, t1_cx_ratio, t2_cx_ratio
+    Raw (appended): t2_t1_ratio
 
     Args:
         backend: A FakeBackendV2 instance.
 
     Returns:
-        (h, 5 or 7) numpy array for QualityScore module input.
+        (h, 6 or 8) numpy array for QualityScore module input.
     """
     props = extract_qubit_properties(backend)
-    feat_list = []
+    zscore_list = []
     if _include_t1_t2:
-        feat_list.extend([props["t1"], props["t2"]])
-    feat_list.extend([
+        zscore_list.extend([props["t1"], props["t2"]])
+    zscore_list.extend([
         props["readout_error"],
         props["single_qubit_error"],
-        props["degree"],
+    ])
+    if not _exclude_degree:
+        zscore_list.append(props["degree"])
+    zscore_list.extend([
         props["t1_cx_ratio"],
         props["t2_cx_ratio"],
     ])
-    raw = np.stack(feat_list, axis=1).astype(np.float32)
+    zscore_feats = np.stack(zscore_list, axis=1).astype(np.float32)
 
-    mean = raw.mean(axis=0, keepdims=True)
-    std = raw.std(axis=0, keepdims=True) + 1e-8
-    return ((raw - mean) / std).astype(np.float32)
+    mean = zscore_feats.mean(axis=0, keepdims=True)
+    std = zscore_feats.std(axis=0, keepdims=True) + 1e-8
+    zscore_feats = (zscore_feats - mean) / std
+
+    # Append raw T2/T1 ratio (dimensionless, not z-scored)
+    raw_feats = props["t2_t1_ratio"].reshape(-1, 1).astype(np.float32)
+
+    return np.concatenate([zscore_feats, raw_feats], axis=1).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +518,7 @@ def build_hardware_graph_from_synthetic(name: str, eps: float = 1e-8) -> Data:
     qprops = profile["qubit_properties"]
     eprops = profile["edge_properties"]
 
-    # Node features: (n, 5 or 7) depending on configure_hw_features()
+    # Node features
     degree = np.zeros(n)
     neighbor_map: list[set[int]] = [set() for _ in range(n)]
     for p, q in coupling_map:
@@ -496,43 +545,64 @@ def build_hardware_graph_from_synthetic(name: str, eps: float = 1e-8) -> Data:
     t1_cx_ratio = np.where(mean_cx_duration > 0, t1_arr / mean_cx_duration, 0.0)
     t2_cx_ratio = np.where(mean_cx_duration > 0, t2_arr / mean_cx_duration, 0.0)
 
-    ndim = 7 if _include_t1_t2 else 5
-    node_features = np.zeros((n, ndim), dtype=np.float32)
-    for i in range(n):
-        qp = qprops[str(i)]
-        if _include_t1_t2:
-            node_features[i] = [
-                t1_arr[i], t2_arr[i],
-                qp["readout_error"], qp["sq_gate_error"], degree[i],
-                t1_cx_ratio[i], t2_cx_ratio[i],
-            ]
-        else:
-            node_features[i] = [
-                qp["readout_error"], qp["sq_gate_error"], degree[i],
-                t1_cx_ratio[i], t2_cx_ratio[i],
-            ]
+    # Z-scored node features
+    zscore_list = []
+    if _include_t1_t2:
+        zscore_list.extend([t1_arr, t2_arr])
+    zscore_feat_arrays = [
+        np.array([qprops[str(i)]["readout_error"] for i in range(n)], dtype=np.float32),
+        np.array([qprops[str(i)]["sq_gate_error"] for i in range(n)], dtype=np.float32),
+    ]
+    if not _exclude_degree:
+        zscore_feat_arrays.append(degree.astype(np.float32))
+    zscore_feat_arrays.extend([
+        t1_cx_ratio.astype(np.float32),
+        t2_cx_ratio.astype(np.float32),
+    ])
+    for feat_arr in zscore_feat_arrays:
+        zscore_list.append(feat_arr)
+    node_zscore = np.stack(zscore_list, axis=1).astype(np.float32)
+    node_zscore = zscore_normalize(torch.from_numpy(node_zscore), dim=0, eps=eps)
 
-    x = torch.from_numpy(node_features)
-    x = zscore_normalize(x, dim=0, eps=eps)
+    # Raw node features: T2/T1 ratio
+    t2_t1_ratio = np.clip(
+        np.where(t1_arr > 0, t2_arr / t1_arr, 0.0), 0.0, 2.0
+    ).astype(np.float32)
+    node_raw = torch.from_numpy(t2_t1_ratio.reshape(-1, 1))
 
-    # Edge features: (num_edges*2, 1) — cx_error only
-    edge_list = coupling_map
-    if len(edge_list) > 0:
-        src = [e[0] for e in edge_list] + [e[1] for e in edge_list]
-        dst = [e[1] for e in edge_list] + [e[0] for e in edge_list]
+    x = torch.cat([node_zscore, node_raw], dim=1)
+
+    # Edge features
+    if len(coupling_map) > 0:
+        src = [e[0] for e in coupling_map] + [e[1] for e in coupling_map]
+        dst = [e[1] for e in coupling_map] + [e[0] for e in coupling_map]
         edge_index = torch.tensor([src, dst], dtype=torch.long)
 
-        edge_feats = []
-        for p, q in edge_list:
+        # Z-scored: 2q_gate_error
+        edge_errors = []
+        edge_durations = []
+        for p, q in coupling_map:
             key = f"({p}, {q})"
             ep = eprops[key]
-            edge_feats.append([ep["cx_error"]])
-        edge_attr = torch.tensor(edge_feats, dtype=torch.float32)
-        edge_attr = torch.cat([edge_attr, edge_attr], dim=0)
-        edge_attr = zscore_normalize(edge_attr, dim=0, eps=eps)
+            edge_errors.append(ep["cx_error"])
+            edge_durations.append(ep.get("cx_duration", 0.0))
+        edge_error_t = torch.tensor(edge_errors, dtype=torch.float32).reshape(-1, 1)
+        edge_error_t = torch.cat([edge_error_t, edge_error_t], dim=0)
+        edge_error_t = zscore_normalize(edge_error_t, dim=0, eps=eps)
+
+        # Raw: edge_coherence_ratio
+        coherence_ratio = np.zeros(len(coupling_map), dtype=np.float32)
+        for i, (u, v) in enumerate(coupling_map):
+            min_coherence = min(t1_arr[u], t1_arr[v], t2_arr[u], t2_arr[v])
+            if min_coherence > 0:
+                coherence_ratio[i] = edge_durations[i] / min_coherence
+        coherence_t = torch.from_numpy(coherence_ratio.reshape(-1, 1))
+        coherence_t = torch.cat([coherence_t, coherence_t], dim=0)
+
+        edge_attr = torch.cat([edge_error_t, coherence_t], dim=1)
     else:
         edge_index = torch.zeros((2, 0), dtype=torch.long)
-        edge_attr = torch.zeros((0, 1), dtype=torch.float32)
+        edge_attr = torch.zeros((0, 2), dtype=torch.float32)
 
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, num_qubits=n)
 
@@ -586,14 +656,15 @@ def precompute_hop_distance_synthetic(name: str) -> np.ndarray:
 def get_hw_node_features_synthetic(name: str) -> np.ndarray:
     """Get quality-score input features for a synthetic backend.
 
-    Returns (h, 5 or 7) array depending on configure_hw_features().
-    Values are z-score normalized within the backend.
+    Returns (h, 6 or 8) array depending on configure_hw_features().
+    Z-scored: [t1, t2,] readout_error, sq_error, degree, t1_cx_ratio, t2_cx_ratio
+    Raw (appended): t2_t1_ratio
 
     Args:
         name: Synthetic backend name.
 
     Returns:
-        (h, 5 or 7) numpy array for QualityScore module input.
+        (h, 6 or 8) numpy array for QualityScore module input.
     """
     profile = _load_synthetic_backend(name)
     n = profile["num_qubits"]
@@ -628,23 +699,32 @@ def get_hw_node_features_synthetic(name: str) -> np.ndarray:
     t1_cx_ratio = np.where(mean_cx_duration > 0, t1_arr / mean_cx_duration, 0.0)
     t2_cx_ratio = np.where(mean_cx_duration > 0, t2_arr / mean_cx_duration, 0.0)
 
-    ndim = 7 if _include_t1_t2 else 5
-    raw = np.zeros((n, ndim), dtype=np.float32)
-    for i in range(n):
-        qp = qprops[str(i)]
-        if _include_t1_t2:
-            raw[i] = [
-                t1_arr[i], t2_arr[i],
-                qp["readout_error"], qp["sq_gate_error"], degree[i],
-                t1_cx_ratio[i], t2_cx_ratio[i],
-            ]
-        else:
-            raw[i] = [
-                qp["readout_error"], qp["sq_gate_error"], degree[i],
-                t1_cx_ratio[i], t2_cx_ratio[i],
-            ]
+    # Z-scored features
+    zscore_list = []
+    if _include_t1_t2:
+        zscore_list.extend([t1_arr, t2_arr])
+    zscore_arrays = [
+        np.array([qprops[str(i)]["readout_error"] for i in range(n)], dtype=np.float32),
+        np.array([qprops[str(i)]["sq_gate_error"] for i in range(n)], dtype=np.float32),
+    ]
+    if not _exclude_degree:
+        zscore_arrays.append(degree.astype(np.float32))
+    zscore_arrays.extend([
+        t1_cx_ratio.astype(np.float32),
+        t2_cx_ratio.astype(np.float32),
+    ])
+    for feat_arr in zscore_arrays:
+        zscore_list.append(feat_arr)
+    zscore_feats = np.stack(zscore_list, axis=1).astype(np.float32)
 
-    # Z-score normalize within backend
-    mean = raw.mean(axis=0, keepdims=True)
-    std = raw.std(axis=0, keepdims=True) + 1e-8
-    return ((raw - mean) / std).astype(np.float32)
+    mean = zscore_feats.mean(axis=0, keepdims=True)
+    std = zscore_feats.std(axis=0, keepdims=True) + 1e-8
+    zscore_feats = (zscore_feats - mean) / std
+
+    # Raw: T2/T1 ratio (clipped to physical bound [0, 2])
+    t2_t1_ratio = np.clip(
+        np.where(t1_arr > 0, t2_arr / t1_arr, 0.0), 0.0, 2.0
+    ).astype(np.float32)
+    raw_feats = t2_t1_ratio.reshape(-1, 1)
+
+    return np.concatenate([zscore_feats, raw_feats], axis=1).astype(np.float32)

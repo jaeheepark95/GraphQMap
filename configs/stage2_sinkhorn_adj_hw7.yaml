@@ -21,8 +21,8 @@ model:
     residual_layers: [2, 3]
 
   hardware_gnn:
-    node_input_dim: 7        # t1, t2, readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
-    edge_input_dim: 1        # cx_error
+    node_input_dim: 8        # z-scored(7): t1, t2, readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio + raw(1): t2_t1_ratio
+    edge_input_dim: 2        # z-scored(1): 2q_error + raw(1): edge_coherence_ratio
     num_layers: 3
     num_heads: 4
     activation: elu

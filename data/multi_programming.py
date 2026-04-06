@@ -18,6 +18,7 @@ from data.normalization import renormalize_group_edges
 def merge_circuits(
     circuits: list[QuantumCircuit],
     eps: float = 1e-8,
+    edge_dim: int | None = None,
 ) -> Data:
     """Merge multiple circuits into a single disconnected PyG graph.
 
@@ -43,7 +44,7 @@ def merge_circuits(
     circuit_sizes: list[int] = []
 
     for circuit in circuits:
-        graph = build_circuit_graph(circuit, eps=eps)
+        graph = build_circuit_graph(circuit, eps=eps, edge_dim=edge_dim)
         graph_list.append(graph)
         circuit_sizes.append(circuit.num_qubits)
 

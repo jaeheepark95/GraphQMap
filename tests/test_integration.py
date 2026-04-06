@@ -59,8 +59,8 @@ class TestEndToEnd:
         return GraphQMap(
             circuit_node_dim=4,
             circuit_edge_dim=3,
-            hardware_node_dim=5,
-            hardware_edge_dim=1,
+            hardware_node_dim=6,
+            hardware_edge_dim=2,
             embedding_dim=32,
             gnn_layers=2,
             gnn_heads=4,
@@ -75,7 +75,7 @@ class TestEndToEnd:
 
     def test_full_forward_to_layout(self, model, circuit, backend):
         """Graph → Model → P → Hungarian → layout → valid mapping."""
-        circuit_graph = build_circuit_graph(circuit)
+        circuit_graph = build_circuit_graph(circuit, edge_dim=3)
         hw_graph = build_hardware_graph(backend)
 
         circuit_batch = Batch.from_data_list([circuit_graph])
@@ -98,7 +98,7 @@ class TestEndToEnd:
 
     def test_stage1_training_step(self, model, circuit, backend):
         """One complete Stage 1 training step with gradient update."""
-        circuit_graph = build_circuit_graph(circuit)
+        circuit_graph = build_circuit_graph(circuit, edge_dim=3)
         hw_graph = build_hardware_graph(backend)
 
         # Generate label
@@ -138,7 +138,7 @@ class TestEndToEnd:
 
     def test_stage2_training_step(self, model, circuit, backend):
         """One complete Stage 2 training step with surrogate loss."""
-        circuit_graph = build_circuit_graph(circuit)
+        circuit_graph = build_circuit_graph(circuit, edge_dim=3)
         hw_graph = build_hardware_graph(backend)
 
         # Precompute
@@ -153,14 +153,14 @@ class TestEndToEnd:
         # Qubit importance
         importance = torch.tensor(feats["node_features_dict"]["two_qubit_gate_count"])
 
-        # Hardware node features for q_score (5 features)
-        hw_features = hw_graph.x  # readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
+        # Hardware node features for q_score (6 features)
+        hw_features = hw_graph.x
 
         circuit_batch = Batch.from_data_list([circuit_graph])
         hw_batch = Batch.from_data_list([hw_graph])
 
         # Setup
-        quality_score = QualityScore(num_features=5)
+        quality_score = QualityScore(num_features=6)
         criterion = Stage2Loss(
             components=[
                 {"name": "error_distance", "weight": 1.0},
@@ -194,7 +194,7 @@ class TestEndToEnd:
 
     def test_tau_annealing_affects_output(self, model, circuit, backend):
         """Different τ values should produce different P sharpness."""
-        circuit_graph = build_circuit_graph(circuit)
+        circuit_graph = build_circuit_graph(circuit, edge_dim=3)
         hw_graph = build_hardware_graph(backend)
         circuit_batch = Batch.from_data_list([circuit_graph])
         hw_batch = Batch.from_data_list([hw_graph])
@@ -218,7 +218,7 @@ class TestEndToEnd:
 
     def test_dataset_and_dataloader(self, circuit, backend):
         """Dataset → DataLoader → batch dict → model compatible."""
-        circuit_graph = build_circuit_graph(circuit)
+        circuit_graph = build_circuit_graph(circuit, edge_dim=3)
         hw_graph = build_hardware_graph(backend)
 
         label_result = generate_label(circuit, backend,
@@ -251,7 +251,7 @@ class TestEndToEnd:
         c1 = _make_circuit(2, 1, seed=0)
         c2 = _make_circuit(2, 1, seed=1)
 
-        merged = merge_circuits([c1, c2])
+        merged = merge_circuits([c1, c2], edge_dim=3)
         hw_graph = build_hardware_graph(backend)
 
         # Merged has 4 logical qubits (2+2), same 4-dim features as single-circuit
@@ -261,7 +261,7 @@ class TestEndToEnd:
         # Same model works for both single and multi-programming
         model_mp = GraphQMap(
             circuit_node_dim=4, circuit_edge_dim=3,
-            hardware_node_dim=5, hardware_edge_dim=1,
+            hardware_node_dim=6, hardware_edge_dim=2,
             embedding_dim=32, gnn_layers=2, gnn_heads=4,
             gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
             cross_attn_ffn_dim=64, cross_attn_dropout=0.0,
@@ -290,6 +290,7 @@ class TestEndToEnd:
         rwpe_k = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
         circuit_graph = build_circuit_graph(
             circuit, node_feature_names=node_fnames, rwpe_k=rwpe_k,
+            edge_dim=cfg.model.circuit_gnn.edge_input_dim,
         )
         hw_graph = build_hardware_graph(backend)
 
@@ -305,7 +306,7 @@ class TestEndToEnd:
     def test_multiple_epochs_loss_decreases(self, backend):
         """Training over multiple epochs should decrease loss."""
         circuit = _make_circuit(3, 3, seed=0)
-        circuit_graph = build_circuit_graph(circuit)
+        circuit_graph = build_circuit_graph(circuit, edge_dim=3)
         hw_graph = build_hardware_graph(backend)
 
         label_result = generate_label(circuit, backend,
@@ -318,7 +319,7 @@ class TestEndToEnd:
 
         model = GraphQMap(
             circuit_node_dim=4, circuit_edge_dim=3,
-            hardware_node_dim=5, hardware_edge_dim=1,
+            hardware_node_dim=6, hardware_edge_dim=2,
             embedding_dim=32, gnn_layers=2, gnn_heads=4,
             gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
             cross_attn_ffn_dim=64, cross_attn_dropout=0.0,

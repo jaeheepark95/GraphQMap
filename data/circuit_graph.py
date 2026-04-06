@@ -11,6 +11,14 @@ Node features are configurable via a feature registry. Available features:
   - weighted_degree: sum of interaction counts across all connected edges
   - single_qubit_gate_ratio: fraction of gates that are single-qubit
   - critical_path_fraction: fraction of DAG critical path involving this qubit
+  - interaction_entropy: Shannon entropy of per-neighbor interaction distribution
+
+Edge features (per qubit pair with 2-qubit interaction):
+  - interaction_count: number of 2-qubit gates between pair
+  - earliest_interaction: normalized time of first gate
+  - latest_interaction: normalized time of last gate
+  - interaction_span: latest - earliest (temporal duration)
+  - interaction_density: count / (span + eps) (burstiness)
 
 Positional encodings (appended after node features):
   - rwpe: Random Walk Positional Encoding (k-step self-return probabilities)
@@ -18,6 +26,7 @@ Positional encodings (appended after node features):
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -65,11 +74,14 @@ def extract_circuit_features(circuit: QuantumCircuit) -> dict[str, Any]:
         - weighted_degree: sum of interaction counts with all neighbors
         - single_qubit_gate_ratio: (gate_count - 2q_count) / gate_count
         - critical_path_fraction: fraction of critical path length on this qubit
+        - interaction_entropy: -Σ p_ij log p_ij over neighbor interaction distribution
 
     Edge features (per qubit pair with 2-qubit interaction):
         - interaction_count: number of 2-qubit gates between pair
         - earliest_interaction: normalized time (0~1) of first gate
         - latest_interaction: normalized time (0~1) of last gate
+        - interaction_span: latest - earliest (temporal duration of interaction)
+        - interaction_density: count / (span + eps) (burstiness of interaction)
 
     Args:
         circuit: A QuantumCircuit instance.
@@ -137,6 +149,22 @@ def extract_circuit_features(circuit: QuantumCircuit) -> dict[str, Any]:
     else:
         critical_path_fraction = [1.0 / max(num_qubits, 1)] * num_qubits
 
+    # Interaction entropy: H_i = -Σ p_ij log p_ij over neighbors
+    # Measures whether interactions are concentrated on few neighbors or spread evenly
+    interaction_entropy = [0.0] * num_qubits
+    for qi in range(num_qubits):
+        # Collect interaction counts with each neighbor
+        neighbor_counts: list[int] = []
+        for nj in neighbors[qi]:
+            key = (min(qi, nj), max(qi, nj))
+            neighbor_counts.append(len(pair_interactions[key]))
+        total = sum(neighbor_counts)
+        if total > 0 and len(neighbor_counts) > 1:
+            probs = [c / total for c in neighbor_counts]
+            interaction_entropy[qi] = -sum(
+                p * math.log(p) for p in probs if p > 0
+            )
+
     # Store all node features as a dict of lists
     node_features_dict: dict[str, list[float]] = {
         "gate_count": [float(x) for x in gate_count],
@@ -146,6 +174,7 @@ def extract_circuit_features(circuit: QuantumCircuit) -> dict[str, Any]:
         "weighted_degree": weighted_degree,
         "single_qubit_gate_ratio": single_qubit_gate_ratio,
         "critical_path_fraction": critical_path_fraction,
+        "interaction_entropy": interaction_entropy,
     }
 
     # Edge features
@@ -156,12 +185,14 @@ def extract_circuit_features(circuit: QuantumCircuit) -> dict[str, Any]:
         count = len(interactions)
         earliest = min(interactions) / total_depth
         latest = max(interactions) / total_depth
-        edge_features_list.append([count, earliest, latest])
+        span = latest - earliest
+        density = count / (span + 1e-8) if span > 1e-10 else float(count)
+        edge_features_list.append([count, earliest, latest, span, density])
 
     edge_features = (
         torch.tensor(edge_features_list, dtype=torch.float32)
         if edge_features_list
-        else torch.zeros((0, 3), dtype=torch.float32)
+        else torch.zeros((0, 5), dtype=torch.float32)
     )
 
     return {
@@ -207,16 +238,26 @@ def _compute_critical_path_fraction(
     return [d / max(critical_path_length, 1) for d in qubit_depth]
 
 
-def compute_rwpe(edge_list: list[tuple[int, int]], num_nodes: int, k: int) -> torch.Tensor:
+def compute_rwpe(
+    edge_list: list[tuple[int, int]],
+    num_nodes: int,
+    k: int,
+    start_step: int = 2,
+) -> torch.Tensor:
     """Compute Random Walk Positional Encoding.
 
-    RWPE_i = [RW^1_ii, RW^2_ii, ..., RW^k_ii]
-    where RW is the random walk transition matrix (row-normalized adjacency).
+    RWPE_i = [RW^s_ii, RW^(s+1)_ii, ..., RW^(s+k-1)_ii]
+    where RW is the random walk transition matrix (row-normalized adjacency)
+    and s = start_step.
+
+    Step 1 (1-step self-return) is structurally zero for graphs without
+    self-loops, so start_step defaults to 2 to skip dead dimensions.
 
     Args:
         edge_list: List of undirected edges (i, j).
         num_nodes: Number of nodes in the graph.
-        k: Number of random walk steps.
+        k: Number of RWPE dimensions to output.
+        start_step: First random walk step to include (default 2).
 
     Returns:
         Tensor of shape (num_nodes, k) with self-return probabilities.
@@ -234,9 +275,13 @@ def compute_rwpe(edge_list: list[tuple[int, int]], num_nodes: int, k: int) -> to
     D = A.sum(dim=1, keepdim=True).clamp(min=1.0)
     M = A / D
 
-    # Compute k-step self-return probabilities
-    rwpe = torch.zeros(num_nodes, k, dtype=torch.float32)
+    # Advance to start_step
     Mk = M.clone()
+    for _ in range(start_step - 1):
+        Mk = Mk @ M
+
+    # Collect k dimensions starting from start_step
+    rwpe = torch.zeros(num_nodes, k, dtype=torch.float32)
     for step in range(k):
         rwpe[:, step] = Mk.diagonal()
         if step < k - 1:
@@ -249,6 +294,7 @@ def build_circuit_graph(
     circuit: QuantumCircuit,
     node_feature_names: list[str] | None = None,
     rwpe_k: int = 0,
+    edge_dim: int | None = None,
     eps: float = 1e-8,
 ) -> Data:
     """Build a PyG Data object for a quantum circuit.
@@ -262,6 +308,7 @@ def build_circuit_graph(
         node_feature_names: List of feature names to include.
             Defaults to DEFAULT_NODE_FEATURES if None.
         rwpe_k: Number of RWPE steps (0 = disabled).
+        edge_dim: Number of edge feature dimensions (None = use all 5).
         eps: Epsilon for z-score normalization.
 
     Returns:
@@ -278,8 +325,31 @@ def build_circuit_graph(
         num_qubits=feats["num_qubits"],
         node_feature_names=node_feature_names,
         rwpe_k=rwpe_k,
+        edge_dim=edge_dim,
         eps=eps,
     )
+
+
+def _extend_edge_features(edge_features: torch.Tensor) -> torch.Tensor:
+    """Extend 3-dim edge features to 5-dim by computing span and density.
+
+    Backward compatibility for old cache format with only
+    (interaction_count, earliest_interaction, latest_interaction).
+
+    Args:
+        edge_features: (num_edges, 3) tensor.
+
+    Returns:
+        (num_edges, 5) tensor with span and density appended.
+    """
+    if edge_features.shape[0] == 0:
+        return torch.zeros((0, 5), dtype=torch.float32)
+    count = edge_features[:, 0]
+    earliest = edge_features[:, 1]
+    latest = edge_features[:, 2]
+    span = latest - earliest
+    density = torch.where(span > 1e-10, count / (span + 1e-8), count)
+    return torch.cat([edge_features, span.unsqueeze(1), density.unsqueeze(1)], dim=1)
 
 
 def build_circuit_graph_from_raw(
@@ -289,6 +359,7 @@ def build_circuit_graph_from_raw(
     num_qubits: int,
     node_feature_names: list[str] | None = None,
     rwpe_k: int = 0,
+    edge_dim: int | None = None,
     eps: float = 1e-8,
 ) -> Data:
     """Build a PyG Data object from pre-extracted raw features.
@@ -298,10 +369,12 @@ def build_circuit_graph_from_raw(
     Args:
         node_features_dict: Dict mapping feature name -> list of values per qubit.
         edge_list: List of (src, dst) edge pairs.
-        edge_features: Raw edge feature tensor (num_edges, 3).
+        edge_features: Raw edge feature tensor (num_edges, 3 or 5).
         num_qubits: Number of logical qubits.
         node_feature_names: Which node features to include.
         rwpe_k: Number of RWPE steps (0 = disabled).
+        edge_dim: Number of edge feature dimensions to use (None = use all).
+            If edge_features has fewer dims, extends automatically.
         eps: Epsilon for z-score normalization.
 
     Returns:
@@ -334,18 +407,25 @@ def build_circuit_graph_from_raw(
         rwpe = compute_rwpe(edge_list, num_qubits, rwpe_k)
         x = torch.cat([x, rwpe], dim=1)
 
+    # Prepare edge features: extend if needed, then slice to edge_dim
+    edge_features = edge_features.clone() if isinstance(edge_features, torch.Tensor) else torch.tensor(edge_features, dtype=torch.float32)
+    if edge_features.ndim == 2 and edge_features.shape[1] < 5 and edge_features.shape[0] > 0:
+        edge_features = _extend_edge_features(edge_features)
+    if edge_dim is not None and edge_features.ndim == 2 and edge_features.shape[1] > edge_dim:
+        edge_features = edge_features[:, :edge_dim]
+
     # Build edge_index: undirected -> both directions
     if len(edge_list) > 0:
         src = [e[0] for e in edge_list] + [e[1] for e in edge_list]
         dst = [e[1] for e in edge_list] + [e[0] for e in edge_list]
         edge_index = torch.tensor([src, dst], dtype=torch.long)
 
-        edge_attr = edge_features.clone() if isinstance(edge_features, torch.Tensor) else torch.tensor(edge_features, dtype=torch.float32)
-        edge_attr = torch.cat([edge_attr, edge_attr], dim=0)  # duplicate for both dirs
+        edge_attr = torch.cat([edge_features, edge_features], dim=0)  # duplicate for both dirs
         edge_attr = zscore_normalize(edge_attr, dim=0, eps=eps)
     else:
         edge_index = torch.zeros((2, 0), dtype=torch.long)
-        edge_attr = torch.zeros((0, 3), dtype=torch.float32)
+        empty_dim = edge_dim if edge_dim is not None else (edge_features.shape[1] if edge_features.ndim == 2 else 5)
+        edge_attr = torch.zeros((0, empty_dim), dtype=torch.float32)
 
     return Data(
         x=x,

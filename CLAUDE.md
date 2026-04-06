@@ -28,8 +28,9 @@ Supports arbitrary multi-programming (any number of co-located circuits, total l
   - `visualize_backends.py` — test backend topology/error map visualization
   - `compare_pst.py` — PST comparison across layout methods
   - `benchmark_feature_analysis.py` — per-circuit feature analysis (variance, correlation, dimensionality)
+  - `analyze_circuit_features.py` — 7-phase circuit graph feature analysis (completeness, raw stats, CoV, correlation, normalization, RWPE, size-dependent)
 - `docs/` — research specification and documentation
-- `tests/` — unit and integration tests (151 tests)
+- `tests/` — unit and integration tests (152 tests)
 
 ## Dataset Structure
 All circuit data lives under `data/circuits/` with circuits, labels, backends, and splits separated.
@@ -111,7 +112,7 @@ python scripts/visualize.py runs/stage1/<RUN> runs/stage2/<RUN>
 python scripts/visualize.py --eval runs/eval/<RUN>/eval_results.csv
 
 # Tests
-pytest tests/                                       # 151 tests
+pytest tests/                                       # 152 tests
 
 # Feature diagnostics (run before training to verify feature quality)
 python scripts/diagnose_features.py --config configs/stage1.yaml
@@ -202,8 +203,8 @@ python scripts/visualize.py runs/stage1/<RUN> --no-show
 ## Circuit Node Feature System
 Circuit node features are **configurable via YAML** — no code changes needed to experiment with feature combinations. All candidate features are pre-computed during preprocessing (`scripts/preprocess_circuits.py`); feature selection happens at dataset load time.
 
-**Available features:** `gate_count`, `two_qubit_gate_count`, `degree`, `depth_participation`, `weighted_degree`, `single_qubit_gate_ratio`, `critical_path_fraction`
-**Positional encoding:** RWPE (Random Walk PE, configurable k steps)
+**Available features:** `gate_count`, `two_qubit_gate_count`, `degree`, `depth_participation`, `weighted_degree`, `single_qubit_gate_ratio`, `critical_path_fraction`, `interaction_entropy`
+**Positional encoding:** RWPE (Random Walk PE, configurable k steps, start_step=2)
 
 **Current default** (configs/stage1.yaml, stage2.yaml):
 ```yaml
@@ -211,19 +212,84 @@ node_features: [gate_count, two_qubit_gate_count, single_qubit_gate_ratio, criti
 rwpe_k: 2    # node_input_dim = 4 + 2 = 6
 ```
 
-**Cache format:** `data/circuits/cache/{source}/{filename}.pt` stores raw `node_features_dict` (all 7 features) + `edge_features`. Feature selection at load time means changing features does NOT require re-preprocessing. Old cache format (pre-built PyG Data) is detected and handled via fallback in `dataset.py`.
+**RWPE:** `compute_rwpe(start_step=2)` skips step 1 (structurally zero for graphs without self-loops). With `rwpe_k=2`, outputs `[M^2, M^3]` (both non-trivial). Changed 2026-04-06 from `[M^1(dead), M^2]`.
+
+**Cache format:** `data/circuits/cache/{source}/{filename}.pt` stores raw `node_features_dict` (all 8 features) + `edge_features`. Feature selection at load time means changing features does NOT require re-preprocessing. Old cache format (pre-built PyG Data) is detected and handled via fallback in `dataset.py`.
 
 **Feature diagnostics** (run before training):
 ```bash
 python scripts/diagnose_features.py --config configs/stage1.yaml
 python scripts/diagnose_features.py --features gate_count two_qubit_gate_count single_qubit_gate_ratio --rwpe-k 2
+python scripts/analyze_circuit_features.py --num-samples 500   # 7-phase comprehensive analysis
 ```
 
-**Known degeneracy in original features (gc, 2qc, deg, dp):**
-- `gate_count` ↔ `depth_participation`: |r| ≈ 1.0 in 100% of circuits (redundant)
-- `degree` constant in small fully-connected circuits → z-score makes it all-zero
-- Effective dimensionality: ~2.1 / 4; mean cosine similarity > 0.95 in 83-93% of circuits
-- Current features (gc, 2qc, sqr, cpf + RWPE2): eff dim 3.7 / 6, max |r| = 0.87
+**Circuit feature analysis (2026-04-06, 520 circuits via `scripts/analyze_circuit_features.py`):**
+- Current features (gc, 2qc, sqr, cpf + RWPE2): eff dim 3.68/6, indist rate 16.73%, max |r| = 0.753 (gc↔2qc)
+- Normalization: all z-score confirmed better than mixed (mixed: indist +7.03pp worse)
+- RWPE k=2 confirmed optimal (k=3: +0.23 eff_dim but RWPE[2]↔2qc r=0.768, dead dims increase)
+- **sqr problem**: 37.7% all-zero, CoV<0.1 in 53.8%, medium(6-10Q) 54% constant
+- **cpf problem**: median 0.956 (saturated), xlarge(21Q+) 67% constant
+- **xlarge indist 41%**: worst size bucket, cpf constant + gc CoV 0.069
+
+**Rejected features (with evidence):**
+- `depth_participation`: gc와 r=1.000 (100%)
+- `weighted_degree`: 2qc와 r=1.000 (100%)
+- `degree`: GNN learns topology + 2qc와 r>0.9 (64.5%)
+- `interaction_entropy`: degree와 r=0.976 (95.3% >0.9) — H ≈ log(degree)
+
+**Circuit Edge Features (5dim, configurable via `circuit_gnn.edge_input_dim`):**
+
+| Feature | Description | Const% | CoV<0.1 |
+|---------|-------------|--------|---------|
+| `interaction_count` | Number of 2Q gates between this qubit pair | 27.4% | 27.7% |
+| `earliest_interaction` | Normalized time (0~1) of first 2Q gate | 2.3% | 1.2% |
+| `latest_interaction` | Normalized time (0~1) of last 2Q gate | 1.9% | 10.4% |
+| `interaction_span` | `latest - earliest` (temporal duration) | 17.0% | 31.0% |
+| `interaction_density` | `count / (span + eps)` (burstiness) | 17.2% | 28.9% |
+
+All z-score normalized within each circuit. First 3 are established; span/density added 2026-04-06 but **rejected after ablation** (edge 5dim eval PST 0.486 vs 3dim 0.572). `edge_dim` parameter controls slicing (default 3). Old 3-dim caches are auto-extended to 5-dim via `_extend_edge_features()` when `edge_dim=5` is requested.
+
+## Hardware Node/Edge Feature System
+Hardware features are extracted from FakeBackendV2 (or synthetic JSON) per backend. Configurable via `hardware_gnn.node_input_dim`, `hardware_gnn.edge_input_dim`, and `hardware_gnn.exclude_degree` in YAML configs.
+
+**Node Features (6dim default, configurable):**
+
+| Feature | Description | Normalization | Direction |
+|---------|-------------|---------------|-----------|
+| `readout_error` | Measurement error rate | z-score | Lower = better |
+| `single_qubit_error` | Avg 1Q gate error (sx, x) | z-score | Lower = better |
+| `degree` | Coupling map connectivity | z-score | Structural (optional, `exclude_degree: true` to remove) |
+| `t1_cx_ratio` | T1 / mean_cx_duration | z-score | Higher = better |
+| `t2_cx_ratio` | T2 / mean_cx_duration | z-score | Higher = better |
+| `t2_t1_ratio` | T2 / T1, clipped to [0, 2] | **raw** (not z-scored) | Decoherence type: ≈2 relaxation-limited, ≈1 dephasing-dominated |
+
+**Edge Features (2dim):**
+
+| Feature | Description | Normalization |
+|---------|-------------|---------------|
+| `2q_gate_error` | 2Q gate error rate (cx/ecr/cz), averaged over both directions | z-score |
+| `edge_coherence_ratio` | `cx_duration / min(T1_u, T1_v, T2_u, T2_v)` — fraction of coherence budget consumed per gate | **raw** (not z-scored) |
+
+**Normalization strategy (mixed):**
+- **Z-scored within backend**: error rates, coherence ratios, degree — scale varies across backends
+- **Raw (no normalization)**: dimensionless ratios with inherent physical meaning (T2/T1, edge_coherence) — absolute value carries information, z-score would destroy it
+
+**Config options:**
+```yaml
+hardware_gnn:
+  node_input_dim: 6        # 5 z-scored + 1 raw (default)
+  edge_input_dim: 2        # 1 z-scored + 1 raw
+  exclude_degree: false    # set true for ablation (-1 dim → node_input_dim: 5)
+```
+
+**Data availability notes:**
+- `single_qubit_error`: ALL ZERO on 10 older backends (Burlington, Essex, London, Almaden, etc.) — FakeBackendV2 doesn't provide sx/x gate error
+- `2q_gate_error`: ALL ZERO on fake_kyoto (ecr gate error not provided)
+- Edge asymmetry: 99.3% of edges have symmetric error (<1% diff), ~10% duration asymmetry — averaged for undirected edges
+
+**Feature independence verified (2026-04-06):**
+- Node: max |r| = 0.41 (t1_cx_ratio ↔ t2_cx_ratio), all pairs |r| < 0.7
+- Edge: r = 0.059 (2q_error ↔ edge_coherence_ratio) — near-independent
 
 ## Training Strategy
 - **Stage 1**: Supervised CE loss on labeled data — **currently not in use**
@@ -325,6 +391,7 @@ Run `20260402_004812_filtered_sinkhorn_adj` — **Eval 3-backend avg OURS+SABRE 
 | HW features | 5dim, no bias | **0.3588** | 7dim+noise_bias | 0.2604 | +0.098 |
 | node_quality | without | **0.3588** | with | 0.3474 | +0.011 |
 | exclusion | without | 0.2727 | with | 0.2346 | +0.038 |
+| HW degree (node) | without | 0.3478 | with | 0.3448 | +0.003 (negligible) |
 
 ### Reproducibility & Checkpoint Strategy (2026-04-05)
 8 runs with sinkhorn_adj config, varying seed/pretrained/checkpoint strategy:
@@ -345,6 +412,49 @@ Run `20260402_004812_filtered_sinkhorn_adj` — **Eval 3-backend avg OURS+SABRE 
 
 ### Loss Gradient Analysis (2026-04-02)
 Both `error_distance` and `adjacency` gradients depend only on neighbor mapping + hardware structure — **no per-node circuit signal**. `error_distance` saturates by epoch 3 (~0.01); `adjacency` is the only non-saturating loss.
+
+### Phase 3: Circuit Feature Analysis & Edge Ablation (2026-04-06)
+Comprehensive 7-phase analysis of circuit graph features using `scripts/analyze_circuit_features.py`.
+
+**Analysis framework (mirroring HW feature analysis):**
+1. Data completeness — NaN/Inf/all-zero/constant check
+2. Raw statistics — pre-z-score distributions
+3. Within-circuit CoV — qubit-differentiating power
+4. Correlation — node, edge, node-edge cross
+5. Normalization strategy — all z-score vs mixed
+6. RWPE quality — k=2,3,4 comparison
+7. Size-dependent analysis — per-size-bucket metrics
+
+**Key findings:** see Circuit Node Feature System section above.
+
+**Changes implemented:**
+- RWPE `start_step=2`: skip dead step 1, output `[M^2, M^3]` instead of `[M^1(dead), M^2]`
+- Edge features expanded 3→5dim: added `interaction_span`, `interaction_density`
+- `edge_dim` parameter threaded through `build_circuit_graph` → `build_circuit_graph_from_raw` → `dataset.py` → `train.py` → `evaluate.py`
+- Backward compat: `_extend_edge_features()` auto-extends old 3-dim caches to 5-dim
+- `interaction_entropy` node feature computed but rejected (degree와 r=0.976)
+
+**Edge ablation results (2026-04-07):**
+| Exp | Edge Dim | Best Epoch | Eval OURS+SABRE avg | Eval OURS+NASSC avg |
+|-----|:--------:|:----------:|:-------------------:|:-------------------:|
+| C1 | 3 (baseline) | 64 | **0.572** | **0.613** |
+| C2 | 5 (+span, density) | 19 | 0.486 | 0.495 |
+
+**Conclusion:** Edge 5dim significantly worse (-0.086 OURS+SABRE). span/density features hurt rather than help. **Keep edge 3dim.** C2 best epoch=19 suggests unstable training with 5dim edges.
+
+### Phase 2: Hardware Feature Enhancement (2026-04-06)
+Added T2/T1 ratio (node, raw) and edge_coherence_ratio (edge, raw) to hardware graph features. Mixed normalization: z-score for scale-dependent features, raw for dimensionless ratios.
+
+**Degree ablation results:**
+| Exp | HW Node Dim | Degree | Val PST | Eval OURS+SABRE avg | Eval OURS+NASSC avg |
+|-----|:-----------:|:------:|:-------:|:-------------------:|:-------------------:|
+| A1 | 6 | included | 0.3448 | 0.554 | 0.584 |
+| A2 | 5 | excluded | 0.3478 | 0.522 | 0.558 |
+
+**Conclusions:**
+- Degree inclusion/exclusion: with_degree slightly better (+0.032 OURS+SABRE) but both below current best
+- Both A1 (0.554) and A2 (0.522) < current best (0.589) — new HW features (t2_t1_ratio, edge_coherence_ratio) did not improve over original 5dim baseline
+- Single-run results; high variance caveat applies
 
 ### Phase 1: Edge Loss Optimization (in progress, 2026-04-03)
 New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft). Six experiments running:
@@ -367,12 +477,13 @@ New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft
 - **Stage 1 pretrained checkpoint harmful**: Controlled test (2 pretrained vs 4 scratch runs) confirmed negative transfer. Pretrained avg eval PST 0.527, scratch avg 0.522 at best but with wider variance. Stage 1 CE-trained weights interfere with Stage 2 surrogate loss optimization.
 - **High run-to-run variance**: Same config + same seed produces eval PST range of 0.395-0.589 across runs. Non-deterministic CUDA ops, dataloader shuffle, and multi-programming random assignment contribute. Single-run results are unreliable — always run 2+ seeds.
 - **Sinkhorn >> Softmax (resolved)**: Controlled experiment confirmed Sinkhorn is decisively better (+0.086 PST). All future experiments use Sinkhorn.
+- **HW feature gaps in older backends**: `single_qubit_error` ALL ZERO on 10 backends (burlington, essex, london, almaden, boeblingen, johannesburg, poughkeepsie, singapore, cambridge, rochester); `2q_gate_error` ALL ZERO on kyoto. Total 11/55 training backends (20%). These are FakeBackendV2 data gaps, not code bugs. Model learns to handle zero-variance features via z-score → all-zero column. Future experiment: exclude these backends and measure impact.
 - **Feature-indistinguishable circuits**: 16% of original training data (VQE, QNN, GHZ parametric circuits) had >30% indistinguishable qubit pairs. Removed via filtering. MLQD sqr=0 (57% of MLQD) retained — other features still differentiate qubits.
 
 ## Critical Rules
 - All quantum circuits are pre-normalized to basis gates {cx, id, rz, sx, x} via `scripts/normalize_gates.py`
 - All quantum circuits loaded from .qasm files (OPENQASM 2.0)
-- Hardware noise features MUST be z-score normalized WITHIN each backend
+- Hardware noise features: z-scored features MUST be z-score normalized WITHIN each backend; raw features (T2/T1 ratio, edge_coherence_ratio) are NOT z-scored
 - Circuit node features MUST be z-score normalized WITHIN each circuit (RWPE is NOT z-score normalized)
 - Circuit edge features MUST be z-score normalized WITHIN each circuit (multi-programming: group-level via `renormalize_group_edges`)
 - Score normalization: configurable via `sinkhorn.score_norm` in YAML

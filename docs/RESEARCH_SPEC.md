@@ -121,6 +121,7 @@ Node features are selected from a registry in `data/circuit_graph.py`. The YAML 
 | `weighted_degree` | Sum of interaction counts across all connected edges | |
 | `single_qubit_gate_ratio` | (gate_count - 2q_count) / gate_count | ✓ |
 | `critical_path_fraction` | Fraction of DAG critical path length involving this qubit | ✓ |
+| `interaction_entropy` | −Σ p_ij log p_ij over neighbor interaction distribution | |
 
 **Positional Encoding (optional, appended after node features):**
 
@@ -128,15 +129,21 @@ Node features are selected from a registry in `data/circuit_graph.py`. The YAML 
 |---------|-------------|--------|
 | `rwpe` | Random Walk Positional Encoding: k-step self-return probabilities | `rwpe_k: 2` |
 
-RWPE computes `[M^1_ii, M^2_ii, ..., M^k_ii]` where M is the row-normalized adjacency (random walk transition matrix). This gives each node a structural fingerprint based on its local topology, helping the GNN distinguish structurally similar nodes. RWPE is **not z-score normalized** (values are probabilities in [0, 1]).
+RWPE computes k-step self-return probabilities from the random walk transition matrix M (row-normalized adjacency). With `start_step=2` (default), outputs `[M^2_ii, M^3_ii, ..., M^(k+1)_ii]`, skipping step 1 which is structurally zero for graphs without self-loops. This gives each node a structural fingerprint based on its local topology, helping the GNN distinguish structurally similar nodes. RWPE is **not z-score normalized** (values are probabilities in [0, 1]).
 
-**RWPE k selection:** k=1 is always zero (no self-loops), so it is wasted. k=2 provides the largest effective dimension jump (+0.97). k≥3 adds diminishing returns with increasing dead columns. **k=2 is optimal** for this dataset.
+**RWPE k selection:** k=2 with start_step=2 outputs `[M^2, M^3]`. Both dimensions are non-trivial. Verified via `scripts/analyze_circuit_features.py` Phase 6:
+- k=2: eff_dim +0.99 contribution, 0 fully-dead circuits
+- k=3: eff_dim +1.22, but RWPE[2]↔2qc r=0.768 (redundant), 1.61/3 dead dims
+- k=4: eff_dim +1.44, diminishing returns, 1.69/4 dead dims
 
-| k | Total dim | Eff. dim | Dead cols | Efficiency |
-|---|-----------|----------|-----------|------------|
-| 0 | 4 | 2.73 | 0.65 | 68% |
-| 2 | 6 | 3.70 | 1.71 | 62% |
-| 4 | 8 | 4.18 | 2.37 | 52% |
+**k=2 is optimal** — k=3+ adds marginal eff_dim at the cost of redundancy with existing features.
+
+| k | Total dim | Eff. dim | Dead cols | RWPE eff_dim contribution |
+|---|-----------|----------|-----------|--------------------------|
+| 0 | 4 | 2.70 | — | — |
+| 2 | 6 | 3.69 | 1.08 | +0.99 |
+| 3 | 7 | 3.93 | 1.61 | +1.22 |
+| 4 | 8 | 4.14 | 1.69 | +1.44 |
 
 **YAML config format:**
 ```yaml
@@ -153,43 +160,60 @@ model:
 
 **Feature diagnostics:** Run `python scripts/diagnose_features.py --config configs/stage1.yaml` to measure effective dimensionality, cosine similarity, and column correlations before training.
 
-**Feature analysis findings (from `scripts/benchmark_feature_analysis.py` and `scripts/diagnose_features.py`):**
+**Feature analysis findings (from `scripts/analyze_circuit_features.py`, 520 circuits, 2026-04-06):**
 
-*Benchmark circuits (23 circuits, 3-13Q):*
-- Current default (gc, 2qc, sqr, cpf + RWPE2): EffDim 4.1/6, Indist 8.5% — best among tested sets
-- `gc ↔ 2qc` |r|>0.8 in 52% of benchmarks. `sqr ↔ cpf` rarely correlated (9%)
-- `cpf` degenerates for large dense circuits (rd84_253: all qubits cpf=0.083)
+*Overall metrics:*
+- Current default (gc, 2qc, sqr, cpf + RWPE2): EffDim 3.68/6, Indist 16.73%, max |r| = 0.753 (gc↔2qc)
+- Normalization: all z-score confirmed better than mixed (mixed indist +7.03pp worse)
+- RWPE k=2 confirmed optimal post-filtering (k=3 marginal, redundant with 2qc)
 
-*Training circuits (6,882 cached, 497 sampled):*
-- Current default: EffDim 3.7/6, Indist **17.1%** (vs benchmark 8.5%)
-- **`sqr` constant in 39% of circuits** (57% of MLQD) — 2Q-gate-only circuits, sqr=0
-- `cpf` constant in 19% of circuits (67% of xlarge 21Q+)
-- **MQT parametric circuits (VQE/QNN/GHZ): 40-100% indist**, no feature set helps → removed by filtering
-- After filtering (5,769 circuits): mean indist **8.3%**, bad (>30%) circuits **0%**
+*Per-feature issues:*
+- **`sqr`**: 37.7% all-zero (MLQD 2Q-only circuits), CoV<0.1 in 53.8%, medium(6-10Q) 54% constant
+- **`cpf`**: median 0.956 (saturated near 1.0), xlarge(21Q+) 67% constant, CoV<0.1 in 32.5%
+- `gc`, `2qc`: CoV healthy (< 0.1 in 8-17%), constant rate low (1-5%)
+
+*Size-dependent:*
+| Size | N | EffDim | Indist% | Key issue |
+|------|---|--------|---------|-----------|
+| tiny (2-3Q) | 23 | 2.57 | 20.29% | dim > qubits |
+| small (4-5Q) | 121 | 3.66 | 8.93% | best bucket |
+| medium (6-10Q) | 172 | 3.83 | 10.55% | sqr 54% constant |
+| large (11-20Q) | 122 | 3.88 | 16.20% | interaction_count 38% const |
+| xlarge (21Q+) | 82 | 3.44 | 41.03% | cpf 67% const, gc CoV 0.069 |
+
+*Previous findings (still valid):*
+- MQT parametric circuits (VQE/QNN/GHZ): 40-100% indist → removed by filtering
+- After filtering (5,769 circuits): worst-case indist reduced from >30% to manageable levels
 
 **Known feature degeneracy issues (motivating the registry):**
-- `gate_count` ↔ `depth_participation` correlation: |r| > 0.95 in 100% of circuits. Redundant.
-- `weighted_degree` = `two_qubit_gate_count` (r=1.0). Zero independent information.
-- `degree` constant in 26% of benchmark circuits (fully-connected 3Q).
-- RWPE k=1 always zero (no self-loops); k=2 first dim dead. Only second dim useful.
+- `gate_count` ↔ `depth_participation`: |r| = 1.000 in 100% of circuits. Redundant.
+- `weighted_degree` = `two_qubit_gate_count`: |r| = 1.000 in 100% of circuits. Zero independent information.
+- `degree`: GNN learns topology via message passing + 2qc와 |r| > 0.9 in 64.5% of circuits. Excluded.
+- `interaction_entropy`: degree와 |r| = 0.976 (95.3% > 0.9). H ≈ log(degree), redundant. Excluded.
+- RWPE: step 1 structurally zero (no self-loops). Fixed via `start_step=2` — no dead dims.
 
 **Node feature design notes:**
 - 2-qubit gate counts are applied **symmetrically** to both control and target qubits. For initial layout, the interaction frequency (not the control/target role) is what drives placement decisions — both qubits experience the same decoherence during the gate.
 - `weighted_degree` complements `degree`: degree counts unique neighbors, weighted_degree sums interaction counts. A qubit with 2 neighbors but 50 interactions is very different from one with 2 neighbors and 2 interactions.
 - `critical_path_fraction` identifies bottleneck qubits that constrain circuit depth — these should be placed on high-quality physical qubits.
 
-**Edge Features (per qubit pair):**
+**Edge Features (per qubit pair) — current 5-dim:**
 
 | Feature | Description |
 |---------|-------------|
 | `interaction_count` | Number of 2-qubit gates between this qubit pair |
 | `earliest_interaction` | Normalized time (0~1) of the first 2-qubit gate between this pair |
 | `latest_interaction` | Normalized time (0~1) of the last 2-qubit gate between this pair |
+| `interaction_span` | `latest - earliest` — temporal duration of interaction between this pair |
+| `interaction_density` | `count / (span + eps)` — burstiness of interaction (high = concentrated in time) |
+
+Edge dim is configurable via `circuit_gnn.edge_input_dim` in YAML. Previous versions used 3-dim (count, earliest, latest).
 
 **Edge feature design notes:**
 - `interaction_count` is the primary feature: pairs with high counts must be placed close on the hardware to minimize SWAP overhead.
-- `earliest_interaction` and `latest_interaction` together encode the temporal span of interactions (span = latest − earliest). Temporal features are less critical for *static* initial layout (which is fixed before execution) than for routing, but provide circuit structure context. The GNN can implicitly derive interaction density (`interaction_count / span`) from these three features.
-- **Ablation candidate:** whether temporal features (`earliest`, `latest`) contribute beyond `interaction_count` alone.
+- `earliest_interaction` and `latest_interaction` encode when interactions occur in circuit execution.
+- `interaction_span` captures the temporal duration of the interaction relationship — long span means the pair interacts throughout the circuit.
+- `interaction_density` captures burstiness — high density means many gates concentrated in a short time window, which is harder to route around.
 
 **Multi-Programming Note:**
 
@@ -197,7 +221,7 @@ Multi-programming uses the same 4 node features as single-circuit. Circuit graph
 
 **Circuit Node Feature Normalization:** Z-score normalized **within each circuit** (across qubits, dim=0). This captures *relative* qubit importance within the circuit — which qubit is busier than others — rather than absolute counts. This is intentional: hardware features are also normalized within-backend, so the model learns to match "relatively busy logical qubit → relatively good physical qubit" in a consistent scale.
 
-**Circuit Edge Feature Normalization:** Edge features (`interaction_count`, `earliest_interaction`, `latest_interaction`) are **z-score normalized within each circuit** (across edges, dim=0), same as node features. This ensures all three edge features contribute equally to GNN message passing regardless of their original scales (`interaction_count` can be any positive integer while `earliest`/`latest` are in [0,1]).
+**Circuit Edge Feature Normalization:** Edge features (all 5 dimensions) are **z-score normalized within each circuit** (across edges, dim=0), same as node features. This ensures all edge features contribute equally to GNN message passing regardless of their original scales (`interaction_count` can be any positive integer while `earliest`/`latest` are in [0,1], and `density` can range widely).
 
 **Trade-off:** Within-circuit normalization loses absolute circuit complexity. A 3-gate circuit and a 300-gate circuit look similar in both node and edge features if qubit interaction ratios are the same. However, the GNN learns to use the relative structure (which pairs interact more than others) for placement decisions, which is the primary signal for initial layout quality.
 
@@ -216,31 +240,35 @@ Multi-programming uses the same 4 node features as single-circuit. Circuit graph
 
 **Edge:** Undirected. Edges from FakeBackendV2 coupling map.
 
-**Node Features (per physical qubit) — current 5-dim:**
+**Node Features (per physical qubit) — current 6-dim (5 z-scored + 1 raw):**
 
-| Feature | Description | Direction |
-|---------|-------------|-----------|
-| `readout_error` | Measurement error rate | Lower = better |
-| `single_qubit_error` | Average single-qubit gate error rate (sx, x) | Lower = better |
-| `degree` | Coupling map connectivity degree | Structural info |
-| `t1_cx_ratio` | T1 / mean_cx_duration — number of 2Q gates fitting within T1 | Higher = better |
-| `t2_cx_ratio` | T2 / mean_cx_duration — number of 2Q gates fitting within T2 | Higher = better |
+| Feature | Description | Normalization | Direction |
+|---------|-------------|---------------|-----------|
+| `readout_error` | Measurement error rate | z-score | Lower = better |
+| `single_qubit_error` | Average single-qubit gate error rate (sx, x) | z-score | Lower = better |
+| `degree` | Coupling map connectivity degree | z-score | Structural (optional: `exclude_degree: true`) |
+| `t1_cx_ratio` | T1 / mean_cx_duration — 2Q gates fitting within T1 | z-score | Higher = better |
+| `t2_cx_ratio` | T2 / mean_cx_duration — 2Q gates fitting within T2 | z-score | Higher = better |
+| `t2_t1_ratio` | T2 / T1, clipped to [0, 2] — decoherence type indicator | **raw** | ≈2 relaxation-limited, ≈1 dephasing-dominated |
 
-`t1_cx_ratio` and `t2_cx_ratio` are computed per qubit as T1 (or T2) divided by the mean cx_duration across all edges connected to that qubit. These composite features capture the **physically meaningful** quantity for layout: how many 2-qubit gate cycles the qubit can sustain before decoherence. Raw T1/T2 were previously included but removed — their information is fully captured by the ratio features.
+`t1_cx_ratio` and `t2_cx_ratio` are computed per qubit as T1 (or T2) divided by the mean cx_duration across all edges connected to that qubit. `t2_t1_ratio` is a dimensionless ratio with inherent physical meaning — z-score normalization would destroy this.
 
-> **Historical note:** Previous best experiment (PST 0.3440) used 7-dim HW features (raw T1, T2 included) with noise_bias_dim=7. If regression is observed, consider restoring to 7-dim. See CLAUDE.md "Rollback plan".
+> **Feature selection analysis (2026-04-06):** T2/T1 ratio confirmed independent from all existing features (max |r| = 0.243 pooled across 60 backends). T1_raw and T2_raw rejected as redundant (r = 0.88–0.95 with ratio features under z-score). Measurement duration unavailable (ALL ZERO in FakeBackendV2). Frequency rejected (inconsistent across backends, crosstalk not modeled).
 
-**Edge Features (per physical connection):**
+**Edge Features (per physical connection) — current 2-dim (1 z-scored + 1 raw):**
 
-| Feature | Description |
-|---------|-------------|
-| `cx_error` | 2-qubit gate error rate on this connection |
+| Feature | Description | Normalization |
+|---------|-------------|---------------|
+| `2q_gate_error` | 2-qubit gate error rate, averaged over both directions | z-score |
+| `edge_coherence_ratio` | `cx_duration / min(T1_u, T1_v, T2_u, T2_v)` — coherence budget consumed per gate | **raw** |
 
-`cx_duration` removed: it is correlated with `cx_error` (slower gates tend to have higher error) and its information is absorbed into node-level `t1_cx_ratio` / `t2_cx_ratio`.
+`edge_coherence_ratio` captures how much of the weakest endpoint's coherence budget a single 2Q gate operation consumes. Confirmed independent from `2q_gate_error` (r = 0.059). Edge error asymmetry analysis (2026-04-06) confirmed 99.3% of edges have symmetric error (<1% diff); ~10% duration asymmetry exists but is averaged for undirected representation.
 
-**Hardware Feature Normalization:** All features are **z-score normalized within each backend independently**. This ensures the model learns relative quality rankings within a hardware, enabling cross-hardware generalization.
+**Hardware Feature Normalization (mixed strategy):**
+- **Z-score within backend:** Error rates, coherence ratios, degree — scale varies significantly across backends (e.g., T1 can differ 10× between backends). Z-score preserves relative ordering.
+- **Raw (not z-scored):** Dimensionless ratios with physical meaning (`t2_t1_ratio`, `edge_coherence_ratio`). Their absolute values carry information (e.g., T2/T1 ≈ 2.0 means relaxation-limited regardless of backend). Z-score would destroy this.
 
-**Exception handling:** Same ε = 1e-8 for zero standard deviation. If a qubit has no connected edges (isolated), mean_cx_duration defaults to 1.0 to avoid division by zero in ratio features.
+**Exception handling:** ε = 1e-8 for zero standard deviation. If a qubit has no connected edges (isolated), mean_cx_duration defaults to 1.0 to avoid division by zero in ratio features. T2/T1 ratio clipped to [0, 2] per theoretical bound T2 ≤ 2T1; 2.5% of qubits (mostly synthetic backends) hit the clip boundary.
 
 ---
 
@@ -317,11 +345,9 @@ h_out = GATv2Layer(h_in) + h_in  # Applied on layers 2, 3
 
 **Input dimensions:**
 - Circuit GNN input: `len(node_features) + rwpe_k` (current default: 4 + 2 = 6: gc, 2qc, sqr, cpf + RWPE2)
-- Hardware GNN input: 5 (readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio)
-- Circuit edge features: 3 (interaction_count, earliest, latest)
-- Hardware edge features: 1 (cx_error)
-
-> **Historical note:** Previous best experiment (PST 0.3440) used old 4-feature circuit input (gc, 2qc, deg, dp), 7-dim HW input (with raw T1, T2), and noise_bias_dim=7. Current defaults reflect later changes — see CLAUDE.md "Experiment History" for rollback details.
+- Hardware GNN input: 6 (5 z-scored: readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio + 1 raw: t2_t1_ratio)
+- Circuit edge features: 5 (interaction_count, earliest, latest, span, density)
+- Hardware edge features: 2 (1 z-scored: 2q_error + 1 raw: edge_coherence_ratio)
 
 ### 4.3 Cross-Attention Interaction Module
 
