@@ -1,22 +1,31 @@
-# GraphQMap Stage 2: Noise-Aware Surrogate Metric Fine-tuning Configuration
+# GraphQMap Stage 2: Reproduction of Historical Best (20260402_004812_filtered_sinkhorn_adj)
+#
+# Source: runs/stage2/20260402_004812_filtered_sinkhorn_adj/config.yaml
+# Original eval (with val=test leakage): OURS+SABRE 3-backend avg 0.589
+#
+# Differences from original:
+# - Hardware backends: Mumbai/Manhattan/Washington moved to validation (held-out)
+# - cfg.backends.validation added → train.py uses it for PST checkpoint selection
+# - Test backends now evaluated only at the end (no leakage)
+#
+# Reproducible vs original (same hyperparameters):
+# - HW node_input_dim: 5 (NOT 6 — pre-Phase 2; no t2_t1_ratio)
+# - HW edge_input_dim: 1 (NOT 2 — pre-Phase 2; no edge_coherence_ratio)
+# - Circuit edge_input_dim: 3 (NOT 5 — pre-Phase 3; no span/density)
+# - Loss: error_distance(1.0) + adjacency(0.3)
+# - Score norm: sinkhorn
 
 # ---- Model Architecture ----
-# Inherits from stage1; only overrides are listed here.
-# Config loader merges stage2 on top of stage1 defaults.
 model:
   embedding_dim: 64
 
   circuit_gnn:
-    # Node features: select from registry (gate_count, two_qubit_gate_count, degree,
-    #   depth_participation, weighted_degree, single_qubit_gate_ratio, critical_path_fraction)
-    # Diagnose before training: python scripts/diagnose_features.py --config configs/stage2.yaml
     node_features:
       - gate_count
       - two_qubit_gate_count
       - single_qubit_gate_ratio
       - critical_path_fraction
-    rwpe_k: 2                  # Random Walk PE steps (0 = disabled)
-    # node_input_dim is auto-computed: len(node_features) + rwpe_k = 6
+    rwpe_k: 2                  # node_input_dim = 4 + 2 = 6
     edge_input_dim: 3
     num_layers: 3
     num_heads: 4
@@ -26,8 +35,8 @@ model:
     residual_layers: [2, 3]
 
   hardware_gnn:
-    node_input_dim: 6        # readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
-    edge_input_dim: 2        # cx_error
+    node_input_dim: 5          # readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
+    edge_input_dim: 1          # 2q_gate_error only
     num_layers: 3
     num_heads: 4
     activation: elu
@@ -43,13 +52,14 @@ model:
 
   score_head:
     d_k: 64
-    noise_bias_dim: 0          # disabled: Hardware GNN is sole path to score matrix
+    noise_bias_dim: 0          # disabled
 
 # ---- Sinkhorn ----
 sinkhorn:
-  tau_max: 1.0               # start soft for gradient flow
-  tau_min: 0.05              # final sharp temperature
-  schedule: exponential      # exponential decay from tau_max to tau_min
+  score_norm: sinkhorn
+  tau_max: 1.0
+  tau_min: 0.05
+  schedule: exponential
   max_iter: 20
   tolerance: 1.0e-6
 
@@ -69,28 +79,23 @@ training:
 
   max_epochs: 100
   early_stopping:
-    monitor: val_pst             # not used for early stopping; kept for config compatibility
+    monitor: val_pst
     patience: 10
     min_delta: 0.005
 
-  # PST validation schedule (used for best checkpoint selection, no early stopping)
   pst_validation:
-    interval: 5               # measure every N epochs; best PST checkpoint saved
-    num_circuits: 200          # representative circuits for validation
-    convergence_checks: 3      # stop if N consecutive < min_delta
+    interval: 5
+    num_circuits: 200
+    convergence_checks: 3
 
 # ---- Loss ----
-# Components are registered loss modules. Add/remove/reorder freely.
-# Each component: name (from registry), weight (multiplier in total loss).
-# Available: error_distance, adjacency, hop_distance, node_quality, separation
 loss:
   type: surrogate
   components:
-    - name: error_distance       # L_surr: error-weighted shortest path distance (primary)
+    - name: error_distance
       weight: 1.0
-    - name: node_quality         # L_node: NISQ node quality (bounded [-1,0])
+    - name: adjacency
       weight: 0.3
-
 
 # ---- Data ----
 data:
@@ -100,8 +105,8 @@ data:
     val: data/circuits/splits/val.json
 
   multi_programming:
-    scenarios: [1, 2, 4]           # number of circuits per group (configurable)
-    proportions: [0.5, 0.3, 0.2]   # sampling ratio per scenario
+    scenarios: [1, 2, 4]
+    proportions: [0.5, 0.3, 0.2]
     occupancy_min: 0.3
     occupancy_max: 0.75
 
@@ -112,7 +117,7 @@ data:
 batching:
   max_total_nodes: 512
   backend_balanced: true
-  large_backend_boost: 2.0    # oversample 50Q+ backends by this factor
+  large_backend_boost: 2.0
 
 # ---- Hardware Backends ----
 backends:
@@ -149,7 +154,7 @@ backends:
     - FakeJohannesburg
     - FakePoughkeepsie
     - FakeSingapore
-    # 27-28Q
+    # 27-28Q (Mumbai held out → validation)
     - FakeAlgiers
     - FakeAuckland
     - FakeCairo
@@ -165,7 +170,8 @@ backends:
     - FakePrague
     # 53Q
     - FakeRochester
-    # 127Q
+    # 65Q (Manhattan held out → validation)
+    # 127Q (Washington held out → validation)
     - FakeBrisbane
     - FakeCusco
     - FakeKawasaki
@@ -174,17 +180,13 @@ backends:
     - FakeOsaka
     - FakeQuebec
     - FakeSherbrooke
-    # NOTE: Synthetic backends (queko_*, mlqd_*) are Stage 1 only.
-    # Stage 2 uses 52 real Qiskit backends; QUEKO/MLQD circuits are
-    # randomly re-assigned to real backends at data load time.
-    # Held-out: Mumbai (27Q), Manhattan (65Q), Washington (127Q) → validation
   validation:
-    # Held-out from training pool for unbiased PST checkpoint selection.
-    # Size-matched to test backends; never seen in training data.
+    # Held-out from training pool — used for PST checkpoint selection.
     - FakeMumbai             # 27Q,  Falcon r5.11 — Toronto match
     - FakeManhattan          # 65Q,  Hummingbird r2 — Brooklyn match
     - FakeWashington         # 127Q, Eagle (cx) — Torino size match
   test:
+    # Final eval only — never seen during training or model selection.
     - FakeToronto            # 27Q
     - FakeBrooklyn           # 65Q
     - FakeTorino             # 133Q
@@ -193,7 +195,5 @@ backends:
 seed: 42
 device: cuda
 num_workers: 4
-# log_dir and checkpoint_dir are auto-set by train.py (runs/stage{N}/TIMESTAMP_NAME/)
-log_dir: logs/stage2           # fallback only; overridden at runtime
-checkpoint_dir: checkpoints/stage2  # fallback only; overridden at runtime
-# pretrained_checkpoint: specify via --override pretrained_checkpoint=runs/stage1/<RUN>/checkpoints/best.pt
+log_dir: logs/stage2
+checkpoint_dir: checkpoints/stage2

@@ -220,13 +220,18 @@ python scripts/visualize.py runs/stage1/<RUN> --no-show
 - Plots saved to each run's own `plots/` directory (not shared across stages)
 
 ## Hardware Backends
-- **Stage 1 Training (55 Qiskit + 5 synthetic = 60 backends)**:
-  - Qiskit FakeBackendV2: 5Q×15, 7Q×6, 15-16Q×2, 20Q×5, 27-28Q×12, 33Q×1, 53Q×1, 65Q×1, 127Q×9
+- **Stage 1 Training (49 Qiskit + 5 synthetic = 54 backends)**:
+  - Qiskit FakeBackendV2: 5Q×15, 7Q×6, 15-16Q×2, 20Q×5, 27-28Q×11, 33Q×1, 53Q×1, 127Q×8
   - Synthetic: queko_aspen4(16Q), queko_tokyo(20Q), queko_rochester(53Q), queko_sycamore(54Q), mlqd_grid5x5(25Q)
-- **Stage 2 Training (55 Qiskit backends only)**:
+- **Stage 2 Training (49 Qiskit backends only)**:
   - Synthetic backends excluded; QUEKO/MLQD circuits randomly re-assigned to real backends at data load time
-- **Test (UNSEEN)**: FakeToronto(27Q), FakeBrooklyn(65Q), FakeTorino(133Q)
+- **Validation (held-out from training, UNSEEN by training data)**: FakeMumbai(27Q, Falcon r5.11), FakeManhattan(65Q, Hummingbird r2), FakeWashington(127Q, Eagle cx)
+  - Used for PST checkpoint selection in Stage 2 (every `pst_validation.interval` epochs)
+  - Size-matched to test backends but never appear in training; eliminates val=test leakage
+- **Test (UNSEEN by both training and validation)**: FakeToronto(27Q), FakeBrooklyn(65Q), FakeTorino(133Q)
+  - Evaluated **once** at the end via `evaluate.py`; never used for checkpoint/model selection
 - Native 2-qubit gates: cx, ecr, or cz (auto-detected via `_get_two_qubit_gate_name()`)
+- **History note**: Pre-2026-04-07 runs used test backends for PST validation (data leakage via checkpoint selection). All historical eval numbers (e.g. 0.589 from `20260402_004812_filtered_sinkhorn_adj`) are upper-bound estimates contaminated by this leakage and not directly comparable to post-2026-04-07 runs.
 
 ## Circuit Node Feature System
 Circuit node features are **configurable via YAML** — no code changes needed to experiment with feature combinations. All candidate features are pre-computed during preprocessing (`scripts/preprocess_circuits.py`); feature selection happens at dataset load time.

@@ -45,6 +45,8 @@ class GNNEncoder(nn.Module):
         self.embedding_dim = embedding_dim
         self.num_layers = num_layers
         self.residual_layers = set(residual_layers or [2, 3])
+        self.node_input_dim = node_input_dim
+        self.edge_input_dim = edge_input_dim
 
         # Input projection
         self.input_proj = nn.Linear(node_input_dim, embedding_dim)
@@ -97,6 +99,15 @@ class GNNEncoder(nn.Module):
         Returns:
             Node embeddings (N, embedding_dim).
         """
+        # Slice input features to expected dim. Hardware/circuit graph builders
+        # may produce more features than the model is configured for (e.g. after
+        # adding new optional features); we honor node_input_dim/edge_input_dim
+        # by taking the leading slice. Trailing features are dropped.
+        if x.size(-1) > self.node_input_dim:
+            x = x[:, : self.node_input_dim]
+        if edge_attr.numel() > 0 and edge_attr.size(-1) > self.edge_input_dim:
+            edge_attr = edge_attr[:, : self.edge_input_dim]
+
         # Project inputs to embedding space
         h = self.input_proj(x)
         edge_emb = self.edge_proj(edge_attr)

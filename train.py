@@ -59,9 +59,14 @@ def _get_training_backends(cfg) -> list[str]:
 def _build_val_pst_fn(cfg, device: torch.device):
     """Build a PST validation function for Stage 2.
 
-    Uses benchmark circuits on ALL test backends to measure actual PST
-    during training. NASSC routing is used instead of SABRE for
-    deterministic measurement (eliminates routing non-determinism).
+    Uses benchmark circuits on held-out validation backends to measure
+    actual PST during training. NASSC routing is used instead of SABRE
+    for deterministic measurement (eliminates routing non-determinism).
+
+    Backend source preference: cfg.backends.validation (held-out from
+    training pool, no test leakage). Falls back to cfg.backends.test
+    for backward compatibility — emits a warning since this leaks test
+    backends into checkpoint selection.
 
     Simulators are created once per backend and reused across calls.
     """
@@ -75,9 +80,22 @@ def _build_val_pst_fn(cfg, device: torch.device):
 
     tau = getattr(cfg.sinkhorn, "tau_min", getattr(cfg.sinkhorn, "tau", 0.05))
 
-    # Set up all test backends
+    # Prefer held-out validation backends; fall back to test backends with warning.
+    val_backend_names = getattr(cfg.backends, "validation", None)
+    if val_backend_names:
+        logger.info("PST validation: using held-out validation backends (%d)",
+                    len(val_backend_names))
+    else:
+        val_backend_names = cfg.backends.test
+        logger.warning(
+            "PST validation: cfg.backends.validation not set; falling back to "
+            "cfg.backends.test (%d backends). This leaks test backends into "
+            "checkpoint selection — add a 'validation:' section to your config.",
+            len(val_backend_names),
+        )
+
     val_backends = []
-    for bname in cfg.backends.test:
+    for bname in val_backend_names:
         name = bname[4:].lower() if bname.startswith("Fake") else bname
         backend = get_backend(name)
         num_physical = backend.target.num_qubits
