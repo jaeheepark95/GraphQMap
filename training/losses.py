@@ -376,6 +376,153 @@ class SeparationLoss(nn.Module):
         return loss
 
 
+@register_loss("grama")
+class GraMALoss(nn.Module):
+    """L_grama: trace-form QAP objective from GraMA (Piao et al. 2026, Eq. 5).
+
+    Paper objective (with paper's X having shape (n_physical, k_logical)):
+
+        f(X) = Tr(A X^T W X) + gamma * <S, X>
+
+    where:
+      - W (n×n): Floyd–Warshall on -log(1 - eps_2q) — multiplicative-fidelity-
+        correct all-pairs distance between physical qubits.
+      - A (k×k): binary (0/1) logical adjacency aggregated across all circuits
+        in the (multi-programmed) logical workload.
+      - S (n×k): single-qubit cost matrix S = s_read · 1_k^T + s_gate · g^T,
+        where g[j] is the number of single-qubit gates on logical qubit j.
+      - gamma (scalar): mean(2 W X_uniform A) / mean(S), computed once with the
+        uniform-initialized continuous matrix X_c = (1/n) · 1_n 1_k^T (Eq. 9 in
+        the paper). Acts as an automatic balancer between the two terms.
+
+    Our convention: P has shape (B, l, h) = (batch, logical, physical), i.e.
+    P = X^T relative to the paper. Substituting X = P^T:
+
+        Tr(A X^T W X) = Tr(A P W P^T)
+        <S, X>        = <S^T, P>
+
+    Both terms are computed in batched einsum form. The loss is **fully
+    differentiable in P** — A, W, S, and gamma are detached constants per batch.
+
+    Args:
+        binary_adjacency: If True (default, faithful to paper), the logical
+            adjacency matrix entries are clipped to {0, 1}. If False, the raw
+            2Q-gate interaction count is used as edge weight (frequency-weighted).
+        gamma_mode: 'auto' (default) computes gamma per batch via Eq. 9;
+            'fixed' uses gamma_fixed.
+        gamma_fixed: Fixed gamma value when gamma_mode='fixed'.
+        normalize_by_size: If True, divides the loss by (l + |E_log|) so that
+            its magnitude is comparable across batches with different logical
+            qubit counts. Default False (matches the paper, which sums).
+    """
+
+    def __init__(
+        self,
+        binary_adjacency: bool = True,
+        gamma_mode: str = "auto",
+        gamma_fixed: float = 1.0,
+        normalize_by_size: bool = True,
+    ) -> None:
+        super().__init__()
+        if gamma_mode not in ("auto", "fixed"):
+            raise ValueError(f"gamma_mode must be 'auto' or 'fixed', got {gamma_mode}")
+        self.binary_adjacency = binary_adjacency
+        self.gamma_mode = gamma_mode
+        self.gamma_fixed = gamma_fixed
+        self.normalize_by_size = normalize_by_size
+
+    def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """Compute GraMA QAP loss.
+
+        Required kwargs:
+            grama_W: (h, h) hardware weighted-distance matrix.
+            grama_s_read: (h,) raw readout error per physical qubit.
+            grama_s_gate: (h,) raw max single-qubit gate error per physical qubit.
+            grama_g_single: (l,) per-logical 1Q gate count.
+            circuit_edge_pairs: list of (i, j) logical qubit pairs with 2Q gates.
+            circuit_edge_weights: optional list of 2Q gate counts per edge.
+        """
+        device = P.device
+        dtype = P.dtype
+        B, l, h = P.shape
+
+        W = kwargs.get("grama_W")
+        s_read = kwargs.get("grama_s_read")
+        s_gate = kwargs.get("grama_s_gate")
+        g_single = kwargs.get("grama_g_single")
+        edge_pairs = kwargs.get("circuit_edge_pairs", [])
+        edge_weights = kwargs.get("circuit_edge_weights", [])
+
+        if W is None or s_read is None or s_gate is None or g_single is None:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        W = W.to(device=device, dtype=dtype)
+        s_read = s_read.to(device=device, dtype=dtype)
+        s_gate = s_gate.to(device=device, dtype=dtype)
+        g_single = g_single.to(device=device, dtype=dtype)
+
+        # ---- Build logical adjacency A (l × l) ----
+        A = torch.zeros((l, l), device=device, dtype=dtype)
+        if edge_pairs:
+            if self.binary_adjacency or not edge_weights:
+                weights = [1.0] * len(edge_pairs)
+            else:
+                weights = list(edge_weights)
+            idx = torch.tensor(edge_pairs, device=device, dtype=torch.long)
+            w = torch.tensor(weights, device=device, dtype=dtype)
+            # Symmetric
+            A[idx[:, 0], idx[:, 1]] = w
+            A[idx[:, 1], idx[:, 0]] = w
+
+        # ---- Build single-qubit cost S (h × l) ----
+        # S[i, j] = s_read[i] + s_gate[i] * g_single[j]
+        S = s_read.unsqueeze(1) + torch.outer(s_gate, g_single)  # (h, l)
+
+        # ---- Term 1: trace QAP — Tr(A P W P^T) per batch ----
+        # WP^T: einsum over physical: (h,h) @ (B,h,l) -> (B,h,l)
+        WP_T = torch.einsum("hk,blk->bhl", W, P)        # (B, h, l) — actually (B,h,l)
+        # A P: (l,l) @ (B,l,h) -> (B,l,h)
+        AP = torch.einsum("ij,bjh->bih", A, P)          # (B, l, h)
+        # trace term: sum over l,h of AP * (W P^T)^T = sum AP_{i,h} * WP_T[h, i] / per batch
+        # Equivalent compact form: (AP * (WP_T transposed))
+        trace_term = (AP * WP_T.transpose(1, 2)).sum(dim=(-1, -2))  # (B,)
+
+        # ---- gamma (auto-balancing scalar, per Eq. 9) ----
+        # X_c = (1/n) 1_n 1_k^T (paper's notation, n=h, k=l)
+        # 2 W X_c A reduces to (2/n) * (W·1_h)[u] * (1_l^T A)[i]
+        # Its mean equals (2/n) * mean_h(W·1) * mean_l(A·1)  (since all entries factor)
+        with torch.no_grad():
+            if self.gamma_mode == "fixed":
+                gamma = torch.tensor(self.gamma_fixed, device=device, dtype=dtype)
+            else:
+                row_sum_W = W.sum(dim=1)                # (h,)
+                col_sum_A = A.sum(dim=0)                # (l,)
+                # 2WX_cA shape (h, l); mean factors:
+                t_mean = (2.0 / h) * row_sum_W.mean() * col_sum_A.mean()
+                s_mean = S.mean()
+                if s_mean.abs() < 1e-12:
+                    gamma = torch.tensor(0.0, device=device, dtype=dtype)
+                else:
+                    gamma = t_mean / s_mean
+                # safety: clamp to non-negative finite range
+                if not torch.isfinite(gamma):
+                    gamma = torch.tensor(0.0, device=device, dtype=dtype)
+
+        # ---- Term 2: <S^T, P> per batch ----
+        # S has shape (h, l), so S^T (l, h) lines up with P (B, l, h).
+        S_T = S.transpose(0, 1)                          # (l, h)
+        single_term = (P * S_T.unsqueeze(0)).sum(dim=(-1, -2))  # (B,)
+
+        # ---- Combine ----
+        per_batch = trace_term + gamma * single_term     # (B,)
+
+        if self.normalize_by_size:
+            denom = float(l + max(len(edge_pairs), 1))
+            per_batch = per_batch / denom
+
+        return per_batch.mean()
+
+
 @register_loss("exclusion")
 class ExclusionLoss(nn.Module):
     """L_excl: Column-wise exclusion loss for one-to-one mapping.

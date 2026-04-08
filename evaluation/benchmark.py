@@ -85,7 +85,6 @@ def load_benchmark_circuit(
     circuit = QuantumCircuit.from_qasm_file(path)
     if circuit.count_ops().get("measure", 0) == 0 and measure:
         circuit.measure_all()
-    circuit = circuit.decompose()
     return circuit
 
 

@@ -456,6 +456,99 @@ def precompute_hop_distance(backend: Any) -> np.ndarray:
     return floyd_warshall(adj).astype(np.float32)
 
 
+def precompute_grama_W(backend: Any) -> np.ndarray:
+    """Precompute the GraMA weighted-distance matrix W (Eq. 5 in Piao et al. 2026).
+
+    The hardware coupling graph is weighted with -log(1 - eps_2q) per edge,
+    so that all-pairs shortest paths produced by Floyd-Warshall correspond to
+    the negative log of the multiplicative two-qubit success probability of
+    routing between two physical qubits along the optimal path.
+
+    For unconnected pairs, returns the path through the graph (FW infinity is
+    propagated to inf, then later replaced with the max finite value to avoid
+    NaN gradients in the loss).
+
+    Args:
+        backend: A FakeBackendV2 instance.
+
+    Returns:
+        h×h numpy float32 array. Diagonal is 0; off-diagonal entries are
+        non-negative shortest -log(1-eps) sums.
+    """
+    target = backend.target
+    h = target.num_qubits
+    gate_name = _get_two_qubit_gate_name(backend)
+    cx_props = target[gate_name]
+
+    adj = np.full((h, h), np.inf)
+    np.fill_diagonal(adj, 0)
+
+    for qargs, props in cx_props.items():
+        if props is None:
+            continue
+        p, q = qargs
+        eps = props.error if props.error is not None else 0.0
+        eps = float(np.clip(eps, 0.0, 0.999999))
+        w = -np.log1p(-eps)  # = -log(1 - eps)
+        # Use minimum weight for undirected
+        adj[p][q] = min(adj[p][q], w)
+        adj[q][p] = min(adj[q][p], w)
+
+    W = floyd_warshall(adj).astype(np.float32)
+    # Replace inf (disconnected) with max finite value to keep gradients finite.
+    finite = W[np.isfinite(W)]
+    if finite.size:
+        max_w = float(finite.max())
+        W[~np.isfinite(W)] = max_w
+    else:
+        W[~np.isfinite(W)] = 0.0
+    return W
+
+
+def precompute_grama_single_qubit_costs(backend: Any) -> dict[str, np.ndarray]:
+    """Precompute raw per-qubit single-qubit cost vectors for GraMA Eq. (6).
+
+    Per the paper:
+        S = s_read · 1_k^T + s_gate · g^T
+
+    where s_read[i] is the readout error of physical qubit i (raw, not z-scored),
+    and s_gate[i] is the *highest* single-qubit gate error among all 1Q gates on
+    physical qubit i.
+
+    The g vector (per-logical 1Q gate count) is built per-circuit at load time.
+
+    Args:
+        backend: A FakeBackendV2 instance.
+
+    Returns:
+        Dict with keys 's_read' and 's_gate', each (h,) float32 numpy arrays.
+    """
+    target = backend.target
+    num_qubits = target.num_qubits
+
+    s_read = np.zeros(num_qubits, dtype=np.float32)
+    s_gate = np.zeros(num_qubits, dtype=np.float32)
+
+    if "measure" in target.operation_names:
+        meas_props = target["measure"]
+        for q in range(num_qubits):
+            if (q,) in meas_props and meas_props[(q,)] is not None:
+                s_read[q] = float(meas_props[(q,)].error or 0.0)
+
+    for q in range(num_qubits):
+        max_err = 0.0
+        for gate_name in ("sx", "x", "rz", "id"):
+            if gate_name in target.operation_names:
+                gate_props = target[gate_name]
+                if (q,) in gate_props and gate_props[(q,)] is not None:
+                    err = gate_props[(q,)].error
+                    if err is not None and err > max_err:
+                        max_err = float(err)
+        s_gate[q] = max_err
+
+    return {"s_read": s_read, "s_gate": s_gate}
+
+
 def get_hw_node_features(backend: Any) -> np.ndarray:
     """Get quality-score input features for a Qiskit FakeBackendV2.
 
@@ -651,6 +744,49 @@ def precompute_hop_distance_synthetic(name: str) -> np.ndarray:
         adj[p][q] = 1.0
         adj[q][p] = 1.0
     return floyd_warshall(adj).astype(np.float32)
+
+
+def precompute_grama_W_synthetic(name: str) -> np.ndarray:
+    """Synthetic backend version of precompute_grama_W."""
+    profile = _load_synthetic_backend(name)
+    h = profile["num_qubits"]
+    eprops = profile["edge_properties"]
+    coupling_map = [tuple(e) for e in profile["coupling_map"]]
+
+    adj = np.full((h, h), np.inf)
+    np.fill_diagonal(adj, 0)
+
+    for p, q in coupling_map:
+        key = f"({p}, {q})"
+        eps = float(eprops[key].get("cx_error", 0.0))
+        eps = float(np.clip(eps, 0.0, 0.999999))
+        w = -np.log1p(-eps)
+        adj[p][q] = min(adj[p][q], w)
+        adj[q][p] = min(adj[q][p], w)
+
+    W = floyd_warshall(adj).astype(np.float32)
+    finite = W[np.isfinite(W)]
+    if finite.size:
+        max_w = float(finite.max())
+        W[~np.isfinite(W)] = max_w
+    else:
+        W[~np.isfinite(W)] = 0.0
+    return W
+
+
+def precompute_grama_single_qubit_costs_synthetic(name: str) -> dict[str, np.ndarray]:
+    """Synthetic backend version of precompute_grama_single_qubit_costs."""
+    profile = _load_synthetic_backend(name)
+    n = profile["num_qubits"]
+    qprops = profile["qubit_properties"]
+
+    s_read = np.zeros(n, dtype=np.float32)
+    s_gate = np.zeros(n, dtype=np.float32)
+    for i in range(n):
+        qp = qprops[str(i)]
+        s_read[i] = float(qp.get("readout_error", 0.0) or 0.0)
+        s_gate[i] = float(qp.get("sq_gate_error", 0.0) or 0.0)
+    return {"s_read": s_read, "s_gate": s_gate}
 
 
 def get_hw_node_features_synthetic(name: str) -> np.ndarray:

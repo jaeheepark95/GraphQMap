@@ -1,0 +1,204 @@
+# GraphQMap Stage 2: GraMA QAP loss (faithful to Piao et al. 2026, Eq. 5)
+#
+# Paper: "GraMA: A gradient matrix-guided assignment method for solving qubit
+#         mapping problems" — Future Generation Computer Systems 182 (2026)
+#         doi:10.1016/j.future.2026.108485
+#
+# Loss: f(X) = Tr(A X^T W X) + gamma * <S, X>
+#   - W: Floyd–Warshall on -log(1 - eps_2q)  (multiplicative-fidelity-correct)
+#   - A: binary logical adjacency aggregated across all circuits
+#   - S = s_read · 1^T + s_gate · g^T (raw, NOT z-scored)
+#   - gamma: auto-balanced per batch via Eq. 9 (uniform-X formula)
+#
+# Backbone (model, scheduler, sinkhorn, backends) is identical to
+# stage2_best_repro.yaml so the only thing changing vs the historical best is
+# the loss function. Held-out validation backends prevent val/test leakage.
+
+# ---- Model Architecture ----
+model:
+  embedding_dim: 64
+
+  circuit_gnn:
+    node_features:
+      - gate_count
+      - two_qubit_gate_count
+      - single_qubit_gate_ratio
+      - critical_path_fraction
+    rwpe_k: 2
+    edge_input_dim: 3
+    num_layers: 3
+    num_heads: 4
+    activation: elu
+    dropout: 0.1
+    use_batchnorm: true
+    residual_layers: [2, 3]
+
+  hardware_gnn:
+    node_input_dim: 5
+    edge_input_dim: 1
+    num_layers: 3
+    num_heads: 4
+    activation: elu
+    dropout: 0.1
+    use_batchnorm: true
+    residual_layers: [2, 3]
+
+  cross_attention:
+    num_layers: 2
+    num_heads: 4
+    ffn_hidden_dim: 128
+    dropout: 0.1
+
+  score_head:
+    d_k: 64
+    noise_bias_dim: 0
+
+# ---- Sinkhorn ----
+sinkhorn:
+  score_norm: sinkhorn
+  tau_max: 1.0
+  tau_min: 0.05
+  schedule: exponential
+  max_iter: 20
+  tolerance: 1.0e-6
+
+# ---- Training ----
+training:
+  stage: 2
+  optimizer:
+    type: adamw
+    lr: 5.0e-4
+    weight_decay: 1.0e-4
+  scheduler:
+    type: cosine_annealing
+    T_max: 100
+    eta_min: 1.0e-5
+  warmup_epochs: 2
+  grad_clip_norm: 2.0
+
+  max_epochs: 100
+  early_stopping:
+    monitor: val_pst
+    patience: 10
+    min_delta: 0.005
+
+  pst_validation:
+    interval: 5
+    num_circuits: 200
+    convergence_checks: 3
+
+# ---- Loss ----
+# Variant: frequency-weighted A (binary_adjacency: false).
+# Each entry of A holds the 2Q gate count between logical qubit pair, instead
+# of 0/1. Hypothesis: recover the gate-count signal that the historical best
+# (error_distance + adjacency, both freq-weighted) had access to.
+loss:
+  type: surrogate
+  components:
+    - name: grama
+      weight: 1.0
+      params:
+        binary_adjacency: false
+        gamma_mode: auto
+        normalize_by_size: true
+
+# ---- Data ----
+data:
+  data_root: data/circuits
+  splits:
+    train: data/circuits/splits/stage2_all.json
+    val: data/circuits/splits/val.json
+
+  multi_programming:
+    scenarios: [1, 2, 4]
+    proportions: [0.5, 0.3, 0.2]
+    occupancy_min: 0.3
+    occupancy_max: 0.75
+
+  normalization:
+    epsilon: 1.0e-8
+
+# ---- Batching ----
+batching:
+  max_total_nodes: 512
+  backend_balanced: true
+  large_backend_boost: 2.0
+
+# ---- Hardware Backends ----
+backends:
+  training:
+    # 5Q
+    - FakeAthens
+    - FakeBelem
+    - FakeBogota
+    - FakeBurlington
+    - FakeEssex
+    - FakeLima
+    - FakeLondon
+    - FakeManila
+    - FakeOurense
+    - FakeQuito
+    - FakeRome
+    - FakeSantiago
+    - FakeValencia
+    - FakeVigo
+    - FakeYorktown
+    # 7Q
+    - FakeCasablanca
+    - FakeJakarta
+    - FakeLagos
+    - FakeNairobi
+    - FakeOslo
+    - FakePerth
+    # 15-16Q
+    - FakeMelbourne
+    - FakeGuadalupe
+    # 20Q
+    - FakeAlmaden
+    - FakeBoeblingen
+    - FakeJohannesburg
+    - FakePoughkeepsie
+    - FakeSingapore
+    # 27-28Q (Mumbai held out → validation)
+    - FakeAlgiers
+    - FakeAuckland
+    - FakeCairo
+    - FakeCambridge
+    - FakeGeneva
+    - FakeHanoi
+    - FakeKolkata
+    - FakeMontreal
+    - FakeParis
+    - FakePeekskill
+    - FakeSydney
+    # 33Q
+    - FakePrague
+    # 53Q
+    - FakeRochester
+    # 65Q (Manhattan held out → validation)
+    # 127Q
+    - FakeBrisbane
+    - FakeCusco
+    - FakeKawasaki
+    - FakeKyiv
+    - FakeKyoto
+    - FakeOsaka
+    - FakeQuebec
+    - FakeSherbrooke
+    - FakeWashington         # 127Q — moved back to training (qiskit-aer-gpu segfault on PST val)
+  validation:
+    - FakeMumbai             # 27Q
+    - FakeManhattan          # 65Q
+    # FakeWashington removed from validation: recurring qiskit-aer-gpu segfault
+    # during PST measurement on 127Q deep circuits caused training crashes.
+  test:
+    - FakeToronto
+    - FakeBrooklyn
+    - FakeTorino
+
+# ---- Misc ----
+seed: 42
+device: cuda
+num_workers: 4
+log_dir: logs/stage2
+checkpoint_dir: checkpoints/stage2

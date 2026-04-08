@@ -699,13 +699,14 @@ All use Sinkhorn, new 6dim features, HW 5dim, bias=0, filtered 5,769 circuits.
 
 ### Available Datasets
 
-| Dataset | Original | After Filtering | Stage | Label Source | Notes |
-|---------|:--------:|:---------------:|-------|--------------|-------|
-| **MQT Bench** | 1,219 | **433** | Stage 2 (Unsupervised) | None | 786 removed (VQE/QNN/GHZ parametric). 29 algorithm types |
-| **MLQD** | 4,443 | **4,168** | Stage 1 + 2 | OLSQ2 solver labels | 275 removed (ising/dnn). 3,116 labeled remain |
-| **QUEKO** | 900 | **894** | Stage 1 + 2 | τ⁻¹ (true optimal) | Nearly unaffected. 483 labeled remain |
-| **QASMBench** | 94 | **55** | Stage 2 (Unsupervised) | None | 39 removed. 2Q-127Q |
-| **RevLib** | 231 | **219** | Stage 2 (Unsupervised) | None | 12 removed. 3Q-127Q |
+| Dataset | Original | After Steps 1-6 | After Step 7 (Diversity) | Stage | Label Source | Notes |
+|---------|:--------:|:---------------:|:------------------------:|-------|--------------|-------|
+| **MQT Bench** | 1,219 | 433 | **305** | Stage 2 (Unsupervised) | None | 786 indist + 128 structural duplicates removed |
+| **MLQD** | 4,443 | 4,159 | **267** | Stage 1 + 2 | OLSQ2 solver labels | 275 indist + 14 mid-measure + 3,892 structural duplicates removed |
+| **QUEKO** | 900 | 894 | **245** | Stage 1 + 2 | τ⁻¹ (true optimal) | 6 indist + 649 random-seed variants removed |
+| **QASMBench** | 94 | 52 | **39** | Stage 2 (Unsupervised) | None | 42 + 7 mid-measure/dup removed |
+| **RevLib** | 231 | 219 | **113** | Stage 2 (Unsupervised) | None | 12 indist + 106 indexed-variants removed |
+| **Total** | **6,887** | **5,757** | **969** | | | |
 
 ### Dataset Directory Structure
 
@@ -730,13 +731,17 @@ data/circuits/
 │   ├── queko_sycamore.json      # Google Sycamore (54Q) — QUEKO + MLQD
 │   └── mlqd_grid5x5.json       # 5x5 Grid (25Q) — MLQD only
 └── splits/                          # Defines which circuits are used in each stage
-    ├── stage1_supervised.json       # 3,599 labeled circuits → Stage 1 training
-    ├── stage1_queko_only.json       # 483 QUEKO circuits → Stage 1 fine-tuning phase
-    ├── stage1_unsupervised.json     # 1,774 unlabeled circuits → Stage 2 only
-    ├── stage2_all.json              # 5,769 all circuits → Stage 2 surrogate loss
-    ├── val.json                     # 396 labeled validation
-    ├── val_queko_only.json          # 52 QUEKO validation
-    ├── filter_log.json              # Feature-indistinguishable removal log
+    ├── stage1_supervised.json       # 288 labeled circuits → Stage 1 training
+    ├── stage1_queko_only.json       # 73 QUEKO circuits → Stage 1 fine-tuning phase
+    ├── stage1_unsupervised.json     # 653 unlabeled circuits → Stage 2 only
+    ├── stage2_all.json              # 969 all circuits → Stage 2 surrogate loss
+    ├── val.json                     # 28 labeled validation
+    ├── val_queko_only.json          # 2 QUEKO validation
+    ├── filter_log.json              # Combined removal log (indist + mid-measure + diversity)
+    ├── diversity_filter_log.json    # Per-source K and per-cluster details
+    ├── mid_measure_log.json         # Mid-circuit measurement scan log
+    ├── dataset_quality.{md,csv}     # Per-category quality metrics
+    ├── dataset_diversity.{md,csv}   # Per-category diversity / fingerprint analysis
     └── original/                    # Pre-filter backup of all splits
 ```
 
@@ -779,6 +784,25 @@ All raw circuit datasets undergo the following preprocessing before use in train
 
 **Why this threshold:** At 50% threshold, only 607 circuits removed (8.8%), missing many "poor" quality circuits (30-50% indist rate). At 30%, 1,118 removed (16.2%) with acceptable labeled data loss (247 supervised, 27 val). The 30% threshold ensures training data has sufficiently differentiated features for GNN learning.
 
+**Step 6: Mid-circuit Measurement Filtering** (`scripts/filter_mid_measure.py`)
+- Scan all QASM files via `scripts/check_mid_measure.py` for any non-measure/barrier operation that follows a measure on the same qubit
+- 21 circuits found: 7 unique algorithms (bb84, ipea, shor, cc×3, seca), replicated across MLQD backend variants. 9 already removed by Step 5, 12 additional removals
+- **Why:** The GraphQMap circuit graph represents each logical qubit as a single node — mid-measure circuits where a qubit is measured and then reused for a different role cannot be represented correctly. Also, many solvers used to produce labels (including OLSQ2) assume unitary-only circuits, making label correctness dubious for such circuits.
+- Removal log: `data/circuits/splits/mid_measure_log.json` (full scan results)
+
+**Step 7: Strong Diversity Filtering** (`scripts/filter_diversity.py`, applied 2026-04-08)
+- For each source, group circuits by fingerprint `(num_qubits, num_edges, sorted_degree_sequence)`. Keep K=1 representative per fingerprint (alphabetical first stem).
+- **Why:** Pre-filter diversity analysis (`scripts/dataset_diversity.py`) revealed that nominal 5,757 training circuits contained only ~487 structurally distinct patterns (8.5%). Key duplication sources:
+  - **QUEKO**: 215-circuit clusters of `{N}QBT_{depth}CYC_QSE_{seed}` random-seed variants with identical topology. 99% of QUEKO falls in "sparse" topology, only 4 distinct qubit counts (16/20/53/54).
+  - **MLQD**: 359-circuit cluster at fingerprint (4Q, 3 edges, …) with mixed algorithm names (basis_trotter, dnn, ising, vqe_uccsd) — structurally identical despite semantic labels. 5×backend replication compounds the effect.
+  - **RevLib**: indexed variants (`rd53_71`, `rd53_138`, ...) of the same base circuit.
+  - **MQT Bench and QASMBench**: already diverse (singleton rate > 80%), mild K=1 compression only removes trivial 2Q pairs.
+- Reduction: queko 894→245, mlqd 4,159→267, mqt_bench 433→305, qasmbench 52→39, revlib 219→113
+- **Trade-off:** Validation set drops significantly (val 395→28, val_queko_only 52→2). Val metrics will have higher per-epoch variance but the number of structurally distinct val patterns is unchanged — the removed val entries were duplicates contributing no additional signal.
+- Detailed log: `data/circuits/splits/diversity_filter_log.json`; analysis outputs: `dataset_diversity.{md,csv}`
+
+**Effective unique count rationale:** Defining unique as matching `(num_qubits, num_edges, sorted_degree_sequence)` is an under-estimate of true structural uniqueness (two circuits with the same degree sequence could still differ in edge placement) but is a strong over-estimate of "what the GNN distinguishes" because feature extraction throws away even more detail. K=1 per fingerprint gives a conservative-but-actionable upper bound on the distinct patterns the current model architecture can learn from.
+
 **Primary removal targets:**
 - MQT Bench VQE/QNN/GHZ/W-state: parametric circuits with repeating layer structure → all qubits have identical features
 - MLQD ising circuits: 38.4% bad rate due to uniform interaction patterns
@@ -795,18 +819,20 @@ All raw circuit datasets undergo the following preprocessing before use in train
 | Benchmark dedup | 19 | Evaluation fairness |
 | Extreme filtering | 183 | edges > 1,000, GNN scalability |
 | Feature-indistinguishable | 1,118 | indist rate > 30%, no gradient signal |
-| **Total removed** | **1,396** | |
+| Mid-circuit measurement | 12 | mid-measure not representable in graph + dubious labels |
+| Strong diversity filter (K=1) | 4,788 | structural near-duplicates by fingerprint |
+| **Total removed** | **6,196** | |
 
 **Original → Final circuit counts:**
 
-| Dataset | Original | After Steps 1-4 | After Step 5 (Final) | Step 5 Removed |
-|---------|:--------:|:-----:|:-------:|:-------:|
-| QUEKO | 900 | 900 | 894 | 6 |
-| MLQD | 4,443 | 4,443 | 4,168 | 275 |
-| MQT Bench | 1,448 | 1,219 | 433 | 786 |
-| QASMBench | 111 | 94 | 55 | 39 |
-| RevLib | 263 | 231 | 219 | 12 |
-| **Total** | **7,165** | **6,887** | **5,769** | **1,118** |
+| Dataset | Original | After Steps 1-4 | After Step 5 | After Step 6 | After Step 7 (Final) |
+|---------|:--------:|:---------------:|:------------:|:------------:|:--------------------:|
+| QUEKO | 900 | 900 | 894 | 894 | 245 |
+| MLQD | 4,443 | 4,443 | 4,168 | 4,159 | 267 |
+| MQT Bench | 1,448 | 1,219 | 433 | 433 | 305 |
+| QASMBench | 111 | 94 | 55 | 52 | 39 |
+| RevLib | 263 | 231 | 219 | 219 | 113 |
+| **Total** | **7,165** | **6,887** | **5,769** | **5,757** | **969** |
 
 #### QUEKO Backend Handling
 

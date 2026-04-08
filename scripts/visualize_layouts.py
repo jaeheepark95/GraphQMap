@@ -97,8 +97,10 @@ def get_model_layout(model, circuit, backend, hw_graph, cfg):
     """Get layout from GraphQMap model prediction."""
     node_features = getattr(cfg.model.circuit_gnn, "node_features", None)
     rwpe_k = getattr(cfg.model.circuit_gnn, "rwpe_k", 0)
+    edge_dim = getattr(cfg.model.circuit_gnn, "edge_input_dim", None)
     circuit_graph = build_circuit_graph(
         circuit, node_feature_names=node_features, rwpe_k=rwpe_k,
+        edge_dim=edge_dim,
     )
     circuit_batch = Batch.from_data_list([circuit_graph])
     hw_batch = Batch.from_data_list([hw_graph])

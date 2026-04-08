@@ -36,6 +36,10 @@ from data.hardware_graph import (
     is_synthetic_backend,
     precompute_error_distance,
     precompute_error_distance_synthetic,
+    precompute_grama_W,
+    precompute_grama_W_synthetic,
+    precompute_grama_single_qubit_costs,
+    precompute_grama_single_qubit_costs_synthetic,
     precompute_hop_distance,
     precompute_hop_distance_synthetic,
 )
@@ -78,6 +82,10 @@ class MappingSample:
         circuit_edge_pairs: list[tuple[int, int]] | None = None,
         circuit_edge_weights: list[float] | None = None,
         qubit_importance: np.ndarray | None = None,
+        grama_W: np.ndarray | None = None,
+        grama_s_read: np.ndarray | None = None,
+        grama_s_gate: np.ndarray | None = None,
+        grama_g_single: np.ndarray | None = None,
     ) -> None:
         self.circuit_graph = circuit_graph
         self.hardware_graph = hardware_graph
@@ -92,6 +100,10 @@ class MappingSample:
         self.circuit_edge_pairs = circuit_edge_pairs or []
         self.circuit_edge_weights = circuit_edge_weights or []
         self.qubit_importance = qubit_importance
+        self.grama_W = grama_W
+        self.grama_s_read = grama_s_read
+        self.grama_s_gate = grama_s_gate
+        self.grama_g_single = grama_g_single
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +115,8 @@ _d_error_cache: dict[str, np.ndarray] = {}
 _d_hw_cache: dict[str, np.ndarray] = {}
 _hw_features_cache: dict[str, np.ndarray] = {}
 _num_physical_cache: dict[str, int] = {}
+_grama_W_cache: dict[str, np.ndarray] = {}
+_grama_sq_costs_cache: dict[str, dict[str, np.ndarray]] = {}
 
 
 def _get_hardware_graph(backend_name: str) -> Data:
@@ -155,6 +169,35 @@ def _get_hw_node_features(backend_name: str) -> np.ndarray:
             backend = get_backend(backend_name)
             _hw_features_cache[backend_name] = get_hw_node_features(backend)
     return _hw_features_cache[backend_name]
+
+
+def _get_grama_W(backend_name: str) -> np.ndarray:
+    """Get GraMA weighted-distance matrix W, using cache.
+
+    W is built once per backend (Floyd-Warshall on -log(1-eps) edge weights).
+    """
+    if backend_name not in _grama_W_cache:
+        if is_synthetic_backend(backend_name):
+            _grama_W_cache[backend_name] = precompute_grama_W_synthetic(backend_name)
+        else:
+            backend = get_backend(backend_name)
+            _grama_W_cache[backend_name] = precompute_grama_W(backend)
+    return _grama_W_cache[backend_name]
+
+
+def _get_grama_sq_costs(backend_name: str) -> dict[str, np.ndarray]:
+    """Get GraMA raw single-qubit cost vectors (s_read, s_gate), using cache."""
+    if backend_name not in _grama_sq_costs_cache:
+        if is_synthetic_backend(backend_name):
+            _grama_sq_costs_cache[backend_name] = (
+                precompute_grama_single_qubit_costs_synthetic(backend_name)
+            )
+        else:
+            backend = get_backend(backend_name)
+            _grama_sq_costs_cache[backend_name] = (
+                precompute_grama_single_qubit_costs(backend)
+            )
+    return _grama_sq_costs_cache[backend_name]
 
 
 # ---------------------------------------------------------------------------
@@ -251,11 +294,27 @@ class LazyMappingDataset(Dataset):
         circuit_edge_pairs = cache_data.get("circuit_edge_pairs", [])
         circuit_edge_weights = cache_data.get("circuit_edge_weights", [])
         qubit_importance = cache_data.get("qubit_importance")
+        grama_W = None
+        grama_s_read = None
+        grama_s_gate = None
+        grama_g_single = None
 
         if meta.include_stage2_fields:
             d_error = _get_error_distance(meta.backend_name)
             d_hw = _get_hop_distance(meta.backend_name)
             hw_feats = _get_hw_node_features(meta.backend_name)
+            grama_W = _get_grama_W(meta.backend_name)
+            sq = _get_grama_sq_costs(meta.backend_name)
+            grama_s_read = sq["s_read"]
+            grama_s_gate = sq["s_gate"]
+            # g vector: per-logical 1Q gate count = total gate count - 2Q gate count
+            nfd = cache_data.get("node_features_dict")
+            if nfd is not None and "gate_count" in nfd and "two_qubit_gate_count" in nfd:
+                gc = np.asarray(nfd["gate_count"], dtype=np.float32)
+                tqc = np.asarray(nfd["two_qubit_gate_count"], dtype=np.float32)
+                grama_g_single = np.maximum(gc - tqc, 0.0).astype(np.float32)
+            else:
+                grama_g_single = np.zeros(meta.num_logical, dtype=np.float32)
 
         return MappingSample(
             circuit_graph=circuit_graph,
@@ -271,6 +330,10 @@ class LazyMappingDataset(Dataset):
             circuit_edge_pairs=circuit_edge_pairs,
             circuit_edge_weights=circuit_edge_weights,
             qubit_importance=qubit_importance,
+            grama_W=grama_W,
+            grama_s_read=grama_s_read,
+            grama_s_gate=grama_s_gate,
+            grama_g_single=grama_g_single,
         )
 
     @property
@@ -495,6 +558,16 @@ def collate_mapping_samples(
         result["qubit_importance"] = torch.tensor(
             s0.qubit_importance, dtype=torch.float32,
         )
+
+    # GraMA fields (per-backend W/s_read/s_gate from s0; per-circuit g_single from s0)
+    if s0.grama_W is not None:
+        result["grama_W"] = torch.tensor(s0.grama_W, dtype=torch.float32)
+    if s0.grama_s_read is not None:
+        result["grama_s_read"] = torch.tensor(s0.grama_s_read, dtype=torch.float32)
+    if s0.grama_s_gate is not None:
+        result["grama_s_gate"] = torch.tensor(s0.grama_s_gate, dtype=torch.float32)
+    if s0.grama_g_single is not None:
+        result["grama_g_single"] = torch.tensor(s0.grama_g_single, dtype=torch.float32)
 
     return result
 
@@ -764,16 +837,28 @@ def _load_split_eager(
         qubit_importance = None
         circuit_edge_pairs = []
         circuit_edge_weights = []
+        grama_W = None
+        grama_s_read = None
+        grama_s_gate = None
+        grama_g_single = None
         if include_stage2_fields:
             d_error = _get_error_distance(backend_name)
             d_hw = _get_hop_distance(backend_name)
             hw_feats = _get_hw_node_features(backend_name)
             feats = extract_circuit_features(circuit)
-            qi = np.array(feats["node_features_dict"]["two_qubit_gate_count"])
+            nfd = feats["node_features_dict"]
+            qi = np.array(nfd["two_qubit_gate_count"])
             qi_sum = qi.sum()
             qubit_importance = qi / qi_sum if qi_sum > 0 else np.ones(num_logical) / num_logical
             circuit_edge_pairs = feats["edge_list"]
             circuit_edge_weights = feats["edge_features"][:, 0].tolist()
+            grama_W = _get_grama_W(backend_name)
+            sq = _get_grama_sq_costs(backend_name)
+            grama_s_read = sq["s_read"]
+            grama_s_gate = sq["s_gate"]
+            gc = np.asarray(nfd["gate_count"], dtype=np.float32)
+            tqc = np.asarray(nfd["two_qubit_gate_count"], dtype=np.float32)
+            grama_g_single = np.maximum(gc - tqc, 0.0).astype(np.float32)
 
         sample = MappingSample(
             circuit_graph=circuit_graph,
@@ -789,6 +874,10 @@ def _load_split_eager(
             circuit_edge_pairs=circuit_edge_pairs,
             circuit_edge_weights=circuit_edge_weights,
             qubit_importance=qubit_importance,
+            grama_W=grama_W,
+            grama_s_read=grama_s_read,
+            grama_s_gate=grama_s_gate,
+            grama_g_single=grama_g_single,
         )
         dataset.add_sample(sample)
         loaded += 1

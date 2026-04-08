@@ -427,6 +427,14 @@ class Stage2Trainer:
                 loss_kwargs["d_hw"] = batch["d_hw"].to(self.device)
             if "d_error" in batch:
                 loss_kwargs["d_error"] = batch["d_error"].to(self.device)
+            if "grama_W" in batch:
+                loss_kwargs["grama_W"] = batch["grama_W"].to(self.device)
+            if "grama_s_read" in batch:
+                loss_kwargs["grama_s_read"] = batch["grama_s_read"].to(self.device)
+            if "grama_s_gate" in batch:
+                loss_kwargs["grama_s_gate"] = batch["grama_s_gate"].to(self.device)
+            if "grama_g_single" in batch:
+                loss_kwargs["grama_g_single"] = batch["grama_g_single"].to(self.device)
 
             losses = self.criterion(P, **loss_kwargs)
 
@@ -518,6 +526,14 @@ class Stage2Trainer:
                 loss_kwargs["d_hw"] = batch["d_hw"].to(self.device)
             if "d_error" in batch:
                 loss_kwargs["d_error"] = batch["d_error"].to(self.device)
+            if "grama_W" in batch:
+                loss_kwargs["grama_W"] = batch["grama_W"].to(self.device)
+            if "grama_s_read" in batch:
+                loss_kwargs["grama_s_read"] = batch["grama_s_read"].to(self.device)
+            if "grama_s_gate" in batch:
+                loss_kwargs["grama_s_gate"] = batch["grama_s_gate"].to(self.device)
+            if "grama_g_single" in batch:
+                loss_kwargs["grama_g_single"] = batch["grama_g_single"].to(self.device)
 
             losses = self.criterion(P, **loss_kwargs)
 
