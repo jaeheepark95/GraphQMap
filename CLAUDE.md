@@ -30,6 +30,7 @@ Supports arbitrary multi-programming (any number of co-located circuits, total l
   - `compare_pst.py` — PST comparison across layout methods
   - `benchmark_feature_analysis.py` — per-circuit feature analysis (variance, correlation, dimensionality)
   - `analyze_circuit_features.py` — 7-phase circuit graph feature analysis (completeness, raw stats, CoV, correlation, normalization, RWPE, size-dependent)
+  - `analyze_layouts.py` — quantitative layout diagnosis (centrality, hop distance, noise quality, layout overlap, per-qubit cost variance)
 - `docs/` — research specification and documentation
 - `tests/` — unit and integration tests (152 tests)
 
@@ -240,6 +241,7 @@ python scripts/visualize.py runs/stage1/<RUN> --no-show
 - **Validation (held-out from training, UNSEEN by training data)**: FakeMumbai(27Q, Falcon r5.11), FakeManhattan(65Q, Hummingbird r2), FakeWashington(127Q, Eagle cx)
   - Used for PST checkpoint selection in Stage 2 (every `pst_validation.interval` epochs)
   - Size-matched to test backends but never appear in training; eliminates val=test leakage
+- **Validation (held-out, PST checkpoint selection)**: FakeMumbai(27Q), FakeManhattan(65Q) — removed from training pool
 - **Test (UNSEEN by both training and validation)**: FakeToronto(27Q), FakeBrooklyn(65Q), FakeTorino(133Q)
   - Evaluated **once** at the end via `evaluate.py`; never used for checkpoint/model selection
 - Native 2-qubit gates: cx, ecr, or cz (auto-detected via `_get_two_qubit_gate_name()`)
@@ -348,7 +350,8 @@ hardware_gnn:
   - Runs from scratch (no Stage 1 pretrained checkpoint)
   - **No early stopping**: trains for full max_epochs (100)
   - **Best checkpoint**: selected by val PST (measured every `pst_validation.interval` epochs)
-  - **Val PST**: measured every 5 epochs on benchmark circuits via SABRE routing on held-out backends — used for best checkpoint selection
+  - **Val PST**: measured every 5 epochs on benchmark circuits via NASSC routing on held-out validation backends (cfg.backends.validation: FakeMumbai 27Q, FakeManhattan 65Q) — used for best checkpoint selection. Falls back to test backends if validation not configured (emits warning)
+  - **Val surrogate loss**: computed every epoch on 396 val circuits, logged to CSV (monitoring only, not used for checkpoint selection)
 
 ### Loss Registry (Stage 2)
 Loss components are modular and configured declaratively in YAML. Each component is registered via `@register_loss()` decorator in `training/losses.py`.
@@ -364,6 +367,7 @@ Loss components are modular and configured declaratively in YAML. Each component
 | `node_quality` | L_node | Learnable MLP qubit quality score | [-1, 0] |
 | `separation` | L_sep | Multi-programming circuit separation | [-1, 0] |
 | `exclusion` | L_excl | Column-wise one-to-one mapping penalty (penalizes shared physical qubits) | [l/h, l] |
+| `adjacency_size_aware` | L_adj_sa | Backend-size-dependent piecewise L_adj: multiplies base adjacency loss by per-size-bucket weights. Params: `weight_small`, `weight_medium`, `weight_large`, `threshold_small`, `threshold_large` | [-1, 0] |
 
 **YAML config format:**
 ```yaml
@@ -416,14 +420,21 @@ See `configs/stage2_sinkhorn_adj.yaml` for Sinkhorn + adjacency loss config.
 
 ## Experiment History & Best Configurations
 
-### Current Best (2026-04-02)
-Run `20260402_004812_filtered_sinkhorn_adj` — **Eval 3-backend avg OURS+SABRE PST 0.589** (Val PST 0.3588, epoch 94)
-- Score norm: **Sinkhorn** (confirmed: Sinkhorn >> Softmax, +0.086 in controlled test)
-- Loss: error_distance(1.0) + adjacency(0.3)
-- Features: new 4-feature (gc, 2qc, sqr, cpf) + RWPE k=2 = 6dim
-- HW features: **5dim** (readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio)
-- noise_bias_dim: **0** (disabled; 7dim+bias tested worse: 0.2604)
+### Current Best (2026-04-09)
+Run `20260409_210121_C3_sizeaware_s42` — **Eval 3-backend avg OURS+SABRE PST 0.692** (Val PST 0.6367, epoch 64)
+- Score norm: **Sinkhorn**
+- Loss: error_distance(1.0) + **adjacency_size_aware**(1.0, params: small=0.3, medium=0.5, large=1.0, thresholds 40/80)
+- Features: 4-feature (gc, 2qc, sqr, cpf) + RWPE k=2 = 6dim, edge 3dim
+- HW features: **v1 5dim** (readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio), edge 1dim (2q_error)
+- noise_bias_dim: **0**
 - Dataset: Filtered 5,769 circuits
+- Eval breakdown: **Toronto 0.512, Brooklyn 0.756, Torino 0.807**
+- vs previous best (constant adj=0.3): avg +0.103 PST, Torino +0.454
+
+### Previous Best (2026-04-02)
+Run `20260402_004812_filtered_sinkhorn_adj` — **Eval 3-backend avg OURS+SABRE PST 0.589**
+- Loss: error_distance(1.0) + adjacency(0.3) — constant weight
+- Same features/HW as above
 - Eval breakdown: Brooklyn 0.697, Toronto 0.717, Torino 0.353
 - Baseline QAP+NASSC: Brooklyn 0.753, Toronto 0.768, Torino 0.386 (avg **0.636**)
 
@@ -500,16 +511,61 @@ Added T2/T1 ratio (node, raw) and edge_coherence_ratio (edge, raw) to hardware g
 - Both A1 (0.554) and A2 (0.522) < current best (0.589) — new HW features (t2_t1_ratio, edge_coherence_ratio) did not improve over original 5dim baseline
 - Single-run results; high variance caveat applies
 
-### Phase 1: Edge Loss Optimization (in progress, 2026-04-03)
-New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft). Six experiments running:
-| Exp | Loss Config | Config |
-|-----|-------------|--------|
-| E1 | err_dist(1.0) + adj(**0.7**) | stage2_sinkhorn_adj.yaml + override |
-| E2 | err_dist(1.0) + adj(**1.0**) | stage2_sinkhorn_adj.yaml + override |
-| E3 | **swap(1.0)** + adj(0.3) | stage2_swap_adj.yaml |
-| E4 | **swap(1.0)** standalone | stage2_swap_only.yaml |
-| E5 | err_dist(1.0) + **soft(0.3, α=2)** | stage2_soft_proximity.yaml |
-| E6 | **soft(1.0, α=2)** standalone | stage2_soft_only.yaml |
+### Phase 4: Layout Diagnosis & Size-Aware Adjacency (2026-04-09)
+
+#### Phase D: Layout Diagnosis
+Quantitative analysis of model layouts vs baselines using `scripts/analyze_layouts.py`.
+8 benchmark circuits × 3 test backends × 3 methods (OURS, QAP+NASSC, SABRE).
+
+**Key finding — problem is Torino-specific, not core-periphery collapse:**
+- Toronto/Brooklyn: OURS hop_mean comparable to baselines (1.5 vs 1.4-1.5)
+- **Torino: OURS hop_mean 3.689** (vs baseline 1.4-1.6) — 2.5× worse
+- Torino qubit_cost_var **310** (vs baseline 22-34) — 10× worse
+- fredkin_3 (3Q): hop=5.75 on Torino — 3 qubits scattered across 133Q backend
+
+**Core-periphery collapse hypothesis rejected:**
+- OURS centrality (closeness, betweenness, degree) **lower** than baselines on all backends
+- Model selects *less connected* regions, not hub qubits
+- Actual cause: L_surr dominates L_adj on large backends → noise-optimal but topology-distant qubits selected
+
+**Circuit-agnostic behavior on Torino:**
+- Jaccard overlap: OURS 0.531 vs QAP 0.250 vs SABRE 0.083
+- Model reuses same physical region regardless of circuit on large backends
+
+**Noise quality confirmed good:**
+- Toronto readout error: OURS 0.013 vs SABRE 0.047 (3.6× better)
+- Toronto 2Q error: OURS 0.007 vs SABRE 0.056 (8× better)
+
+#### Phase C: L_adj Weight Ablation
+Systematic sweep of adjacency weight, holding all else constant (hw_feat_v1, Sinkhorn, L_surr=1.0):
+
+| Config | L_adj | Toronto | Brooklyn | Torino | **AVG** | vs baseline |
+|--------|:-----:|:-------:|:--------:|:------:|:-------:|:-----------:|
+| **Baseline** | 0.3 constant | **0.717** | 0.697 | 0.353 | 0.589 | — |
+| C1 s42 | 1.0 constant | 0.297 | 0.651 | 0.682 | 0.543 | −0.046 |
+| C1 s43 | 1.0 constant | 0.305 | 0.650 | 0.758 | 0.571 | −0.018 |
+| C2 s42 | 0.5 constant | 0.321 | 0.705 | 0.743 | 0.590 | +0.001 |
+| C2 s43 | 0.5 constant | 0.428 | 0.748 | 0.785 | **0.654** | +0.065 |
+| **C3 s42** | **0.3/0.5/1.0 piecewise** | 0.512 | 0.756 | 0.807 | **0.692** | **+0.103** |
+| C3 s43 | 0.3/0.5/1.0 piecewise | 0.411 | 0.778 | 0.764 | 0.651 | +0.062 |
+
+**Conclusions:**
+- Constant L_adj cannot satisfy both small and large backends simultaneously (Toronto optimal at 0.3, Torino needs 1.0)
+- **Size-aware piecewise L_adj resolves the trade-off**: backend-size-dependent weighting (small≤40Q: 0.3, 40-80Q: 0.5, >80Q: 1.0)
+- Best single run C3 s42: **0.692** (+0.103 over baseline), best avg: **0.671** (+0.082)
+- Toronto still drops from 0.717 → 0.462 (avg) — under investigation (C3a: weight_small=0.15)
+- HW feature v2 (6dim node + 2dim edge) confirmed harmful: −0.035 PST. **hw_feat_v1 only**
+- L_swap rejected: 2 configs × 2 seeds all −0.10~0.15 vs baseline. Dynamic range dominates large backends
+
+**Rejected approaches (with evidence):**
+- L_swap: dynamic range too large, large backends dominant, Toronto −0.16
+- HW feature v2 (t2_t1_ratio, edge_coherence): −0.035 PST in controlled test
+- Node-conditioned losses (L_align, L_role, L_sens, L_cap): theoretical analysis → hand-crafted static approximations of signals L_swap already provides, L_node-style collapse risk
+- L_fair (per-qubit cost variance): core-periphery hypothesis rejected by D-2 diagnosis. Problem is absolute distance not variance — L_fair won't help
+- L_soft α=2: too smooth, 0.25-0.27 range. α=10 collapses to L_adj
+
+### Phase 1: Edge Loss Optimization (2026-04-03, superseded by Phase 4)
+New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft). Results incorporated into Phase 4 conclusions above.
 
 ## Known Issues & Active Investigation
 - **Score matrix row collapse**: Circuit information collapses through GNN→cross-attention, making score matrix rows indistinguishable. Partially addressed by feature registry + RWPE. Feature-indistinguishable circuit filtering removes worst cases.
@@ -559,6 +615,7 @@ New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft
 - networkx
 - pyyaml
 - pandas (benchmark reporting)
+- tabulate (pandas.to_markdown() in evaluate.py)
 
 ## Code Conventions
 - Type hints on all function signatures

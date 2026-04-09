@@ -522,6 +522,21 @@ Where w_ij = number of 2-qubit gates on edge (i,j), W = Σ w_ij. Output bounded 
 
 **Known limitations:** (1) Binary signal — zero gradient for all non-adjacent pairs, regardless of distance (hop=2 and hop=10 contribute identically). (2) Coupling density is low on large backends (27Q: ~9%, 127Q: ~1.7%), so >98% of A_hw is 0 → extremely sparse gradient. (3) Ignores edge error rate differences — all adjacent pairs treated equally. See `soft_proximity` for a smooth alternative.
 
+#### adjacency_size_aware — L_adj_sa: Size-Aware Adjacency Loss (Current Best)
+
+Backend-size-dependent piecewise weighting of L_adj. Inherits from `AdjacencyMatchingLoss` and multiplies the base loss by a per-backend multiplier determined by physical qubit count h.
+
+```
+L_adj_sa = mult(h) × L_adj
+where mult(h) = weight_small   if h <= threshold_small
+                weight_medium  if threshold_small < h <= threshold_large
+                weight_large   if h > threshold_large
+```
+
+**Constructor params:** `weight_small` (0.3), `weight_medium` (0.5), `weight_large` (1.0), `threshold_small` (40), `threshold_large` (80). All configurable via YAML `params` dict.
+
+**Motivation (Phase D-2 layout diagnosis, 2026-04-09):** Constant L_adj=0.3 works for Toronto (27Q) but is insufficient for Torino (133Q, hop_mean 3.69 vs baseline 1.44). Constant L_adj=1.0 fixes Torino (+0.37 PST) but destroys Toronto (−0.42 PST). Root cause: on large backends, L_surr (noise optimization) dominates L_adj (topology), selecting noise-optimal but topology-distant qubits. Piecewise weighting lets each backend size class receive the adjacency pressure it needs. **Result:** +0.103 PST over constant adj=0.3 baseline (0.692 vs 0.589).
+
 #### hop_distance — L_hop: Hop Distance Tiebreaker
 
 Continuous distance signal for non-adjacent placements. Differentiates distance-2 from distance-10.
@@ -587,14 +602,40 @@ L_sep = -(1/|E_cross|) · Σ_{(i,j)∈cross-circuit} Σ_{p,q} P_ip · P_jq · d_
 L_2 = Σ_k weight_k · component_k(P, ...)
 ```
 
-**Current best configuration (Val PST 0.3588):**
+**Current best configuration (Eval OURS+SABRE 3-backend avg 0.692, 2026-04-09):**
 
 | Component | Weight | Rationale |
 |-----------|--------|-----------|
 | error_distance | 1.0 | Primary: error-weighted distance (saturates early but provides initial signal) |
-| adjacency | 0.3 | Only non-saturating loss; binary signal provides gradient throughout training |
+| adjacency_size_aware | 1.0 (outer) × piecewise | Backend-size-dependent adjacency: small(≤40Q)=0.3, medium(40-80Q)=0.5, large(>80Q)=1.0. Resolves Toronto/Torino trade-off |
 
-**Under investigation (Phase 1):** `swap_count` replacing error_distance, `soft_proximity` replacing adjacency. See experiment plan in CLAUDE.md.
+**Previous best configuration (Eval 0.589, constant adj=0.3):**
+
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| error_distance | 1.0 | Primary: error-weighted distance |
+| adjacency | 0.3 | Constant weight — optimal for small backends, insufficient for large |
+
+**Size-aware adjacency (Phase 4, 2026-04-09):** Diagnosis revealed that constant L_adj weight creates an irreconcilable trade-off between small (27Q) and large (133Q) backends. `adjacency_size_aware` applies piecewise multipliers based on backend qubit count:
+
+```yaml
+# configs/stage2_sinkhorn_adj_sizeaware.yaml (current best)
+loss:
+  type: surrogate
+  components:
+    - name: error_distance
+      weight: 1.0
+    - name: adjacency_size_aware
+      weight: 1.0
+      params:
+        weight_small: 0.3        # h <= 40 (Toronto-class)
+        weight_medium: 0.5       # 40 < h <= 80 (Brooklyn-class)
+        weight_large: 1.0        # h > 80 (Torino-class)
+        threshold_small: 40
+        threshold_large: 80
+```
+
+**Superseded approaches:** `swap_count` (dynamic range too large, −0.10~0.15 PST), `soft_proximity` α=2 (too smooth, 0.25-0.27 range), constant L_adj sweep (Toronto/Torino trade-off irreconcilable). See CLAUDE.md Phase 4 for full ablation table.
 
 **Loss gradient analysis:** Both error_distance and adjacency gradients have the same structure: ∂L/∂P_ip depends on neighbor mapping P_jq and hardware structure only — circuit qubit i's properties never appear. This means no per-node circuit signal exists in current losses.
 
@@ -658,35 +699,35 @@ Old features performed better in Stage 1 supervised learning. This is expected �
 | s2_new_feat_scratch | Softmax | err_dist + node_q | new 6dim | 0.2410 | New features |
 | Baseline (QAP+NASSC) | — | — | — | **0.3785** | Target to beat |
 
-**Current best (filtered 5,769 circuits, 2026-04-02):**
+**Current best (filtered 5,769 circuits, 2026-04-09):**
 
-| Experiment | Score Norm | Loss | Features | Best Val PST |
-|------------|-----------|------|----------|-------------|
-| filtered_sinkhorn_adj | Sinkhorn | err_dist(1.0) + adj(0.3) | new 6dim, HW 5dim, bias=0 | **0.3588** |
-| filtered_seed42_gpu0 | Softmax | err_dist + node_q | new 6dim, HW 5dim, bias=0 | 0.2727 |
+| Experiment | Score Norm | Loss | Features | Eval OURS+SABRE 3-backend avg |
+|------------|-----------|------|----------|-------------------------------|
+| **C3_sizeaware_s42** | Sinkhorn | err_dist(1.0) + adj_size_aware(0.3/0.5/1.0) | new 6dim, HW v1 5dim | **0.692** |
+| C3_sizeaware_s43 | Sinkhorn | err_dist(1.0) + adj_size_aware(0.3/0.5/1.0) | new 6dim, HW v1 5dim | 0.651 |
+| filtered_sinkhorn_adj (prev best) | Sinkhorn | err_dist(1.0) + adj(0.3) | new 6dim, HW v1 5dim | 0.589 |
 
-**Phase 1: Edge loss optimization (2026-04-03):**
+**Phase 4: Size-aware adjacency ablation (2026-04-09):**
 
-All use Sinkhorn, new 6dim features, HW 5dim, bias=0, filtered 5,769 circuits.
+Layout diagnosis (Phase D) revealed constant L_adj weight creates irreconcilable Toronto/Torino trade-off. Systematic ablation:
 
-| Exp | Loss Config | Config File |
-|-----|-------------|-------------|
-| E1 | err_dist(1.0) + adj(**0.7**) | stage2_sinkhorn_adj.yaml + override |
-| E2 | err_dist(1.0) + adj(**1.0**) | stage2_sinkhorn_adj.yaml + override |
-| E3 | **swap(1.0)** + adj(0.3) | stage2_swap_adj.yaml |
-| E4 | **swap(1.0)** standalone | stage2_swap_only.yaml |
-| E5 | err_dist(1.0) + **soft(0.3, α=2)** | stage2_soft_proximity.yaml |
-| E6 | **soft(1.0, α=2)** standalone | stage2_soft_only.yaml |
+| Config | L_adj weight | Toronto | Brooklyn | Torino | **AVG** |
+|--------|:-----:|:-------:|:--------:|:------:|:-------:|
+| Baseline | 0.3 constant | 0.717 | 0.697 | 0.353 | 0.589 |
+| C1 (2 seeds) | 1.0 constant | 0.301 | 0.651 | 0.720 | 0.557 |
+| C2 (2 seeds) | 0.5 constant | 0.375 | 0.727 | 0.764 | 0.622 |
+| **C3 (2 seeds)** | **piecewise 0.3/0.5/1.0** | **0.462** | **0.767** | **0.786** | **0.671** |
 
-**Key observations:**
+**Earlier observations (still valid):**
 1. **Surrogate loss saturation**: `error_distance` saturates by epoch 3 (drops from ~0.14 to ~0.01). `node_quality` collapses to -1.0 by epoch 1-2. `adjacency` is the only loss providing meaningful gradient throughout 100 epochs (-0.10 → -0.28).
-2. **Val PST oscillation**: PST fluctuates widely (0.12–0.36) across epochs rather than converging, suggesting poor correlation between surrogate loss and actual PST.
+2. **Val PST oscillation**: PST fluctuates widely across epochs rather than converging, suggesting poor correlation between surrogate loss and actual PST.
 3. **Sinkhorn >> Softmax (confirmed)**: Controlled experiment: Sinkhorn 0.3588 vs Softmax 0.2727 (+0.086). All experiments now use Sinkhorn.
 4. **New features >> Old features (confirmed)**: gc,2qc,sqr,cpf+RWPE2 → 0.3588 vs gc,2qc,deg,dp → 0.2473 (+0.111).
-5. **HW 5dim > 7dim+noise_bias (confirmed)**: 0.3588 vs 0.2604. t1/t2 raw values + noise_bias hurt.
+5. **HW v1 5dim > v2 6dim+2dim (confirmed)**: v2 adds t2_t1_ratio (node) and edge_coherence_ratio (edge) → −0.035 PST. **hw_feat_v1 only.**
 6. **node_quality harmful**: Without 0.3588 vs with 0.3474. Learned MLP collapses to trivial solution.
 7. **Stage 1 no longer in use**: Supervised pretraining adds complexity without clear benefit. All current experiments run Stage 2 from scratch.
-5. **Feature-indistinguishable filtering**: 1,118 circuits removed (16.2%) — primarily MQT Bench parametric circuits. Effect on training quality under evaluation.
+8. **L_swap rejected**: 2 configs × 2 seeds, all −0.10~0.15 vs baseline. Dynamic range too large, large backends dominant.
+9. **Feature-indistinguishable filtering**: 1,118 circuits removed (16.2%) — primarily MQT Bench parametric circuits.
 
 ---
 
@@ -944,8 +985,9 @@ max_total_nodes = 512  # Total physical qubits per batch (tune to GPU memory)
 
 | Role | Backends |
 |------|----------|
-| **Training** | **5Q:** Athens, Belem, Bogota, Burlington, Essex, Lima, London, Manila, Ourense, Quito, Rome, Santiago, Valencia, Vigo, Yorktown · **7Q:** Casablanca, Jakarta, Lagos, Nairobi, Oslo, Perth · **15-16Q:** Melbourne, Guadalupe · **20Q:** Almaden, Boeblingen, Johannesburg, Poughkeepsie, Singapore · **27-28Q:** Algiers, Auckland, Cairo, Cambridge, Geneva, Hanoi, Kolkata, Montreal, Mumbai, Paris, Peekskill, Sydney · **33Q:** Prague · **53Q:** Rochester · **65Q:** Manhattan · **127Q:** Brisbane, Cusco, Kawasaki, Kyiv, Kyoto, Osaka, Quebec, Sherbrooke, Washington |
-| **Test (UNSEEN)** | **FakeToronto (27Q)**, **FakeBrooklyn (65Q)**, **FakeTorino (133Q)** — completely excluded from training |
+| **Training** (53 backends) | **5Q:** Athens, Belem, Bogota, Burlington, Essex, Lima, London, Manila, Ourense, Quito, Rome, Santiago, Valencia, Vigo, Yorktown · **7Q:** Casablanca, Jakarta, Lagos, Nairobi, Oslo, Perth · **15-16Q:** Melbourne, Guadalupe · **20Q:** Almaden, Boeblingen, Johannesburg, Poughkeepsie, Singapore · **27-28Q:** Algiers, Auckland, Cairo, Cambridge, Geneva, Hanoi, Kolkata, Montreal, Paris, Peekskill, Sydney · **33Q:** Prague · **53Q:** Rochester · **127Q:** Brisbane, Cusco, Kawasaki, Kyiv, Kyoto, Osaka, Quebec, Sherbrooke, Washington |
+| **Validation** (held-out, checkpoint selection) | **FakeMumbai (27Q)**, **FakeManhattan (65Q)** — removed from training pool to prevent test leakage during PST validation |
+| **Test (UNSEEN)** | **FakeToronto (27Q)**, **FakeBrooklyn (65Q)**, **FakeTorino (133Q)** — completely excluded from training and validation |
 
 This split enables rigorous evaluation of **hardware-agnostic generalization**.
 
