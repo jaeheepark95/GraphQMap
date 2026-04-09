@@ -23,6 +23,7 @@ scipy==1.14.1
 pandas==2.3.3
 PyYAML==6.0.3
 networkx==3.3
+tabulate==0.10.0  # required by pandas.DataFrame.to_markdown() in evaluate.py
 
 # Visualization
 matplotlib==3.9.2
