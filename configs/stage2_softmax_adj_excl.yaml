@@ -146,13 +146,11 @@ backends:
     - FakeHanoi
     - FakeKolkata
     - FakeMontreal
-    - FakeMumbai
     - FakeParis
     - FakePeekskill
     - FakeSydney
     - FakePrague
     - FakeRochester
-    - FakeManhattan
     - FakeBrisbane
     - FakeCusco
     - FakeKawasaki
@@ -162,6 +160,9 @@ backends:
     - FakeQuebec
     - FakeSherbrooke
     - FakeWashington
+  validation:
+    - FakeMumbai             # 27Q
+    - FakeManhattan          # 65Q
   test:
     - FakeToronto
     - FakeBrooklyn

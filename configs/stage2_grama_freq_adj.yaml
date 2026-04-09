@@ -185,12 +185,10 @@ backends:
     - FakeOsaka
     - FakeQuebec
     - FakeSherbrooke
-    - FakeWashington         # 127Q — moved back to training (qiskit-aer-gpu segfault on PST val)
+    - FakeWashington
   validation:
     - FakeMumbai             # 27Q
     - FakeManhattan          # 65Q
-    # FakeWashington removed from validation: recurring qiskit-aer-gpu segfault
-    # during PST measurement on 127Q deep circuits caused training crashes.
   test:
     - FakeToronto
     - FakeBrooklyn

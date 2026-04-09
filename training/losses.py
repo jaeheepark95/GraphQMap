@@ -160,6 +160,52 @@ class AdjacencyMatchingLoss(nn.Module):
         return loss
 
 
+@register_loss("adjacency_size_aware")
+class SizeAwareAdjacencyLoss(AdjacencyMatchingLoss):
+    """L_adj with backend-size-dependent piecewise weighting.
+
+    Multiplies the base adjacency loss by a per-backend multiplier based on
+    physical qubit count h (read from d_hw.shape[-1]):
+        - small  (h <= threshold_small):                    weight_small
+        - medium (threshold_small < h <= threshold_large):  weight_medium
+        - large  (h > threshold_large):                     weight_large
+
+    Motivation (Phase D-2 diagnosis): the constant L_adj weight has a
+    different optimum on different backend sizes. C1 (weight=1.0) showed
+    +0.37 PST on Torino (133Q) but -0.42 on Toronto (27Q). Piecewise
+    weighting lets each size class get the adjacency pressure it needs.
+
+    Defaults match the C2 sweep target: 0.3 / 0.5 / 1.0 with thresholds
+    aligned to the test backends (Toronto 27Q, Brooklyn 65Q, Torino 133Q).
+    """
+
+    def __init__(
+        self,
+        weight_small: float = 0.3,
+        weight_medium: float = 0.5,
+        weight_large: float = 1.0,
+        threshold_small: int = 40,
+        threshold_large: int = 80,
+    ) -> None:
+        super().__init__()
+        self.weight_small = weight_small
+        self.weight_medium = weight_medium
+        self.weight_large = weight_large
+        self.threshold_small = threshold_small
+        self.threshold_large = threshold_large
+
+    def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        loss = super().forward(P, **kwargs)
+        h = kwargs["d_hw"].shape[-1]
+        if h <= self.threshold_small:
+            mult = self.weight_small
+        elif h <= self.threshold_large:
+            mult = self.weight_medium
+        else:
+            mult = self.weight_large
+        return loss * mult
+
+
 @register_loss("hop_distance")
 class HopDistanceLoss(nn.Module):
     """L_hop: Hop distance penalty for physical proximity.

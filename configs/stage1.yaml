@@ -166,7 +166,8 @@ backends:
     - FakeOsaka
     - FakeQuebec
     - FakeSherbrooke
-    # Held-out: Mumbai (27Q), Manhattan (65Q), Washington (127Q) → validation
+    - FakeWashington
+    # Held-out: Mumbai (27Q), Manhattan (65Q) → validation
     # Synthetic backends (QUEKO + MLQD)
     - queko_aspen4           # 16Q
     - queko_tokyo            # 20Q
@@ -175,10 +176,8 @@ backends:
     - mlqd_grid5x5           # 25Q
   validation:
     # Held-out from training pool for unbiased PST checkpoint selection.
-    # Size-matched to test backends; never seen in training data.
     - FakeMumbai             # 27Q,  Falcon r5.11 — Toronto match
     - FakeManhattan          # 65Q,  Hummingbird r2 — Brooklyn match
-    - FakeWashington         # 127Q, Eagle (cx) — Torino size match
   test:
     - FakeToronto            # 27Q
     - FakeBrooklyn           # 65Q
