@@ -13,6 +13,12 @@ references/
 # Training outputs
 runs/
 
+# Shell-redirected run logs (user-created, not project-generated)
+logs_*.out
+
+# Data archive (used to transfer data/circuits/ between servers)
+circuits.tar.gz
+
 # Claude Code memory
 memory/
 
