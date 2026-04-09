@@ -170,7 +170,8 @@ backends:
     # 53Q
     - FakeRochester
     # 65Q (Manhattan held out → validation)
-    # 127Q (Washington held out → validation)
+    # 127Q
+    - FakeWashington
     - FakeBrisbane
     - FakeCusco
     - FakeKawasaki
@@ -184,6 +185,7 @@ backends:
     # Held-out from training pool — used for PST checkpoint selection.
     - FakeMumbai             # 27Q,  Falcon r5.11 — Toronto match
     - FakeManhattan          # 65Q,  Hummingbird r2 — Brooklyn match
+    # FakeWashington removed: 127Q PST val crashes qiskit-aer-gpu
   test:
     # Final eval only — never seen during training or model selection.
     - FakeToronto            # 27Q
@@ -191,7 +193,7 @@ backends:
     - FakeTorino             # 133Q
 
 # ---- Misc ----
-seed: 42
+seed: 43
 device: cuda
 num_workers: 4
 log_dir: logs/stage2
