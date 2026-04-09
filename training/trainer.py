@@ -358,7 +358,7 @@ class Stage2Trainer:
         self.metrics_path = self.checkpoint_dir.parent / "metrics.csv"
         with open(self.metrics_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["epoch", "tau", "lr", "l_total"] + self.loss_names + ["val_surrogate_loss", "val_pst"])
+            writer.writerow(["epoch", "tau", "lr", "l_total"] + self.loss_names + ["val_pst"])
 
     def _warmup_lr(self, epoch: int) -> None:
         """Apply linear warmup to learning rate."""
@@ -471,90 +471,11 @@ class Stage2Trainer:
 
         return avg
 
-    @torch.no_grad()
-    def validate_surrogate(
-        self,
-        val_loader: DataLoader,
-        epoch: int,
-    ) -> dict[str, float]:
-        """Compute surrogate loss on validation set.
-
-        Args:
-            val_loader: Validation DataLoader with Stage 2 fields.
-            epoch: Current epoch.
-
-        Returns:
-            Dict of average losses: total + per-component.
-        """
-        self.model.eval()
-        tau = self.tau_scheduler.get_tau(epoch)
-
-        accum: dict[str, float] = {"total": 0.0}
-        for name in self.loss_names:
-            accum[name] = 0.0
-        num_batches = 0
-
-        for batch in val_loader:
-            circuit_batch = batch["circuit_batch"].to(self.device)
-            hardware_batch = batch["hardware_batch"].to(self.device)
-            num_logical = batch["num_logical"][0]
-            num_physical = batch["num_physical"]
-            batch_size = batch["batch_size"]
-
-            hw_feats = batch.get("hw_node_features")
-            if hw_feats is not None:
-                hw_feats = hw_feats.to(self.device)
-
-            P = self.model(
-                circuit_batch, hardware_batch,
-                batch_size=batch_size,
-                num_logical=num_logical,
-                num_physical=num_physical,
-                tau=tau,
-                hw_node_features=hw_feats,
-            )
-
-            loss_kwargs: dict[str, Any] = {
-                "num_logical": num_logical,
-                "circuit_edge_pairs": batch["circuit_edge_pairs"],
-                "circuit_edge_weights": batch.get("circuit_edge_weights", []),
-                "qubit_importance": batch["qubit_importance"].to(self.device),
-                "hw_node_features": batch["hw_node_features"].to(self.device),
-                "cross_circuit_pairs": batch.get("cross_circuit_pairs", []),
-            }
-            if "d_hw" in batch:
-                loss_kwargs["d_hw"] = batch["d_hw"].to(self.device)
-            if "d_error" in batch:
-                loss_kwargs["d_error"] = batch["d_error"].to(self.device)
-            if "grama_W" in batch:
-                loss_kwargs["grama_W"] = batch["grama_W"].to(self.device)
-            if "grama_s_read" in batch:
-                loss_kwargs["grama_s_read"] = batch["grama_s_read"].to(self.device)
-            if "grama_s_gate" in batch:
-                loss_kwargs["grama_s_gate"] = batch["grama_s_gate"].to(self.device)
-            if "grama_g_single" in batch:
-                loss_kwargs["grama_g_single"] = batch["grama_g_single"].to(self.device)
-
-            losses = self.criterion(P, **loss_kwargs)
-
-            if torch.isnan(losses["total"]) or torch.isinf(losses["total"]):
-                continue
-
-            for k in accum:
-                if k in losses:
-                    accum[k] += losses[k].item()
-            num_batches += 1
-
-        self.model.train()
-        avg = {k: v / max(num_batches, 1) for k, v in accum.items()}
-        logger.info(f"Epoch {epoch} | Val Surrogate Loss={avg['total']:.6f}")
-        return avg
-
-    def _write_metrics_row(self, val_surrogate_loss: str = "", val_pst: str = "") -> None:
-        """Append the last training metrics row with optional val loss and PST."""
+    def _write_metrics_row(self, val_pst: str = "") -> None:
+        """Append the last training metrics row with optional PST."""
         with open(self.metrics_path, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(self._last_metrics + [val_surrogate_loss, val_pst])
+            writer.writerow(self._last_metrics + [val_pst])
 
     def save_checkpoint(self, epoch: int, tag: str = "best") -> Path:
         """Save model checkpoint."""
@@ -572,35 +493,22 @@ class Stage2Trainer:
     def run(
         self,
         train_loader: DataLoader,
-        val_loader: DataLoader | None = None,
         val_pst_fn: Any | None = None,
     ) -> None:
         """Run Stage 2 training.
 
         Args:
             train_loader: Training DataLoader.
-            val_loader: Optional validation DataLoader for surrogate loss
-                early stopping (lower is better).
             val_pst_fn: Optional callable(model, epoch) -> float that measures
-                actual validation PST. Used for monitoring only.
+                actual validation PST. Used for best checkpoint selection.
         """
         max_epochs = self.cfg.training.max_epochs
         pst_cfg = getattr(self.cfg.training, "pst_validation", None)
 
-        best_val_loss = float("inf")
         best_pst = -1.0
 
         for epoch in range(max_epochs):
             losses = self.train_epoch(train_loader, epoch)
-
-            # Validation surrogate loss (every epoch — cheap, monitoring only)
-            val_loss_str = ""
-            if val_loader is not None:
-                val_losses = self.validate_surrogate(val_loader, epoch)
-                val_total = val_losses["total"]
-                val_loss_str = f"{val_total:.6f}"
-                if val_total < best_val_loss:
-                    best_val_loss = val_total
 
             # PST validation at intervals — best checkpoint selected by PST
             pst_str = ""
@@ -613,8 +521,8 @@ class Stage2Trainer:
                     best_pst = pst
                     self.save_checkpoint(epoch, tag="best")
 
-            self._write_metrics_row(val_surrogate_loss=val_loss_str, val_pst=pst_str)
+            self._write_metrics_row(val_pst=pst_str)
 
         # Save final
         self.save_checkpoint(0, tag="final")
-        logger.info(f"Stage 2 complete. Best val loss={best_val_loss:.6f}, Best PST={best_pst:.4f}")
+        logger.info(f"Stage 2 complete. Best PST={best_pst:.4f}")

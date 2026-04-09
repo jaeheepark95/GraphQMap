@@ -610,12 +610,7 @@ L_2 = Σ_k weight_k · component_k(P, ...)
 |------------|-----------|---------|
 | MLQD + QUEKO → QUEKO-only | Validation CE loss early stopping | Patience 10 epochs; LR reduced to 1/10 |
 | Stage 1 → Stage 2 | Validation PST convergence | Measure actual PST every 5–10 epochs on 50–100 representative circuits (Hungarian → transpile → noise sim); stop when 3 consecutive measurements improve < 0.5% |
-| Stage 2 termination | No early stopping; train full max_epochs | Best checkpoint selected by val PST; val surrogate loss monitored but not used for selection |
-
-**Validation surrogate loss procedure (monitoring only):**
-1. Compute surrogate loss on 396 held-out val circuits every epoch
-2. Same loss components as training (e.g., error_distance + adjacency)
-3. Logged to metrics CSV for analysis; NOT used for checkpoint selection (saturates by epoch 4-13)
+| Stage 2 termination | No early stopping; train full max_epochs | Best checkpoint selected by val PST (measured every 5 epochs on held-out backends) |
 
 **Validation PST measurement procedure (used for best checkpoint selection):**
 1. Take P matrix from model
@@ -626,7 +621,7 @@ L_2 = Σ_k weight_k · component_k(P, ...)
 6. Measured every `pst_validation.interval` epochs; best PST checkpoint saved
 
 **Checkpoint strategy rationale (2026-04-05):**
-Val surrogate loss reaches minimum by epoch 4-13 but PST best occurs at epoch 30-90. Controlled comparison (11 runs) showed PST-based checkpoint selection significantly outperforms val surrogate loss-based selection (eval avg 0.547-0.589 vs 0.395-0.517). No early stopping is used — models train for full max_epochs.
+Val surrogate loss was found to saturate by epoch 4-13 while PST best occurs at epoch 30-90, with weak correlation between the two. Controlled comparison (11 runs) showed PST-based checkpoint selection significantly outperforms val surrogate loss-based selection (eval avg 0.547-0.589 vs 0.395-0.517). Val surrogate loss monitoring was subsequently removed as it provided no actionable signal. No early stopping is used — models train for full max_epochs.
 
 ### 5.4 Experimental Findings (2026-04)
 

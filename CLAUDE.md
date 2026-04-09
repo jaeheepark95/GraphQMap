@@ -188,7 +188,7 @@ runs/
 │       ├── config.yaml
 │       ├── source_config.txt
 │       ├── note.md
-│       ├── metrics.csv          # Per-epoch: epoch, lr, l_total, <active_components...>, val_surrogate_loss, val_pst
+│       ├── metrics.csv          # Per-epoch: epoch, tau, lr, l_total, <active_components...>, val_pst
 │       ├── plots/               # Auto-generated training visualization
 │       │   └── stage2_training.png
 │       └── checkpoints/
@@ -348,8 +348,7 @@ hardware_gnn:
   - Runs from scratch (no Stage 1 pretrained checkpoint)
   - **No early stopping**: trains for full max_epochs (100)
   - **Best checkpoint**: selected by val PST (measured every `pst_validation.interval` epochs)
-  - **Val surrogate loss**: computed every epoch on 396 val circuits, logged to CSV (monitoring only, not used for checkpoint selection)
-  - **Val PST**: measured every 10 epochs on benchmark circuits via SABRE routing — used for best checkpoint selection
+  - **Val PST**: measured every 5 epochs on benchmark circuits via SABRE routing on held-out backends — used for best checkpoint selection
 
 ### Loss Registry (Stage 2)
 Loss components are modular and configured declaratively in YAML. Each component is registered via `@register_loss()` decorator in `training/losses.py`.
@@ -450,7 +449,7 @@ Run `20260402_004812_filtered_sinkhorn_adj` — **Eval 3-backend avg OURS+SABRE 
 | Val loss best, no ES (ep13-23) | 2 | 0.457, 0.517 |
 
 **Conclusions:**
-- PST-based checkpoint selection >> val surrogate loss-based (surrogate loss saturates too early)
+- PST-based checkpoint selection >> val surrogate loss-based (surrogate loss saturated too early; val surrogate loss removed)
 - No early stopping — train full max_epochs, select best PST checkpoint
 - Stage 1 pretrained: not reliably better, sometimes harmful
 - High variance across runs (0.395-0.589) — need multiple seeds
@@ -518,7 +517,6 @@ New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft
 - **error_distance saturates by epoch 3**: Drops from ~0.14 to ~0.01 and provides negligible gradient thereafter. `adjacency` is the only loss providing meaningful gradient throughout training.
 - **node_quality collapse**: Learned MLP reaches trivial solution (-1.0) by epoch 1-2, zero gradient thereafter. **Do not use** — replaced by `swap_count` and `soft_proximity` in Phase 1 experiments.
 - **Val PST oscillation**: PST validation fluctuates 0.12-0.36 across epochs without converging. Best PST often occurs early/mid-training then degrades. Caused by weak correlation between surrogate loss and actual PST, compounded by SABRE routing non-determinism. No early stopping used — train for full max_epochs and select best PST checkpoint.
-- **Val surrogate loss saturates early**: Surrogate loss reaches minimum by epoch 4-13, but model continues improving (PST best at epoch 30-90). Val surrogate loss is NOT suitable for checkpoint selection or early stopping — only for monitoring.
 - **Stage 1 pretrained checkpoint harmful**: Controlled test (2 pretrained vs 4 scratch runs) confirmed negative transfer. Pretrained avg eval PST 0.527, scratch avg 0.522 at best but with wider variance. Stage 1 CE-trained weights interfere with Stage 2 surrogate loss optimization.
 - **High run-to-run variance**: Same config + same seed produces eval PST range of 0.395-0.589 across runs. Non-deterministic CUDA ops, dataloader shuffle, and multi-programming random assignment contribute. Single-run results are unreliable — always run 2+ seeds.
 - **Sinkhorn >> Softmax (resolved)**: Controlled experiment confirmed Sinkhorn is decisively better (+0.086 PST). All future experiments use Sinkhorn.
