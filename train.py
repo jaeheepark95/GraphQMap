@@ -314,27 +314,9 @@ def main() -> None:
             num_workers=num_workers, seed=cfg.seed,
         )
 
-        # Validation data for surrogate loss early stopping
-        val_loader = None
-        val_split = getattr(cfg.data.splits, "val", None)
-        if val_split:
-            logger.info("Loading Stage 2 validation data...")
-            val_ds = load_split(
-                val_split,
-                data_root=data_root,
-                training_backends=training_backends,
-                include_stage2_fields=True,
-                **feature_kwargs,
-            )
-            logger.info("Val: %d samples", len(val_ds))
-            val_loader = create_dataloader(
-                val_ds, max_total_nodes=max_nodes, shuffle=False,
-                num_workers=num_workers, seed=cfg.seed,
-            )
-
-        # PST validation function using benchmark circuits on a test backend (monitoring only)
+        # PST validation function using benchmark circuits on held-out backends
         val_pst_fn = _build_val_pst_fn(cfg, device)
-        trainer.run(train_loader, val_loader=val_loader, val_pst_fn=val_pst_fn)
+        trainer.run(train_loader, val_pst_fn=val_pst_fn)
         _generate_plots(cfg)
 
     else:

@@ -35,8 +35,12 @@ logger = logging.getLogger(__name__)
 
 # Default benchmark circuits (same as MQM colleague)
 BENCHMARK_CIRCUITS = [
+    "bv_n3",
+    "bv_n4",
+    "peres_3",
     "toffoli_3",
     "fredkin_3",
+    "xor5_254",
     "3_17_13",
     "4mod5-v1_22",
     "mod5mils_65",

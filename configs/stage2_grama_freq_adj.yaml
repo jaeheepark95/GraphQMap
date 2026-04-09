@@ -88,10 +88,14 @@ training:
     convergence_checks: 3
 
 # ---- Loss ----
-# Variant: frequency-weighted A (binary_adjacency: false).
-# Each entry of A holds the 2Q gate count between logical qubit pair, instead
+# Variant: frequency-weighted A (binary_adjacency: false) + fixed gamma.
+# Each entry of A holds the 2Q gate count between a logical qubit pair, instead
 # of 0/1. Hypothesis: recover the gate-count signal that the historical best
 # (error_distance + adjacency, both freq-weighted) had access to.
+#
+# We pin gamma=1.0 (instead of auto) so this is a clean ablation against
+# fixed_gamma — only the binary→frequency change matters; auto-gamma's per-batch
+# noise is eliminated and would otherwise be amplified by the freq A scale.
 loss:
   type: surrogate
   components:
@@ -99,7 +103,8 @@ loss:
       weight: 1.0
       params:
         binary_adjacency: false
-        gamma_mode: auto
+        gamma_mode: fixed
+        gamma_fixed: 1.0
         normalize_by_size: true
 
 # ---- Data ----
@@ -107,7 +112,6 @@ data:
   data_root: data/circuits
   splits:
     train: data/circuits/splits/stage2_all.json
-    val: data/circuits/splits/val.json
 
   multi_programming:
     scenarios: [1, 2, 4]
