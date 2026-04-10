@@ -1265,8 +1265,8 @@ def hungarian_decode(P, l):
 | | τ_min | 0.05 |
 | | Schedule | Exponential decay (Stage 1), Fixed (Stage 2) |
 | **Stage 2 Loss** | Components | Configurable via YAML registry |
-| | Current best | error_distance (1.0) + adjacency (0.3) |
-| | Available | error_distance, adjacency, hop_distance, swap_count, soft_proximity, node_quality, separation, exclusion |
+| | Current best | error_distance (1.0) + adjacency_size_aware (1.0, piecewise 0.3/0.5/1.0) |
+| | Available | error_distance, adjacency, adjacency_size_aware, hop_distance, swap_count, soft_proximity, node_quality, separation, exclusion (pairwise collision) |
 | **Batching** | Max total nodes | 512 (tune to GPU) |
 | | large_backend_boost | 2.0 (oversample 50Q+ backends) |
 | **Multi-prog** | Scenarios | Configurable (default: [1, 2, 4] with proportions [0.5, 0.3, 0.2]) |

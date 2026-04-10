@@ -571,26 +571,32 @@ class GraMALoss(nn.Module):
 
 @register_loss("exclusion")
 class ExclusionLoss(nn.Module):
-    """L_excl: Column-wise exclusion loss for one-to-one mapping.
+    """L_excl: Pairwise collision loss for one-to-one mapping.
 
-    Penalizes multiple logical qubits mapping to the same physical qubit.
+    Penalizes multiple logical qubits mapping to the same physical qubit
+    by measuring pairwise collision probability:
 
-    L_excl = (1/h) * sum_j (sum_i P_ij)^2
+    L_excl = (1/h) * sum_j sum_{i!=k} P_ij * P_kj
+           = (1/h) * [sum_j c_j^2 - ||P||_F^2]
 
-    When P is a perfect one-to-one mapping, each column sum is 0 or 1,
-    giving L_excl = l/h. Values above l/h indicate column collisions.
-    Bounded in [l/h, l] (l/h = best, l = all logical map to same physical).
+    Optimal value is 0 (each physical qubit assigned to at most one logical
+    qubit). Active even during soft P (high tau), unlike threshold-based
+    penalties. Gradient: dL/dP_ij = (2/h) * sum_{k!=i} P_kj, proportional
+    to how much other logical qubits occupy physical qubit j.
     """
 
     def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-        """Compute exclusion loss.
+        """Compute pairwise collision loss.
 
         Args:
             P: (batch, l, h) row-stochastic matrix.
         """
+        h = P.size(-1)
         col_sums = P.sum(dim=1)  # (batch, h)
-        loss = (col_sums ** 2).mean(dim=-1).mean()
-        return loss
+        col_sums_sq = (col_sums ** 2).sum(dim=-1)  # (batch,)
+        frobenius_sq = (P ** 2).sum(dim=(1, 2))  # (batch,)
+        collision = (col_sums_sq - frobenius_sq) / h  # (batch,)
+        return collision.mean()
 
 
 # ---------------------------------------------------------------------------

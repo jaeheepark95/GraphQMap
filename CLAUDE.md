@@ -238,14 +238,14 @@ python scripts/visualize.py runs/stage1/<RUN> --no-show
   - Synthetic: queko_aspen4(16Q), queko_tokyo(20Q), queko_rochester(53Q), queko_sycamore(54Q), mlqd_grid5x5(25Q)
 - **Stage 2 Training (49 Qiskit backends only)**:
   - Synthetic backends excluded; QUEKO/MLQD circuits randomly re-assigned to real backends at data load time
-- **Validation (held-out from training, UNSEEN by training data)**: FakeMumbai(27Q, Falcon r5.11), FakeManhattan(65Q, Hummingbird r2), FakeWashington(127Q, Eagle cx)
+- **Validation (held-out, PST checkpoint selection)**: FakeMumbai(27Q, Falcon r5.11), FakeManhattan(65Q, Hummingbird r2)
   - Used for PST checkpoint selection in Stage 2 (every `pst_validation.interval` epochs)
-  - Size-matched to test backends but never appear in training; eliminates val=test leakage
-- **Validation (held-out, PST checkpoint selection)**: FakeMumbai(27Q), FakeManhattan(65Q) — removed from training pool
+  - Removed from training pool; size-matched to test backends (Toronto 27Q, Brooklyn 65Q)
+  - FakeWashington (127Q) was previously in validation but removed due to segfault on 127Q PST simulation
 - **Test (UNSEEN by both training and validation)**: FakeToronto(27Q), FakeBrooklyn(65Q), FakeTorino(133Q)
   - Evaluated **once** at the end via `evaluate.py`; never used for checkpoint/model selection
 - Native 2-qubit gates: cx, ecr, or cz (auto-detected via `_get_two_qubit_gate_name()`)
-- **History note**: Pre-2026-04-07 runs used test backends for PST validation (data leakage via checkpoint selection). All historical eval numbers (e.g. 0.589 from `20260402_004812_filtered_sinkhorn_adj`) are upper-bound estimates contaminated by this leakage and not directly comparable to post-2026-04-07 runs.
+- **History note (val=test leakage)**: ALL runs prior to 2026-04-10 had val=test leakage — including C3 size-aware runs (2026-04-09). The config files were corrected (validation backends added) AFTER the C3 runs had already started. Saved config.yaml in C3 run directories confirms: `backends.validation` missing, Mumbai/Manhattan in training list. All historical eval numbers are upper-bound estimates contaminated by checkpoint selection on test backends. First clean runs: `repro_C3_*` (2026-04-10).
 
 ## Circuit Node Feature System
 Circuit node features are **configurable via YAML** — no code changes needed to experiment with feature combinations. All candidate features are pre-computed during preprocessing (`scripts/preprocess_circuits.py`); feature selection happens at dataset load time.
@@ -366,7 +366,7 @@ Loss components are modular and configured declaratively in YAML. Each component
 | `soft_proximity` | L_soft | Exponential decay proximity: exp(-α·max(hop-1,0)), gate-freq weighted. Params: `alpha` (default 2.0) | [-1, 0] |
 | `node_quality` | L_node | Learnable MLP qubit quality score | [-1, 0] |
 | `separation` | L_sep | Multi-programming circuit separation | [-1, 0] |
-| `exclusion` | L_excl | Column-wise one-to-one mapping penalty (penalizes shared physical qubits) | [l/h, l] |
+| `exclusion` | L_excl | Pairwise collision penalty: (1/h)·[Σc_j² - ‖P‖_F²]. Zero when no two logical qubits share a physical qubit. Required for softmax (no column constraint); redundant with Sinkhorn. | [0, ∞) |
 | `adjacency_size_aware` | L_adj_sa | Backend-size-dependent piecewise L_adj: multiplies base adjacency loss by per-size-bucket weights. Params: `weight_small`, `weight_medium`, `weight_large`, `threshold_small`, `threshold_large` | [-1, 0] |
 
 **YAML config format:**
@@ -406,7 +406,7 @@ loss:
 ## Score Normalization
 Two modes available, selectable via `sinkhorn.score_norm` in YAML config:
 - **`sinkhorn`** (recommended): Log-domain Sinkhorn with dummy padding l×h → h×h → doubly stochastic P. Enforces both row and column sum constraints. **Confirmed best** (+0.086 PST over softmax in controlled test).
-- **`softmax`**: Row-wise softmax → P (batch, l, h) row-stochastic. Simple, no dummy padding.
+- **`softmax`**: Row-wise softmax → P (batch, l, h) row-stochastic. Simple, no dummy padding. **Requires `exclusion` loss** to prevent multiple logical qubits mapping to the same physical qubit (no column constraint).
 
 ```yaml
 sinkhorn:
@@ -420,8 +420,9 @@ See `configs/stage2_sinkhorn_adj.yaml` for Sinkhorn + adjacency loss config.
 
 ## Experiment History & Best Configurations
 
-### Current Best (2026-04-09)
+### Current Best (2026-04-09, CONTAMINATED — val=test leakage)
 Run `20260409_210121_C3_sizeaware_s42` — **Eval 3-backend avg OURS+SABRE PST 0.692** (Val PST 0.6367, epoch 64)
+- **⚠ Leakage**: checkpoint selected using test backends (Toronto/Brooklyn/Torino) — eval numbers are upper-bound
 - Score norm: **Sinkhorn**
 - Loss: error_distance(1.0) + **adjacency_size_aware**(1.0, params: small=0.3, medium=0.5, large=1.0, thresholds 40/80)
 - Features: 4-feature (gc, 2qc, sqr, cpf) + RWPE k=2 = 6dim, edge 3dim
@@ -430,6 +431,13 @@ Run `20260409_210121_C3_sizeaware_s42` — **Eval 3-backend avg OURS+SABRE PST 0
 - Dataset: Filtered 5,769 circuits
 - Eval breakdown: **Toronto 0.512, Brooklyn 0.756, Torino 0.807**
 - vs previous best (constant adj=0.3): avg +0.103 PST, Torino +0.454
+
+### Reproduction (2026-04-10, in progress — first clean val/test split)
+4 runs with proper validation (Mumbai 27Q + Manhattan 65Q), test only at eval:
+- **repro_C3_s42/s43**: Sinkhorn + size-aware adj (same as C3 above, clean validation)
+- **repro_C3_softmax_excl_s42/s43**: Softmax + size-aware adj + **pairwise exclusion**(0.5)
+- Config: `stage2_sinkhorn_adj_sizeaware.yaml` / `stage2_softmax_adj_sizeaware_excl.yaml`
+- Purpose: (1) establish true baseline without leakage, (2) re-evaluate softmax with improved exclusion loss
 
 ### Previous Best (2026-04-02)
 Run `20260402_004812_filtered_sinkhorn_adj` — **Eval 3-backend avg OURS+SABRE PST 0.589**
@@ -445,7 +453,7 @@ Run `20260402_004812_filtered_sinkhorn_adj` — **Eval 3-backend avg OURS+SABRE 
 | Circuit features | new(gc,2qc,sqr,cpf)+RWPE2 | **0.3588** | old(gc,2qc,deg,dp) | 0.2473 | +0.111 |
 | HW features | 5dim, no bias | **0.3588** | 7dim+noise_bias | 0.2604 | +0.098 |
 | node_quality | without | **0.3588** | with | 0.3474 | +0.011 |
-| exclusion | without | 0.2727 | with | 0.2346 | +0.038 |
+| exclusion (old, col-sum²) | without | 0.2727 | with | 0.2346 | +0.038 (but old loss was flawed — see below) |
 | HW degree (node) | without | 0.3478 | with | 0.3448 | +0.003 (negligible) |
 
 ### Reproducibility & Checkpoint Strategy (2026-04-05)
@@ -564,6 +572,23 @@ Systematic sweep of adjacency weight, holding all else constant (hw_feat_v1, Sin
 - L_fair (per-qubit cost variance): core-periphery hypothesis rejected by D-2 diagnosis. Problem is absolute distance not variance — L_fair won't help
 - L_soft α=2: too smooth, 0.25-0.27 range. α=10 collapses to L_adj
 
+### Phase 5: Exclusion Loss Redesign & Reproduction (2026-04-10)
+
+**Exclusion loss redesign**: Old `L_excl = (1/h)·Σ_j c_j²` minimized column-sum-of-squares, which by Jensen's inequality pushes toward **uniform column sums** (c_j = l/h for all j) — the opposite of desired one-hot columns (l columns at 1, rest at 0). Replaced with **pairwise collision loss**:
+
+```
+L_excl = (1/h) · [Σ_j c_j² - ||P||_F²] = (1/h) · Σ_j Σ_{i≠k} P_ij · P_kj
+```
+
+- Directly measures pairwise probability that two logical qubits share a physical qubit
+- Optimal value = **0** (no collision), active throughout training (even during soft P)
+- Gradient: `∂L/∂P_ij = (2/h) · Σ_{k≠i} P_kj` — repels P_ij when other qubits occupy same physical qubit
+- Required for softmax; redundant with Sinkhorn (doubly stochastic already enforces column constraint)
+
+**Val=test leakage discovered**: All runs prior to 2026-04-10 (including C3 size-aware best 0.692) used test backends for PST checkpoint selection. Config files were corrected after C3 runs started — saved run configs confirm missing `backends.validation` key. All historical numbers are upper-bound estimates.
+
+**Reproduction runs (in progress)**: 4 runs with proper validation split (Mumbai+Manhattan), comparing Sinkhorn vs Softmax+pairwise exclusion on C3 size-aware config.
+
 ### Phase 1: Edge Loss Optimization (2026-04-03, superseded by Phase 4)
 New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft). Results incorporated into Phase 4 conclusions above.
 
@@ -575,7 +600,7 @@ New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft
 - **Val PST oscillation**: PST validation fluctuates 0.12-0.36 across epochs without converging. Best PST often occurs early/mid-training then degrades. Caused by weak correlation between surrogate loss and actual PST, compounded by SABRE routing non-determinism. No early stopping used — train for full max_epochs and select best PST checkpoint.
 - **Stage 1 pretrained checkpoint harmful**: Controlled test (2 pretrained vs 4 scratch runs) confirmed negative transfer. Pretrained avg eval PST 0.527, scratch avg 0.522 at best but with wider variance. Stage 1 CE-trained weights interfere with Stage 2 surrogate loss optimization.
 - **High run-to-run variance**: Same config + same seed produces eval PST range of 0.395-0.589 across runs. Non-deterministic CUDA ops, dataloader shuffle, and multi-programming random assignment contribute. Single-run results are unreliable — always run 2+ seeds.
-- **Sinkhorn >> Softmax (resolved)**: Controlled experiment confirmed Sinkhorn is decisively better (+0.086 PST). All future experiments use Sinkhorn.
+- **Sinkhorn >> Softmax (under re-evaluation)**: Previous controlled test showed Sinkhorn +0.086 PST over softmax, but that test (1) had val=test leakage and (2) used the old column-sum-squared exclusion loss which pushed toward uniform spread rather than preventing collision. Re-testing with pairwise collision exclusion loss (2026-04-10).
 - **HW feature gaps in older backends**: `single_qubit_error` ALL ZERO on 10 backends (burlington, essex, london, almaden, boeblingen, johannesburg, poughkeepsie, singapore, cambridge, rochester); `2q_gate_error` ALL ZERO on kyoto. Total 11/55 training backends (20%). These are FakeBackendV2 data gaps, not code bugs. Model learns to handle zero-variance features via z-score → all-zero column. Future experiment: exclude these backends and measure impact.
 - **Feature-indistinguishable circuits**: 16% of original training data (VQE, QNN, GHZ parametric circuits) had >30% indistinguishable qubit pairs. Removed via filtering. MLQD sqr=0 (57% of MLQD) retained — other features still differentiate qubits.
 - **Structural near-duplicates dominated training data (resolved 2026-04-08)**: Pre-Step-7 nominal 5,757 training circuits had only ~487 effective unique structures (8.5%) when grouped by `(num_qubits, num_edges, sorted_degree_sequence)` fingerprint. QUEKO had 215-circuit clusters of random-seed variants and MLQD had 359-circuit clusters of structurally identical small circuits across different algorithm names. Strong diversity filter (Step 7, K=1 per fingerprint) reduces training to 969 circuits — represents the actual structural variety the model can learn from. Validation set drops to 28 circuits → expect higher val metric variance.
