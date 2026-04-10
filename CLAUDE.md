@@ -368,6 +368,8 @@ Loss components are modular and configured declaratively in YAML. Each component
 | `separation` | L_sep | Multi-programming circuit separation | [-1, 0] |
 | `exclusion` | L_excl | Pairwise collision penalty: (1/h)·[Σc_j² - ‖P‖_F²]. Zero when no two logical qubits share a physical qubit. Required for softmax (no column constraint); redundant with Sinkhorn. | [0, ∞) |
 | `adjacency_size_aware` | L_adj_sa | Backend-size-dependent piecewise L_adj: multiplies base adjacency loss by per-size-bucket weights. Params: `weight_small`, `weight_medium`, `weight_large`, `threshold_small`, `threshold_large` | [-1, 0] |
+| `adjacency_error_aware` | L_adj_err | Error-aware adjacency: A_hw(p,q) * (1-ε_2Q(p,q)), rewards low-error adjacent edges more. Requires d_error | [-1, 0] |
+| `node_placement_cost` | L_npc | Per-node circuit-aware placement cost: n_1Q(i)·ε_1Q(p) + λ_r·ε_readout(p). No learnable params (collapse-free). Params: `lambda_r` (default 1.0) | [0, ∞) |
 
 **YAML config format:**
 ```yaml
@@ -401,7 +403,11 @@ loss:
 
 **L_soft rationale**: Exponential decay provides non-zero gradient everywhere while preserving strong adjacency preference. α parameter controls L_adj↔L_hop spectrum.
 
-**L_node deprecated**: Qubit mapping is fundamentally an edge problem, not a node problem. MLP collapses to trivial solution (rank qubits by noise, circuit-agnostic) in 1-2 epochs. Can conflict with edge losses (best-quality qubits may be far apart on topology).
+**L_node deprecated**: Learnable MLP collapses to trivial circuit-agnostic ranking in 1-2 epochs. Replaced by `node_placement_cost` which uses precomputed constants (no learnable params, collapse-free).
+
+**L_npc rationale**: Addresses two gaps: (1) per-node circuit signal absent from edge-only losses — n_1Q(i) makes gradient ∂L/∂P_ip depend on qubit i's circuit role; (2) 1Q gate error and readout error absent from loss — cost(i,p) = n_1Q(i)·ε_1Q(p) + λ_r·ε_readout(p) directly models node-local execution fidelity. Readout term is a global regularizer (all qubits measured in OPENQASM 2.0). Uses GraMA pipeline data (grama_g_single, grama_s_gate, grama_s_read).
+
+**L_adj_err rationale**: L_adj treats all adjacent edges equally, but 2Q error varies 10× (0.5%-5%). L_adj_err weights by fidelity (1-ε_2Q), preferring low-error adjacent edges. Uses d_error for adjacent pairs (= raw 2Q error). No new data pipeline needed.
 
 ## Score Normalization
 Two modes available, selectable via `sinkhorn.score_norm` in YAML config:
@@ -589,12 +595,44 @@ L_excl = (1/h) · [Σ_j c_j² - ||P||_F²] = (1/h) · Σ_j Σ_{i≠k} P_ij · P_
 
 **Reproduction runs (in progress)**: 4 runs with proper validation split (Mumbai+Manhattan), comparing Sinkhorn vs Softmax+pairwise exclusion on C3 size-aware config.
 
+### Phase 5b: Node-Level Loss & Error-Aware Adjacency (2026-04-10, in progress)
+
+#### Motivation
+Phase D layout diagnosis revealed two gaps: (1) no per-node circuit signal in loss → circuit-invariant layouts; (2) 1Q/readout error absent from loss → node quality not optimized. Additionally, L_adj treats all adjacent edges equally despite 10× error variation.
+
+#### New loss components implemented
+- **`node_placement_cost` (L_npc)**: cost(i,p) = n_1Q(i)·ε_1Q(p) + λ_r·��_readout(p). No learnable params (collapse-free unlike old L_node). Per-node circuit signal in gradient. Reuses GraMA data pipeline.
+- **`adjacency_error_aware` (L_adj_err)**: A_hw(p,q) × (1-ε_2Q(p,q)). Fidelity-weighted adjacency. Reuses d_error matrix.
+
+#### Initial results (single seed s43, 969 circuits, non-C3 baseline)
+| Run | Loss | OURS+NASSC 3-backend |
+|-----|------|:---:|
+| Baseline (diversity_filter s43) | L_surr+L_adj(0.3) | **0.604** |
+| npc_s43 | L_surr+L_adj(0.3)+L_npc(**0.1**) | 0.438 |
+| adj_err_s43 | L_surr+L_adj_err(0.3) | 0.442 |
+
+**L_npc weight 0.1 too large**: L_npc raw value ~0.68 dominated gradient over L_surr (~0.001) and L_adj (~-0.007). Need 10-100× lower weight.
+
+**L_adj_err not helpful at adj=0.3**: fidelity range 0.95-0.99 makes near-zero difference vs binary. Abandoned for now.
+
+#### Current experiments (2026-04-10, 4 runs in parallel)
+L_npc weight tuning on C3 piecewise baseline (current best):
+
+| Exp | Dataset | L_npc weight | Config |
+|-----|:---:|:---:|---|
+| c3_npc_w001_s42 | 969 | 0.01 | stage2_c3_npc_w001.yaml |
+| c3_npc_w0001_s42 | 969 | 0.001 | stage2_c3_npc_w0001.yaml |
+| c3_npc_w001_prediv_s42 | 5762 | 0.01 | + override splits |
+| c3_npc_w0001_prediv_s42 | 5762 | 0.001 | + override splits |
+
+Pre-diversity split: `data/circuits/splits/stage2_all_pre_diversity.json` (5762 circuits, post-indist pre-diversity).
+
 ### Phase 1: Edge Loss Optimization (2026-04-03, superseded by Phase 4)
 New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft). Results incorporated into Phase 4 conclusions above.
 
 ## Known Issues & Active Investigation
 - **Score matrix row collapse**: Circuit information collapses through GNN→cross-attention, making score matrix rows indistinguishable. Partially addressed by feature registry + RWPE. Feature-indistinguishable circuit filtering removes worst cases.
-- **No per-node circuit signal in loss**: Both `error_distance` and `adjacency` gradients (∂L/∂P_ip) depend only on neighbor mapping P_j and hardware structure — circuit qubit i's properties (gate count, degree) never appear. This is the fundamental limitation of current edge-pair losses.
+- **No per-node circuit signal in edge losses**: Both `error_distance` and `adjacency` gradients (∂L/∂P_ip) depend only on neighbor mapping P_j and hardware structure — circuit qubit i's properties never appear. Layout diagnosis (Phase D, 2026-04-09) confirmed this causes circuit-invariant layouts. **Mitigation**: `node_placement_cost` (L_npc) added 2026-04-10 — ∂L_npc/∂P_ip = n_1Q(i)·ε_1Q(p) + λ_r·ε_readout(p), directly injecting per-node circuit signal. Weight tuning in progress (0.1 too large → gradient dominant; testing 0.01, 0.001).
 - **error_distance saturates by epoch 3**: Drops from ~0.14 to ~0.01 and provides negligible gradient thereafter. `adjacency` is the only loss providing meaningful gradient throughout training.
 - **node_quality collapse**: Learned MLP reaches trivial solution (-1.0) by epoch 1-2, zero gradient thereafter. **Do not use** — replaced by `swap_count` and `soft_proximity` in Phase 1 experiments.
 - **Val PST oscillation**: PST validation fluctuates 0.12-0.36 across epochs without converging. Best PST often occurs early/mid-training then degrades. Caused by weak correlation between surrogate loss and actual PST, compounded by SABRE routing non-determinism. No early stopping used — train for full max_epochs and select best PST checkpoint.

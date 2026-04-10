@@ -160,6 +160,59 @@ class AdjacencyMatchingLoss(nn.Module):
         return loss
 
 
+@register_loss("adjacency_error_aware")
+class AdjacencyErrorAwareLoss(nn.Module):
+    """L_adj_err: Error-aware adjacency matching with gate-frequency weighting.
+
+    L_adj_err = -(1/W) * sum_{(i,j)} f_ij * sum_{p,q} P_ip * P_jq * A_hw(p,q) * (1 - eps_2Q(p,q))
+
+    Extends L_adj by weighting adjacent edges by their fidelity (1 - 2Q error).
+    Adjacent edges with lower error get higher reward.
+
+    For non-adjacent pairs, A_hw=0 so the fidelity weight doesn't matter.
+    For adjacent pairs, d_error(p,q) equals raw 2Q error (Floyd-Warshall
+    shortest path on direct neighbors = single edge weight).
+
+    Output bounded in [-1, 0]: -1 when all edges map to perfect adjacent qubits.
+    """
+
+    def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """Compute error-aware adjacency loss.
+
+        Required kwargs: d_hw, d_error, circuit_edge_pairs.
+        Optional kwargs: circuit_edge_weights.
+        """
+        d_hw = kwargs["d_hw"]
+        d_error = kwargs["d_error"]
+        circuit_edge_pairs = kwargs["circuit_edge_pairs"]
+        circuit_edge_weights = kwargs.get("circuit_edge_weights", [])
+
+        if not circuit_edge_pairs:
+            return torch.tensor(0.0, device=P.device, requires_grad=True)
+
+        # A_hw * (1 - eps_2Q): adjacent edges weighted by fidelity
+        A_hw = (d_hw == 1).float()
+        # For adjacent pairs, d_error gives raw 2Q error
+        fidelity = (1.0 - d_error).clamp(min=0.0)
+        A_fidelity = A_hw * fidelity
+
+        if not circuit_edge_weights:
+            circuit_edge_weights = [1.0] * len(circuit_edge_pairs)
+
+        total_adj = torch.tensor(0.0, device=P.device)
+        total_weight = 0.0
+
+        for (i, j), w in zip(circuit_edge_pairs, circuit_edge_weights):
+            P_i = P[:, i, :]
+            P_j = P[:, j, :]
+            adj_score = (P_i @ A_fidelity * P_j).sum(dim=-1)
+            total_adj = total_adj + w * adj_score.mean()
+            total_weight += w
+
+        loss = -total_adj / max(total_weight, 1e-8)
+        return loss
+
+
 @register_loss("adjacency_size_aware")
 class SizeAwareAdjacencyLoss(AdjacencyMatchingLoss):
     """L_adj with backend-size-dependent piecewise weighting.
@@ -419,6 +472,59 @@ class SeparationLoss(nn.Module):
             total_dist = total_dist + dist.mean()
 
         loss = -total_dist / len(cross_circuit_pairs)
+        return loss
+
+
+@register_loss("node_placement_cost")
+class NodePlacementCostLoss(nn.Module):
+    """L_npc: Node-level placement cost with per-qubit circuit signal.
+
+    cost(i, p) = n_1Q(i) * eps_1Q(p) + lambda_r * eps_readout(p)
+
+    L_npc = sum_i sum_p P_ip * cost(i, p)
+
+    Unlike the old node_quality loss (learnable MLP that collapsed to
+    circuit-agnostic ranking), this uses precomputed constants only —
+    no learnable parameters, so collapse is impossible.
+
+    Gradient: dL/dP_ip = cost(i, p) = n_1Q(i) * eps_1Q(p) + lambda_r * eps_readout(p)
+    Per-node circuit signal (n_1Q) appears directly in the gradient.
+
+    Args:
+        lambda_r: Weight for readout error term relative to 1Q gate term.
+            Readout term is a global regularizer (same for all logical qubits).
+    """
+
+    def __init__(self, lambda_r: float = 1.0) -> None:
+        super().__init__()
+        self.lambda_r = lambda_r
+
+    def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """Compute node placement cost loss.
+
+        Required kwargs:
+            grama_g_single: (l,) per-logical-qubit 1Q gate count.
+            grama_s_gate: (h,) per-physical-qubit 1Q gate error (raw).
+            grama_s_read: (h,) per-physical-qubit readout error (raw).
+        """
+        g_single = kwargs.get("grama_g_single")
+        s_gate = kwargs.get("grama_s_gate")
+        s_read = kwargs.get("grama_s_read")
+
+        if g_single is None or s_gate is None or s_read is None:
+            return torch.tensor(0.0, device=P.device, requires_grad=True)
+
+        g_single = g_single.to(P.device)  # (l,)
+        s_gate = s_gate.to(P.device)      # (h,)
+        s_read = s_read.to(P.device)      # (h,)
+
+        # cost(i, p) = n_1Q(i) * eps_1Q(p) + lambda_r * eps_readout(p)
+        # Shape: (l, h)
+        cost_matrix = g_single.unsqueeze(1) * s_gate.unsqueeze(0) \
+            + self.lambda_r * s_read.unsqueeze(0)
+
+        # L = sum_i sum_p P_ip * cost(i, p), averaged over batch
+        loss = (P * cost_matrix.unsqueeze(0)).sum(dim=(-2, -1)).mean()
         return loss
 
 

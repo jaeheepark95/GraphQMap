@@ -480,19 +480,25 @@ L_sup = -Σ_i Σ_j Y_ij · log(P_ij)
 Stage 2 uses a **modular loss registry** (`@register_loss()` in `training/losses.py`). Components are configured declaratively in YAML — no code changes needed to switch loss combinations. Each component receives P and all available kwargs (d_error, d_hw, hw_node_features, etc.).
 
 ```yaml
-# configs/stage2_sinkhorn_adj.yaml (current best)
+# configs/stage2_sinkhorn_adj_sizeaware.yaml (current best)
 loss:
   type: surrogate
   components:
-    - name: error_distance    # select registered components
-      weight: 1.0             # multiplier in total loss
-    - name: adjacency
-      weight: 0.3
-    # Components with constructor params use 'params' dict:
-    # - name: soft_proximity
-    #   weight: 0.3
+    - name: error_distance
+      weight: 1.0
+    - name: adjacency_size_aware
+      weight: 1.0
+      params:
+        weight_small: 0.3        # h <= 40 (Toronto-class)
+        weight_medium: 0.5       # 40 < h <= 80 (Brooklyn-class)
+        weight_large: 1.0        # h > 80 (Torino-class)
+        threshold_small: 40
+        threshold_large: 80
+    # Optional: per-node circuit-aware cost (weight tuning in progress)
+    # - name: node_placement_cost
+    #   weight: 0.01
     #   params:
-    #     alpha: 2.0
+    #     lambda_r: 1.0
 ```
 
 **Available components:**
@@ -588,6 +594,41 @@ Where w_norm(i) = importance of qubit i normalized to sum to 1. Bounded in [-1, 
 
 **Known issue — deprecated:** Collapses to trivial solution (-1.0) by epoch 1-2, providing zero gradient thereafter. Root cause: qubit mapping is fundamentally an edge problem (SWAP routing), not a node problem. The MLP learns a single circuit-agnostic ranking (low noise → high score) which is trivially solvable. Additionally, readout/1Q errors (what L_node optimizes) contribute far less to PST than 2Q gate errors from routing: 1Q error is 10-100× smaller than 2Q error. Can also conflict with edge losses when high-quality qubits are topologically distant. **Not recommended for use.**
 
+#### node_placement_cost — L_npc: Node-Level Placement Cost (2026-04-10)
+
+Per-node circuit-aware placement cost. Addresses two fundamental gaps in edge-only losses: (1) ∂L/∂P_ip has no per-node circuit signal — all logical qubits receive identical gradient direction; (2) 1Q gate error and readout error are absent from the loss.
+
+```
+cost(i, p) = n_1Q(i) · ε_1Q(p) + λ_r · ε_readout(p)
+L_npc = Σ_i Σ_p P_ip · cost(i, p)
+```
+
+Where n_1Q(i) = number of single-qubit gates on logical qubit i (= gate_count - two_qubit_gate_count), ε_1Q(p) = max single-qubit gate error on physical qubit p, ε_readout(p) = readout error on physical qubit p. λ_r controls readout vs 1Q gate balance (default 1.0).
+
+**Gradient:** ∂L_npc/∂P_ip = cost(i, p) = n_1Q(i) · ε_1Q(p) + λ_r · ε_readout(p). Per-node circuit signal (n_1Q) appears directly — logical qubits with more 1Q gates receive stronger pressure toward low-error physical qubits.
+
+**Key design difference from deprecated L_node:** No learnable parameters. cost(i,p) is a precomputed constant matrix per (circuit, backend) pair. This eliminates the collapse failure mode where L_node's learnable MLP converged to a trivial circuit-agnostic ranking. The 1Q error term `n_1Q(i)·ε_1Q(p)` is a first-order approximation of cumulative 1Q gate infidelity; the readout term is a global regularizer (all qubits measured in standard OPENQASM 2.0 circuits, so m(i)=1 for all i).
+
+**Data pipeline:** Reuses GraMA infrastructure — `grama_g_single` (n_1Q per qubit), `grama_s_gate` (ε_1Q per physical qubit), `grama_s_read` (ε_readout per physical qubit). No new data pipeline needed.
+
+**Scale note:** Raw cost values (~0.68) are much larger than L_surr (~0.01) and L_adj (~-0.007). Weight must be small (0.01-0.001 range) to avoid dominating edge losses. Weight 0.1 experimentally confirmed too large.
+
+**Constructor param:** `lambda_r` (float, default 1.0), configurable via YAML `params` dict.
+
+#### adjacency_error_aware — L_adj_err: Error-Aware Adjacency Loss (2026-04-10)
+
+Extends L_adj by weighting adjacent edges by their fidelity.
+
+```
+L_adj_err = -(1/W) · Σ_{(i,j)} f_ij · Σ_{p,q} P_ip · P_jq · A_hw(p,q) · (1 - ε_2Q(p,q))
+```
+
+For adjacent pairs, d_error(p,q) equals raw 2Q error (Floyd-Warshall shortest path on direct neighbors = single edge weight). Fidelity (1-ε_2Q) ranges from ~0.95 to ~0.99 on real backends. Bounded in [-1, 0].
+
+**Motivation:** L_adj treats all adjacent edges equally, but 2Q gate error varies up to 10× across edges. High-frequency circuit edges should preferentially map to low-error hardware edges.
+
+**Limitation (experimental):** The fidelity range (0.95-0.99) is too narrow to meaningfully differentiate edges at weight=0.3. Initial experiment showed −0.16 NASSC vs baseline. Binary adjacency's sharp 0/1 signal may be more effective than the slightly modulated 0.95-0.99 signal.
+
 #### separation — L_sep: Multi-Programming Separation Loss
 
 Encourages physical distance between qubits of different circuits. Bounded in [-1, 0]. Automatically 0 for single-circuit scenarios.
@@ -608,6 +649,14 @@ L_2 = Σ_k weight_k · component_k(P, ...)
 |-----------|--------|-----------|
 | error_distance | 1.0 | Primary: error-weighted distance (saturates early but provides initial signal) |
 | adjacency_size_aware | 1.0 (outer) × piecewise | Backend-size-dependent adjacency: small(≤40Q)=0.3, medium(40-80Q)=0.5, large(>80Q)=1.0. Resolves Toronto/Torino trade-off |
+
+**Experimental (Phase 5, 2026-04-10):** Testing `node_placement_cost` addition on top of current best:
+
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| error_distance | 1.0 | Primary edge loss |
+| adjacency_size_aware | 1.0 × piecewise | Size-aware adjacency |
+| node_placement_cost | 0.01 or 0.001 | Per-node circuit signal + 1Q/readout error (weight tuning in progress) |
 
 **Previous best configuration (Eval 0.589, constant adj=0.3):**
 
