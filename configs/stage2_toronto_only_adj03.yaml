@@ -1,7 +1,6 @@
-# GraphQMap Stage 2: Toronto-only training, L_surr + L_adj(0.3)
-# Hypothesis: Single-backend training avoids backend rotation noise
+# Stage 2: Single-backend (Toronto only) experiment — L_adj weight 0.3
+# Hypothesis: Fixed backend eliminates backend rotation noise, improves convergence
 
-# ---- Model Architecture ----
 model:
   embedding_dim: 64
 
@@ -21,8 +20,8 @@ model:
     residual_layers: [2, 3]
 
   hardware_gnn:
-    node_input_dim: 6
-    edge_input_dim: 2
+    node_input_dim: 5
+    edge_input_dim: 1
     num_layers: 3
     num_heads: 4
     activation: elu
@@ -40,7 +39,6 @@ model:
     d_k: 64
     noise_bias_dim: 0
 
-# ---- Sinkhorn ----
 sinkhorn:
   score_norm: sinkhorn
   tau_max: 1.0
@@ -49,7 +47,6 @@ sinkhorn:
   max_iter: 20
   tolerance: 1.0e-6
 
-# ---- Training ----
 training:
   stage: 2
   optimizer:
@@ -74,7 +71,6 @@ training:
     num_circuits: 200
     convergence_checks: 3
 
-# ---- Loss ----
 loss:
   type: surrogate
   components:
@@ -83,7 +79,6 @@ loss:
     - name: adjacency
       weight: 0.3
 
-# ---- Data ----
 data:
   data_root: data/circuits
   splits:
@@ -98,25 +93,21 @@ data:
   normalization:
     epsilon: 1.0e-8
 
-# ---- Batching ----
 batching:
   max_total_nodes: 512
   backend_balanced: true
-  large_backend_boost: 2.0
+  large_backend_boost: 1.0    # single backend, no boost needed
 
-# ---- Hardware Backends ----
 backends:
   training:
-    - FakeToronto            # 27Q - single backend experiment
+    - FakeToronto            # 27Q — single backend experiment
   validation:
-    - FakeMumbai             # 27Q
-    - FakeManhattan          # 65Q
+    - FakeMumbai             # 27Q — same size class as Toronto
   test:
-    - FakeToronto            # 27Q
-    - FakeBrooklyn           # 65Q
-    - FakeTorino             # 133Q
+    - FakeToronto
+    - FakeBrooklyn
+    - FakeTorino
 
-# ---- Misc ----
 seed: 42
 device: cuda
 num_workers: 4

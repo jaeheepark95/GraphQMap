@@ -1,5 +1,5 @@
-# Stage 2: Single-backend (Toronto only) experiment — L_adj weight 0.5
-# Hypothesis: Fixed backend eliminates backend rotation noise, improves convergence
+# Stage 2: Toronto-only + L_npc — weight 0.001
+# Hypothesis: L_npc teaches qubit quality, enabling single-backend generalization
 
 model:
   embedding_dim: 64
@@ -77,7 +77,9 @@ loss:
     - name: error_distance
       weight: 1.0
     - name: adjacency
-      weight: 0.5
+      weight: 0.3
+    - name: node_placement_cost
+      weight: 0.001
 
 data:
   data_root: data/circuits
@@ -100,9 +102,10 @@ batching:
 
 backends:
   training:
-    - FakeToronto            # 27Q — single backend experiment
+    - FakeToronto
   validation:
-    - FakeMumbai             # 27Q — same size class as Toronto
+    - FakeMumbai             # 27Q
+    - FakeManhattan          # 65Q
   test:
     - FakeToronto
     - FakeBrooklyn
