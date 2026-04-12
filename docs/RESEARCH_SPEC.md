@@ -425,6 +425,53 @@ Log-domain Sinkhorn with dummy padding l×h → h×h → doubly stochastic P.
 | τ_min (final) | 0.05 | Near one-hot; minimizes train-inference gap |
 | τ Schedule | Exponential decay | `τ(epoch) = τ_max · (τ_min/τ_max)^(epoch/total_epochs)` |
 
+### 4.6 Iterative Score Refinement (QAP Mirror Descent)
+
+Optional post-score refinement inspired by "Noise-Aware Iterative Attention for Scalable Qubit Mapping". When enabled (`model.iterative_refinement.iterations > 0`), the GNN-produced score matrix is iteratively refined using the QAP gradient as a feedback signal.
+
+**Motivation:** The GNN score S^(0) captures structural and noise compatibility but has no direct connection to the QAP fidelity objective. The feedback term `Ã_c · P · C_eff` equals half the gradient of tr(Ã_c P C_eff P^T), providing a fidelity-improving direction that the GNN alone cannot learn from surrogate losses.
+
+**Algorithm:**
+
+```
+Input: S^(0) from ScoreHead, C_eff (h×h), Ã_c (l×l), τ, T iterations, β decay
+1. Normalize: S_norm = (S^(0) - mean(S^(0))) / std(S^(0))    # match feedback scale
+2. For t = 0, ..., T-1:
+     τ_t = τ · β^t
+     P^(t) = Sinkhorn(S_current / τ_t)
+     Z^(t) = P^(t) · C_eff                   # expected cost landscape
+     feedback = Ã_c · Z^(t)                   # QAP gradient (half)
+     S_current = S_norm - λ · feedback         # subtract fidelity-improving direction
+3. Final: P = Sinkhorn(S_current / τ)
+```
+
+**Score normalization (critical):** The GNN produces scores with large absolute values (mean~38, std~24) while the feedback term has std~0.3. Without normalization, the feedback is 300× smaller than S^(0) and has zero effect on the layout. Z-score normalization brings S to N(0,1), making feedback ~30% of the score magnitude with λ=1.0.
+
+**Learnable parameter:** λ (scalar, `nn.Parameter`) is trained jointly with the GNN. Controls the balance between learned score (GNN prior) and analytical gradient (QAP optimization). Initialized to 1.0.
+
+**Temperature annealing:** β < 1 (default 0.9) reduces τ within the refinement loop, progressively sharpening the soft assignment. At τ→0, P approaches a hard permutation.
+
+**Effective cost matrix C_eff:** Precomputed per backend via Floyd-Warshall on a graph weighted by 3×ε₂ (each SWAP = 3 CX gates). Adjacent pairs use raw ε₂ (direct gate, no SWAP). See Appendix A.2b.
+
+```
+C_eff(j,k) = ε₂(j,k)                if (j,k) ∈ E_hw  (adjacent)
+              D_swap(j,k)             otherwise         (SWAP chain cost)
+```
+
+**Gate-count weighted adjacency Ã_c:** Dense (l×l) matrix built from `circuit_edge_pairs` and `circuit_edge_weights`. Ã_c(i,i') = g_{ii'} (number of 2Q gates between logical qubits i and i'). Symmetric.
+
+**Backward compatibility:** When `iterations=0` (default), the forward pass is identical to the original pipeline — no normalization, no refinement.
+
+**Config:**
+
+```yaml
+model:
+  iterative_refinement:
+    iterations: 5        # T: number of mirror descent steps (0 = disabled)
+    lambda_init: 1.0     # initial value for learnable λ
+    beta: 0.9            # temperature decay per iteration
+```
+
 ### 4.7 Hungarian Algorithm (Inference Only)
 
 Applied to P matrix to produce discrete mapping. Only the top l rows (actual logical qubits) of the result are used. Dummy row assignments are discarded.
@@ -628,6 +675,30 @@ For adjacent pairs, d_error(p,q) equals raw 2Q error (Floyd-Warshall shortest pa
 **Motivation:** L_adj treats all adjacent edges equally, but 2Q gate error varies up to 10× across edges. High-frequency circuit edges should preferentially map to low-error hardware edges.
 
 **Limitation (experimental):** The fidelity range (0.95-0.99) is too narrow to meaningfully differentiate edges at weight=0.3. Initial experiment showed −0.16 NASSC vs baseline. Binary adjacency's sharp 0/1 signal may be more effective than the slightly modulated 0.95-0.99 signal.
+
+#### qap_fidelity — L_qap: Unified QAP Fidelity Loss (2026-04-12)
+
+Trace-form QAP objective using the unified effective cost matrix C_eff.
+
+```
+L_qap = tr(Ã_c P C_eff P^T) / (l + |E|)
+```
+
+Where Ã_c (l×l) = gate-count weighted circuit adjacency, P (B×l×h) = soft assignment, C_eff (h×h) = unified cost matrix (3×ε₂ SWAP cost for non-adjacent, raw ε₂ for adjacent). Normalization by (l + |E|) ensures cross-batch comparability.
+
+**Efficient computation:** PC = P @ C_eff → (B,l,h), APC = Ã_c @ PC → (B,l,h), trace = (APC * P).sum(). No per-edge loop — pure matrix ops.
+
+**Gradient:** ∂L/∂P = 2·Ã_c·P·C_eff. Gate count g_{ii'} appears explicitly — high-frequency edges receive stronger gradient. This is the same term used as the feedback signal in iterative score refinement (Section 4.6).
+
+**Advantages over error_distance + adjacency:**
+- Single loss, no weight balancing needed — all terms in -log(fidelity) units
+- SWAP 3× CX overhead correctly reflected (error_distance uses raw ε₂)
+- Gradient does not saturate: SWAP chain costs provide large dynamic range
+- Naturally size-aware: larger backends have larger C_eff values
+
+**Known limitation (2026-04-12):** When used as the sole loss for a deep GNN model, the loss value is very small (~0.002) and may provide insufficient gradient signal compared to multi-component losses. The reference paper ("Noise-Aware Iterative Attention") uses this as a direct training signal for ~200 parameters, but GraphQMap's 70K+ parameters may need stronger gradient. Testing in combination with adjacency or as part of iterative refinement.
+
+**Constructor param:** `normalize` (bool, default True).
 
 #### separation — L_sep: Multi-Programming Separation Loss
 
@@ -1216,6 +1287,42 @@ for (p, q), error in cx_errors.items():
 # Floyd-Warshall
 d_error = floyd_warshall(adj)  # h×h matrix, precomputed once per backend
 ```
+
+### Effective Cost Matrix C_eff Precomputation (2026-04-12)
+
+Unified cost matrix encoding both direct gate error and SWAP chain overhead.
+
+```python
+import numpy as np
+from scipy.sparse.csgraph import floyd_warshall
+
+# Build raw error matrix (adjacent pairs only)
+raw_error = np.full((h, h), np.inf)
+np.fill_diagonal(raw_error, 0)
+
+# Build SWAP-cost weighted adjacency (each SWAP = 3 CX gates)
+swap_adj = np.full((h, h), np.inf)
+np.fill_diagonal(swap_adj, 0)
+
+for (p, q), error in cx_errors.items():
+    raw_error[p][q] = error
+    raw_error[q][p] = error
+    swap_adj[p][q] = 3.0 * error   # SWAP = 3 CX
+    swap_adj[q][p] = 3.0 * error
+
+# Floyd-Warshall on SWAP-cost graph
+d_swap = floyd_warshall(swap_adj)
+
+# C_eff: adjacent = raw error (direct gate), non-adjacent = SWAP chain cost
+c_eff = d_swap.copy()
+adjacent = np.isfinite(raw_error) & (raw_error > 0)
+c_eff[adjacent] = raw_error[adjacent]   # overwrite adjacent with raw ε₂
+np.fill_diagonal(c_eff, 0)
+```
+
+**Value ranges (Toronto 27Q):** C_eff ∈ [0.006, 0.765], d_error ∈ [0.006, 0.255]. Non-adjacent C_eff/d_error ratio = 3.0× (SWAP overhead). Adjacent pairs identical in both matrices.
+
+**Used by:** `qap_fidelity` loss (Section 5.2), iterative score refinement (Section 4.6).
 
 ### q_score Implementation
 

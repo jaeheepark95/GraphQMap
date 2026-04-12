@@ -200,15 +200,25 @@ class GraphQMap(nn.Module):
         # Iterative refinement (QAP mirror descent)
         if (self.refine_iterations > 0
                 and c_eff is not None and circuit_adj is not None):
-            S_init = S  # save initial GNN-based score
             c_eff_dev = c_eff.to(device=S.device, dtype=S.dtype)
             A_c = circuit_adj.to(device=S.device, dtype=S.dtype)
+
+            # Normalize S^(0) so that feedback term is at comparable scale.
+            # The paper's QK^T naturally produces small values (~O(1)) because
+            # it's a projection. Our GNN produces large values (mean~38, max~148).
+            # Without normalization, feedback (max~0.4) is 300× smaller than S
+            # and has zero practical effect.
+            S_std = S.std().detach().clamp(min=1e-6)
+            S_mean = S.mean().detach()
+            S_init = (S - S_mean) / S_std  # normalized to ~N(0,1)
+
             tau_t = tau * (1.0 / self.refine_beta)  # will be multiplied by beta
 
+            S_current = S_init
             for _t in range(self.refine_iterations):
                 tau_t = tau_t * self.refine_beta
                 # Soft assignment at current temperature
-                P_t = self.sinkhorn(S, num_logical, num_physical, tau_t)
+                P_t = self.sinkhorn(S_current, num_logical, num_physical, tau_t)
                 if P_t.shape[1] != num_logical:
                     P_t = P_t[:, :num_logical, :]
 
@@ -219,7 +229,9 @@ class GraphQMap(nn.Module):
                 feedback = torch.matmul(A_c, Z)  # (B, l, h) — A_c broadcast
 
                 # Update score: subtract fidelity-improving direction
-                S = S_init - self.refine_lambda * feedback
+                S_current = S_init - self.refine_lambda * feedback
+
+            S = S_current
 
         # Final normalization
         P = self.sinkhorn(S, num_logical, num_physical, tau)

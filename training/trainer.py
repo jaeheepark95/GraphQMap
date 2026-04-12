@@ -520,9 +520,16 @@ class Stage2Trainer:
         pst_cfg = getattr(self.cfg.training, "pst_validation", None)
 
         best_pst = -1.0
+        best_loss = float("inf")
 
         for epoch in range(max_epochs):
             losses = self.train_epoch(train_loader, epoch)
+
+            # Best loss checkpoint — track lowest total training loss
+            total_loss = losses.get("l_total", float("inf"))
+            if total_loss < best_loss:
+                best_loss = total_loss
+                self.save_checkpoint(epoch, tag="best_loss")
 
             # PST validation at intervals — best checkpoint selected by PST
             pst_str = ""
@@ -539,4 +546,4 @@ class Stage2Trainer:
 
         # Save final
         self.save_checkpoint(0, tag="final")
-        logger.info(f"Stage 2 complete. Best PST={best_pst:.4f}")
+        logger.info(f"Stage 2 complete. Best PST={best_pst:.4f} | Best loss={best_loss:.6f}")

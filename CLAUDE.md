@@ -627,6 +627,48 @@ L_npc weight tuning on C3 piecewise baseline (current best):
 
 Pre-diversity split: `data/circuits/splits/stage2_all_pre_diversity.json` (5762 circuits, post-indist pre-diversity).
 
+### Phase 6: QAP Mirror Descent & Iterative Refinement (2026-04-12, in progress)
+
+Inspired by "Noise-Aware Iterative Attention for Scalable Qubit Mapping" (anonymous, 2026), which interprets self-attention as mirror descent on a QAP fidelity relaxation and achieves SOTA results with ~200 learnable parameters.
+
+#### Key insights from the reference paper
+- **Unified C_eff cost matrix**: Floyd-Warshall with edge weight 3×ε₂ (each SWAP = 3 CX gates). Adjacent pairs use raw ε₂. All terms in -log(fidelity) units — no artificial weight balancing needed.
+- **QAP loss**: tr(Ã_c P C_eff P^T) as single loss function. Gate-count weighted adjacency Ã_c and effective cost C_eff naturally encode both topology and noise.
+- **Iterative score refinement**: S^(t+1) = S^(0) - λ·Ã_c·P^(t)·C_eff. The feedback term equals half the QAP gradient — each iteration is a mirror descent step.
+- **Performance floor guarantee**: Even if learned component (QK^T) fails, the analytical gradient term (Ã_c·P·C_eff) still provides valid QAP optimization.
+- **Layout-routing consistency**: C_eff's predecessor matrix provides noise-optimal SWAP paths, ensuring layout cost = routing cost.
+
+#### Implementation (2026-04-12)
+- `precompute_c_eff()` / `precompute_c_eff_synthetic()` in `hardware_graph.py`: Floyd-Warshall with 3×ε₂ edge weights; adjacent pairs overwritten with raw ε₂
+- `QAPFidelityLoss` in `losses.py`: tr(Ã_c P C_eff P^T) via efficient matmul: PC = P@C_eff, APC = Ã_c@PC, trace = (APC * P).sum()
+- `circuit_adj` (Ã_c) dense matrix built in collation from `circuit_edge_pairs`/`circuit_edge_weights`
+- Iterative refinement in `GraphQMap.forward()`: learnable λ parameter, temperature annealing (β=0.9 per iteration)
+- Config: `configs/stage2_qap_refine.yaml` (full backend), `configs/stage2_toronto_qap_refine.yaml` (Toronto-only)
+
+#### v1 results (Toronto-only, no score normalization)
+Run `20260413_040016_toronto_qap_refine_v1` — **Best Val PST 0.6664 (epoch 44)**
+
+Eval Toronto OURS+SABRE **0.3216**, OURS+NASSC **0.3626** — **worse than SABRE standalone (0.3550)**
+
+**Root cause diagnosis — scale mismatch:**
+- GNN produces S^(0) with mean=38, std=23.6, range=[11, 149]
+- Feedback λ·Ã_c·P·C_eff has range=[0, 0.42], std=0.07
+- **S^(0) / Feedback ratio: 318×** → feedback has zero practical effect on layout
+- Layouts identical with/without refinement (verified on bv_n4)
+- Performance degradation entirely due to QAP loss alone providing insufficient gradient signal for GNN (single loss, small values ~0.002)
+
+**Fundamental issue:** The reference paper has ~200 parameters (projection matrices only), so S^(0)=QK^T is naturally small and comparable to feedback. GraphQMap's GNN+CrossAttention (70K+ params) produces very large scores that drown out the analytical feedback.
+
+#### v2 (in progress): Score normalization before refinement
+Fix: z-score normalize S^(0) before entering refinement loop:
+```
+S_norm = (S - S.mean().detach()) / S.std().detach().clamp(min=1e-6)
+S^(t+1) = S_norm - λ · Ã_c · P^(t) · C_eff
+```
+After normalization: S_norm std=1.0, Feedback std≈0.34 → **ratio 2.92** (was 318). Feedback now meaningfully affects layout decisions.
+
+Run `toronto_qap_refine_v2_normscore` in progress.
+
 ### Phase 1: Edge Loss Optimization (2026-04-03, superseded by Phase 4)
 New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft). Results incorporated into Phase 4 conclusions above.
 
