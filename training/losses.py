@@ -675,6 +675,62 @@ class GraMALoss(nn.Module):
         return per_batch.mean()
 
 
+@register_loss("qap_fidelity")
+class QAPFidelityLoss(nn.Module):
+    """L_qap: Unified QAP fidelity loss using C_eff.
+
+    Implements tr(Ã_c P C_eff P^T) — the matrix form of the QAP objective
+    where C_eff encodes SWAP chain costs (3×ε₂ per SWAP) and direct gate
+    costs (ε₂ for adjacent pairs) in a single cost matrix.
+
+    Advantages over separate error_distance + adjacency losses:
+    - No artificial weighting between loss components needed
+    - All terms in -log(fidelity) units — physically meaningful
+    - SWAP 3× overhead correctly reflected (error_distance uses raw ε₂)
+    - Gradient does not saturate: SWAP chain costs provide large dynamic range
+    - Naturally size-aware: larger backends have larger C_eff values
+
+    The gradient ∂L/∂P = 2·Ã_c·P·C_eff is also used for iterative score
+    refinement (mirror descent feedback term).
+
+    Args:
+        normalize: If True, divide by (l + |E|) for cross-batch comparability.
+    """
+
+    def __init__(self, normalize: bool = True) -> None:
+        super().__init__()
+        self.normalize = normalize
+
+    def forward(self, P: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """Compute QAP fidelity loss.
+
+        Required kwargs:
+            c_eff: (h, h) effective cost matrix.
+            circuit_adj: (l, l) gate-count weighted adjacency matrix Ã_c.
+        """
+        c_eff = kwargs.get("c_eff")
+        circuit_adj = kwargs.get("circuit_adj")
+
+        if c_eff is None or circuit_adj is None:
+            return torch.tensor(0.0, device=P.device, requires_grad=True)
+
+        c_eff = c_eff.to(device=P.device, dtype=P.dtype)
+        circuit_adj = circuit_adj.to(device=P.device, dtype=P.dtype)
+
+        # tr(Ã_c P C_eff P^T) = sum_{i,j,k,l} Ã_c[i,j] P[j,k] C_eff[k,l] P[i,l]
+        # Efficient: PC = P @ C_eff, then sum (Ã_c @ PC) * P
+        PC = torch.matmul(P, c_eff)          # (B, l, h)
+        APC = torch.matmul(circuit_adj, PC)   # (B, l, h) — Ã_c broadcast over batch
+        trace = (APC * P).sum(dim=(-2, -1))   # (B,)
+
+        if self.normalize:
+            l = P.size(1)
+            num_edges = max((circuit_adj > 0).sum().item() // 2, 1)
+            trace = trace / (l + num_edges)
+
+        return trace.mean()
+
+
 @register_loss("exclusion")
 class ExclusionLoss(nn.Module):
     """L_excl: Pairwise collision loss for one-to-one mapping.

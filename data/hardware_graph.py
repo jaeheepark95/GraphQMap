@@ -403,6 +403,60 @@ def build_hardware_graph(backend: Any, eps: float = 1e-8) -> Data:
     )
 
 
+def precompute_c_eff(backend: Any) -> np.ndarray:
+    """Precompute unified effective cost matrix C_eff.
+
+    C_eff encodes the total noise cost of executing a 2Q gate between two
+    physical qubits, accounting for SWAP overhead (each SWAP = 3 CX gates):
+
+        C_eff(j,k) = ε₂(j,k)      if (j,k) adjacent
+        C_eff(j,k) = D_swap(j,k)   otherwise
+
+    where D_swap is the shortest path on a graph weighted by 3·ε₂ per edge.
+    All values are in additive -log(fidelity) units.
+
+    Args:
+        backend: A FakeBackendV2 instance.
+
+    Returns:
+        h×h numpy array of effective costs.
+    """
+    target = backend.target
+    h = target.num_qubits
+    gate_name = _get_two_qubit_gate_name(backend)
+    cx_props = target[gate_name]
+
+    # Build raw error matrix for adjacent pairs
+    raw_error = np.full((h, h), np.inf)
+    np.fill_diagonal(raw_error, 0)
+
+    # Build SWAP-cost weighted adjacency for Floyd-Warshall
+    swap_adj = np.full((h, h), np.inf)
+    np.fill_diagonal(swap_adj, 0)
+
+    for qargs, props in cx_props.items():
+        if props is None:
+            continue
+        p, q = qargs
+        error = props.error if props.error is not None else 0.0
+        raw_error[p][q] = min(raw_error[p][q], error)
+        raw_error[q][p] = min(raw_error[q][p], error)
+        swap_cost = 3.0 * error  # SWAP = 3 CX gates
+        swap_adj[p][q] = min(swap_adj[p][q], swap_cost)
+        swap_adj[q][p] = min(swap_adj[q][p], swap_cost)
+
+    # Floyd-Warshall on SWAP-cost graph
+    d_swap = floyd_warshall(swap_adj).astype(np.float32)
+
+    # Build C_eff: adjacent uses raw error, non-adjacent uses SWAP distance
+    c_eff = d_swap.copy()
+    adjacent = np.isfinite(raw_error) & (raw_error > 0)
+    c_eff[adjacent] = raw_error[adjacent]
+    np.fill_diagonal(c_eff, 0)
+
+    return c_eff
+
+
 def precompute_error_distance(backend: Any) -> np.ndarray:
     """Precompute error-weighted shortest path distances via Floyd-Warshall.
 
@@ -724,6 +778,45 @@ def precompute_error_distance_synthetic(name: str) -> np.ndarray:
         adj[q][p] = min(adj[q][p], error)
 
     return floyd_warshall(adj).astype(np.float32)
+
+
+def precompute_c_eff_synthetic(name: str) -> np.ndarray:
+    """Precompute unified effective cost matrix C_eff for a synthetic backend.
+
+    See precompute_c_eff() for details on the C_eff definition.
+
+    Args:
+        name: Synthetic backend name (e.g. 'queko_aspen4').
+
+    Returns:
+        h×h numpy array of effective costs.
+    """
+    profile = _load_synthetic_backend(name)
+    h = profile["num_qubits"]
+    eprops = profile["edge_properties"]
+    coupling_map = [tuple(e) for e in profile["coupling_map"]]
+
+    raw_error = np.full((h, h), np.inf)
+    np.fill_diagonal(raw_error, 0)
+    swap_adj = np.full((h, h), np.inf)
+    np.fill_diagonal(swap_adj, 0)
+
+    for p, q in coupling_map:
+        key = f"({p}, {q})"
+        error = eprops[key]["cx_error"]
+        raw_error[p][q] = min(raw_error[p][q], error)
+        raw_error[q][p] = min(raw_error[q][p], error)
+        swap_cost = 3.0 * error
+        swap_adj[p][q] = min(swap_adj[p][q], swap_cost)
+        swap_adj[q][p] = min(swap_adj[q][p], swap_cost)
+
+    d_swap = floyd_warshall(swap_adj).astype(np.float32)
+    c_eff = d_swap.copy()
+    adjacent = np.isfinite(raw_error) & (raw_error > 0)
+    c_eff[adjacent] = raw_error[adjacent]
+    np.fill_diagonal(c_eff, 0)
+
+    return c_eff
 
 
 def precompute_hop_distance_synthetic(name: str) -> np.ndarray:

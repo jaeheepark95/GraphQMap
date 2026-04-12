@@ -23,8 +23,13 @@ import torch
 from torch_geometric.data import Batch
 
 from configs.config_loader import load_config
-from data.circuit_graph import build_circuit_graph
-from data.hardware_graph import build_hardware_graph, configure_hw_features, get_backend
+from data.circuit_graph import build_circuit_graph, extract_circuit_features
+from data.hardware_graph import (
+    build_hardware_graph,
+    configure_hw_features,
+    get_backend,
+    precompute_c_eff,
+)
 from evaluation.benchmark import (
     BENCHMARK_CIRCUIT_DIR,
     BENCHMARK_CIRCUITS,
@@ -257,6 +262,25 @@ def evaluate_model(args, cfg) -> None:
         circuit_batch = Batch.from_data_list([circuit_graph])
         hw_batch = Batch.from_data_list([hw_graph])
 
+        # Build C_eff and circuit_adj for iterative refinement
+        eval_c_eff = None
+        eval_circuit_adj = None
+        if model.refine_iterations > 0:
+            eval_c_eff = torch.tensor(
+                precompute_c_eff(backend), dtype=torch.float32,
+            ).to(device)
+            feats = extract_circuit_features(circuit)
+            eval_circuit_adj = torch.zeros(
+                num_logical, num_logical, dtype=torch.float32,
+            )
+            for (ci, cj), w in zip(
+                feats["edge_list"],
+                feats["edge_features"][:, 0].tolist(),
+            ):
+                eval_circuit_adj[ci, cj] = w
+                eval_circuit_adj[cj, ci] = w
+            eval_circuit_adj = eval_circuit_adj.to(device)
+
         t0 = time.perf_counter()
         layouts = model.predict(
             circuit_batch, hw_batch,
@@ -264,6 +288,8 @@ def evaluate_model(args, cfg) -> None:
             num_logical=num_logical,
             num_physical=num_physical,
             tau=tau,
+            c_eff=eval_c_eff,
+            circuit_adj=eval_circuit_adj,
         )
         model_inference_time = time.perf_counter() - t0
         model_layout = list(layouts[0].values())

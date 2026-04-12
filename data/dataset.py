@@ -34,6 +34,8 @@ from data.hardware_graph import (
     get_hw_node_features,
     get_hw_node_features_synthetic,
     is_synthetic_backend,
+    precompute_c_eff,
+    precompute_c_eff_synthetic,
     precompute_error_distance,
     precompute_error_distance_synthetic,
     precompute_grama_W,
@@ -61,6 +63,7 @@ class MappingSample:
         layout: Raw layout list (optional).
         d_error: (h, h) error-weighted distance matrix (Stage 2).
         d_hw: (h, h) hardware distance matrix (Stage 2).
+        c_eff: (h, h) unified effective cost matrix (Stage 2).
         hw_node_features: (h, 7) quality features for QualityScore (Stage 2).
         circuit_edge_pairs: List of (i, j) logical qubit pairs with 2Q gates.
         circuit_edge_weights: Per-edge interaction count (parallel to circuit_edge_pairs).
@@ -78,6 +81,7 @@ class MappingSample:
         layout: list[int] | None = None,
         d_error: np.ndarray | None = None,
         d_hw: np.ndarray | None = None,
+        c_eff: np.ndarray | None = None,
         hw_node_features: np.ndarray | None = None,
         circuit_edge_pairs: list[tuple[int, int]] | None = None,
         circuit_edge_weights: list[float] | None = None,
@@ -96,6 +100,7 @@ class MappingSample:
         self.layout = layout
         self.d_error = d_error
         self.d_hw = d_hw
+        self.c_eff = c_eff
         self.hw_node_features = hw_node_features
         self.circuit_edge_pairs = circuit_edge_pairs or []
         self.circuit_edge_weights = circuit_edge_weights or []
@@ -113,6 +118,7 @@ class MappingSample:
 _hw_graph_cache: dict[str, Data] = {}
 _d_error_cache: dict[str, np.ndarray] = {}
 _d_hw_cache: dict[str, np.ndarray] = {}
+_c_eff_cache: dict[str, np.ndarray] = {}
 _hw_features_cache: dict[str, np.ndarray] = {}
 _num_physical_cache: dict[str, int] = {}
 _grama_W_cache: dict[str, np.ndarray] = {}
@@ -147,6 +153,17 @@ def _get_error_distance(backend_name: str) -> np.ndarray:
             backend = get_backend(backend_name)
             _d_error_cache[backend_name] = precompute_error_distance(backend)
     return _d_error_cache[backend_name]
+
+
+def _get_c_eff(backend_name: str) -> np.ndarray:
+    """Get unified effective cost matrix, using cache."""
+    if backend_name not in _c_eff_cache:
+        if is_synthetic_backend(backend_name):
+            _c_eff_cache[backend_name] = precompute_c_eff_synthetic(backend_name)
+        else:
+            backend = get_backend(backend_name)
+            _c_eff_cache[backend_name] = precompute_c_eff(backend)
+    return _c_eff_cache[backend_name]
 
 
 def _get_hop_distance(backend_name: str) -> np.ndarray:
@@ -290,6 +307,7 @@ class LazyMappingDataset(Dataset):
         # Stage 2 fields
         d_error = None
         d_hw = None
+        c_eff = None
         hw_feats = None
         circuit_edge_pairs = cache_data.get("circuit_edge_pairs", [])
         circuit_edge_weights = cache_data.get("circuit_edge_weights", [])
@@ -302,6 +320,7 @@ class LazyMappingDataset(Dataset):
         if meta.include_stage2_fields:
             d_error = _get_error_distance(meta.backend_name)
             d_hw = _get_hop_distance(meta.backend_name)
+            c_eff = _get_c_eff(meta.backend_name)
             hw_feats = _get_hw_node_features(meta.backend_name)
             grama_W = _get_grama_W(meta.backend_name)
             sq = _get_grama_sq_costs(meta.backend_name)
@@ -326,6 +345,7 @@ class LazyMappingDataset(Dataset):
             layout=meta.layout,
             d_error=d_error,
             d_hw=d_hw,
+            c_eff=c_eff,
             hw_node_features=hw_feats,
             circuit_edge_pairs=circuit_edge_pairs,
             circuit_edge_weights=circuit_edge_weights,
@@ -546,6 +566,8 @@ def collate_mapping_samples(
         result["d_error"] = torch.tensor(s0.d_error, dtype=torch.float32)
     if s0.d_hw is not None:
         result["d_hw"] = torch.tensor(s0.d_hw, dtype=torch.float32)
+    if s0.c_eff is not None:
+        result["c_eff"] = torch.tensor(s0.c_eff, dtype=torch.float32)
     if s0.hw_node_features is not None:
         result["hw_node_features"] = torch.tensor(
             s0.hw_node_features, dtype=torch.float32,
@@ -558,6 +580,16 @@ def collate_mapping_samples(
         result["qubit_importance"] = torch.tensor(
             s0.qubit_importance, dtype=torch.float32,
         )
+
+    # Build gate-count weighted adjacency Ã_c (l×l) for QAP loss and refinement
+    l = num_logical_list[0]
+    circuit_adj = torch.zeros(l, l, dtype=torch.float32)
+    edge_pairs = s0.circuit_edge_pairs
+    edge_weights = s0.circuit_edge_weights or [1.0] * len(edge_pairs)
+    for (i, j), w in zip(edge_pairs, edge_weights):
+        circuit_adj[i, j] = w
+        circuit_adj[j, i] = w
+    result["circuit_adj"] = circuit_adj
 
     # GraMA fields (per-backend W/s_read/s_gate from s0; per-circuit g_single from s0)
     if s0.grama_W is not None:
@@ -833,6 +865,7 @@ def _load_split_eager(
 
         d_error = None
         d_hw = None
+        c_eff = None
         hw_feats = None
         qubit_importance = None
         circuit_edge_pairs = []
@@ -844,6 +877,7 @@ def _load_split_eager(
         if include_stage2_fields:
             d_error = _get_error_distance(backend_name)
             d_hw = _get_hop_distance(backend_name)
+            c_eff = _get_c_eff(backend_name)
             hw_feats = _get_hw_node_features(backend_name)
             feats = extract_circuit_features(circuit)
             nfd = feats["node_features_dict"]
@@ -870,6 +904,7 @@ def _load_split_eager(
             layout=layout,
             d_error=d_error,
             d_hw=d_hw,
+            c_eff=c_eff,
             hw_node_features=hw_feats,
             circuit_edge_pairs=circuit_edge_pairs,
             circuit_edge_weights=circuit_edge_weights,

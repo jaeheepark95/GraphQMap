@@ -65,8 +65,17 @@ class GraphQMap(nn.Module):
         sinkhorn_max_iter: int = 20,
         sinkhorn_tol: float = 1e-6,
         score_norm: str = "softmax",
+        refine_iterations: int = 0,
+        refine_lambda: float = 1.0,
+        refine_beta: float = 0.9,
     ) -> None:
         super().__init__()
+        self.refine_iterations = refine_iterations
+        self.refine_beta = refine_beta
+        if refine_iterations > 0:
+            self.refine_lambda = nn.Parameter(torch.tensor(refine_lambda))
+        else:
+            self.refine_lambda = None
 
         # Dual GNN encoders (independent, no shared parameters)
         self.circuit_gnn = GNNEncoder(
@@ -152,8 +161,16 @@ class GraphQMap(nn.Module):
         num_physical: int,
         tau: float = 0.05,
         hw_node_features: torch.Tensor | None = None,
+        c_eff: torch.Tensor | None = None,
+        circuit_adj: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Full forward pass: GNN → Cross-Attention → Score → Sinkhorn → P.
+        """Full forward pass: GNN → Cross-Attention → Score → [Iterative Refinement] → P.
+
+        When refine_iterations > 0 and c_eff/circuit_adj are provided, applies
+        iterative QAP mirror descent refinement after initial score computation:
+            S^(t+1) = S^(0) - λ · Ã_c · P^(t) · C_eff
+        This feeds the QAP gradient back into the score, improving layout quality
+        beyond what the GNN alone achieves.
 
         Args:
             circuit_data: Batched PyG Data for circuit graphs.
@@ -163,6 +180,8 @@ class GraphQMap(nn.Module):
             num_physical: Number of physical qubits per sample.
             tau: Sinkhorn temperature.
             hw_node_features: (h, feat_dim) raw hardware features for noise bias.
+            c_eff: (h, h) effective cost matrix for iterative refinement.
+            circuit_adj: (l, l) gate-count weighted adjacency for refinement.
 
         Returns:
             P: Row-stochastic matrix (batch, l, h).
@@ -178,7 +197,31 @@ class GraphQMap(nn.Module):
         # Score matrix (with optional noise bias)
         S = self.score_head(C_prime, H_prime, hw_node_features)  # (batch, l, h)
 
-        # Score normalization
+        # Iterative refinement (QAP mirror descent)
+        if (self.refine_iterations > 0
+                and c_eff is not None and circuit_adj is not None):
+            S_init = S  # save initial GNN-based score
+            c_eff_dev = c_eff.to(device=S.device, dtype=S.dtype)
+            A_c = circuit_adj.to(device=S.device, dtype=S.dtype)
+            tau_t = tau * (1.0 / self.refine_beta)  # will be multiplied by beta
+
+            for _t in range(self.refine_iterations):
+                tau_t = tau_t * self.refine_beta
+                # Soft assignment at current temperature
+                P_t = self.sinkhorn(S, num_logical, num_physical, tau_t)
+                if P_t.shape[1] != num_logical:
+                    P_t = P_t[:, :num_logical, :]
+
+                # Z = P @ C_eff: expected cost landscape
+                Z = torch.matmul(P_t, c_eff_dev)  # (B, l, h)
+
+                # QAP gradient feedback: Ã_c @ Z
+                feedback = torch.matmul(A_c, Z)  # (B, l, h) — A_c broadcast
+
+                # Update score: subtract fidelity-improving direction
+                S = S_init - self.refine_lambda * feedback
+
+        # Final normalization
         P = self.sinkhorn(S, num_logical, num_physical, tau)
 
         # Sinkhorn returns (batch, h, h) with dummy rows; extract logical rows
@@ -197,6 +240,8 @@ class GraphQMap(nn.Module):
         num_physical: int,
         tau: float = 0.05,
         hw_node_features: torch.Tensor | None = None,
+        c_eff: torch.Tensor | None = None,
+        circuit_adj: torch.Tensor | None = None,
     ) -> list[dict[int, int]]:
         """Inference: forward pass + Hungarian decoding.
 
@@ -208,6 +253,8 @@ class GraphQMap(nn.Module):
             num_physical: Number of physical qubits per sample.
             tau: Sinkhorn temperature.
             hw_node_features: (h, feat_dim) raw hardware features for noise bias.
+            c_eff: (h, h) effective cost matrix for iterative refinement.
+            circuit_adj: (l, l) gate-count weighted adjacency for refinement.
 
         Returns:
             List of layout dicts {logical_qubit: physical_qubit}.
@@ -215,7 +262,7 @@ class GraphQMap(nn.Module):
         self.eval()
         P = self.forward(
             circuit_data, hardware_data, batch_size, num_logical, num_physical,
-            tau, hw_node_features,
+            tau, hw_node_features, c_eff, circuit_adj,
         )
         return hungarian_decode_batch(P, num_logical)
 
@@ -237,6 +284,12 @@ class GraphQMap(nn.Module):
         else:
             circuit_node_dim = getattr(cfg.model.circuit_gnn, "node_input_dim", 4)
 
+        # Iterative refinement config
+        refine_cfg = getattr(cfg.model, "iterative_refinement", None)
+        refine_iterations = getattr(refine_cfg, "iterations", 0) if refine_cfg else 0
+        refine_lambda = getattr(refine_cfg, "lambda_init", 1.0) if refine_cfg else 1.0
+        refine_beta = getattr(refine_cfg, "beta", 0.9) if refine_cfg else 0.9
+
         return cls(
             circuit_node_dim=circuit_node_dim,
             circuit_edge_dim=cfg.model.circuit_gnn.edge_input_dim,
@@ -255,4 +308,7 @@ class GraphQMap(nn.Module):
             sinkhorn_max_iter=cfg.sinkhorn.max_iter,
             sinkhorn_tol=cfg.sinkhorn.tolerance,
             score_norm=getattr(cfg.sinkhorn, "score_norm", "softmax"),
+            refine_iterations=refine_iterations,
+            refine_lambda=refine_lambda,
+            refine_beta=refine_beta,
         )

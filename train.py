@@ -15,8 +15,9 @@ import torch
 import numpy as np
 
 from configs.config_loader import parse_args_with_config
+from data.circuit_graph import extract_circuit_features
 from data.dataset import create_dataloader, load_split
-from data.hardware_graph import configure_hw_features
+from data.hardware_graph import configure_hw_features, precompute_c_eff
 from models.graphqmap import GraphQMap
 from training.trainer import Stage1Trainer, Stage2Trainer
 
@@ -136,6 +137,14 @@ def _build_val_pst_fn(cfg, device: torch.device):
         for vb in val_backends:
             hw_batch = Batch.from_data_list([vb["hw_graph"]]).to(device)
 
+            # Precompute C_eff for this validation backend (cached)
+            vb_c_eff = None
+            if model.refine_iterations > 0:
+                vb_c_eff = torch.tensor(
+                    precompute_c_eff(vb["backend"]),
+                    dtype=torch.float32,
+                ).to(device)
+
             for cname, circuit in vb["circuits"]:
                 num_logical = circuit.num_qubits
                 circuit_graph = build_circuit_graph(
@@ -144,6 +153,21 @@ def _build_val_pst_fn(cfg, device: torch.device):
                 )
                 circuit_batch = Batch.from_data_list([circuit_graph]).to(device)
 
+                # Build circuit_adj for iterative refinement
+                vb_circuit_adj = None
+                if model.refine_iterations > 0:
+                    feats = extract_circuit_features(circuit)
+                    vb_circuit_adj = torch.zeros(
+                        num_logical, num_logical, dtype=torch.float32,
+                    )
+                    for (ci, cj), w in zip(
+                        feats["edge_list"],
+                        feats["edge_features"][:, 0].tolist(),
+                    ):
+                        vb_circuit_adj[ci, cj] = w
+                        vb_circuit_adj[cj, ci] = w
+                    vb_circuit_adj = vb_circuit_adj.to(device)
+
                 with torch.no_grad():
                     layouts = model.predict(
                         circuit_batch, hw_batch,
@@ -151,6 +175,8 @@ def _build_val_pst_fn(cfg, device: torch.device):
                         num_logical=num_logical,
                         num_physical=vb["num_physical"],
                         tau=tau,
+                        c_eff=vb_c_eff,
+                        circuit_adj=vb_circuit_adj,
                     )
                 layout = list(layouts[0].values())
 

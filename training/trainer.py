@@ -405,6 +405,14 @@ class Stage2Trainer:
             if hw_feats is not None:
                 hw_feats = hw_feats.to(self.device)
 
+            # C_eff and circuit_adj for iterative refinement and QAP loss
+            c_eff = batch.get("c_eff")
+            if c_eff is not None:
+                c_eff = c_eff.to(self.device)
+            circuit_adj = batch.get("circuit_adj")
+            if circuit_adj is not None:
+                circuit_adj = circuit_adj.to(self.device)
+
             P = self.model(
                 circuit_batch, hardware_batch,
                 batch_size=batch_size,
@@ -412,6 +420,8 @@ class Stage2Trainer:
                 num_physical=num_physical,
                 tau=tau,
                 hw_node_features=hw_feats,
+                c_eff=c_eff,
+                circuit_adj=circuit_adj,
             )
 
             # Build kwargs for loss components — pass all available fields
@@ -427,6 +437,10 @@ class Stage2Trainer:
                 loss_kwargs["d_hw"] = batch["d_hw"].to(self.device)
             if "d_error" in batch:
                 loss_kwargs["d_error"] = batch["d_error"].to(self.device)
+            if c_eff is not None:
+                loss_kwargs["c_eff"] = c_eff
+            if circuit_adj is not None:
+                loss_kwargs["circuit_adj"] = circuit_adj
             if "grama_W" in batch:
                 loss_kwargs["grama_W"] = batch["grama_W"].to(self.device)
             if "grama_s_read" in batch:
