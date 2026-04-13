@@ -138,10 +138,10 @@ python train.py --config configs/stage1.yaml --name lr_test \
 # Evaluation (model + baselines on all 3 test backends, auto-saved to runs/eval/<RUN>/)
 python evaluate.py --config configs/stage2.yaml \
   --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
-  --backend toronto brooklyn torino --reps 3
+  --backend toronto rochester washington --reps 3
 
 # Benchmark (baselines only, no model)
-python evaluate.py --benchmark --backend toronto brooklyn torino
+python evaluate.py --benchmark --backend toronto rochester washington
 
 # Manual visualization (for comparing runs or standalone eval CSV)
 python scripts/visualize.py runs/stage1/<RUN> runs/stage2/<RUN>
@@ -234,16 +234,17 @@ python scripts/visualize.py runs/stage1/<RUN> --no-show
 
 ## Hardware Backends
 - **Stage 1 Training (49 Qiskit + 5 synthetic = 54 backends)**:
-  - Qiskit FakeBackendV2: 5Q×15, 7Q×6, 15-16Q×2, 20Q×5, 27-28Q×11, 33Q×1, 53Q×1, 127Q×8
+  - Qiskit FakeBackendV2: 5Q×15, 7Q×6, 15-16Q×2, 20Q×5, 27-28Q×11, 33Q×1, 65Q×1, 127Q×7, 133Q×1
   - Synthetic: queko_aspen4(16Q), queko_tokyo(20Q), queko_rochester(53Q), queko_sycamore(54Q), mlqd_grid5x5(25Q)
 - **Stage 2 Training (49 Qiskit backends only)**:
   - Synthetic backends excluded; QUEKO/MLQD circuits randomly re-assigned to real backends at data load time
+  - FakeBrooklyn(65Q) and FakeTorino(133Q) now in training pool (previously test, moved 2026-04-13)
 - **Validation (held-out, PST checkpoint selection)**: FakeMumbai(27Q, Falcon r5.11), FakeManhattan(65Q, Hummingbird r2)
   - Used for PST checkpoint selection in Stage 2 (every `pst_validation.interval` epochs)
-  - Removed from training pool; size-matched to test backends (Toronto 27Q, Brooklyn 65Q)
-  - FakeWashington (127Q) was previously in validation but removed due to segfault on 127Q PST simulation
-- **Test (UNSEEN by both training and validation)**: FakeToronto(27Q), FakeBrooklyn(65Q), FakeTorino(133Q)
+  - Removed from training pool; size-matched to test backends (Toronto 27Q, Rochester 53Q)
+- **Test (UNSEEN by both training and validation)**: FakeToronto(27Q), FakeRochester(53Q), FakeWashington(127Q)
   - Evaluated **once** at the end via `evaluate.py`; never used for checkpoint/model selection
+  - **⚠ FakeWashington (127Q)**: previously had segfault during PST validation — monitor carefully during evaluation
 - Native 2-qubit gates: cx, ecr, or cz (auto-detected via `_get_two_qubit_gate_name()`)
 - **History note (val=test leakage)**: ALL runs prior to 2026-04-10 had val=test leakage — including C3 size-aware runs (2026-04-09). The config files were corrected (validation backends added) AFTER the C3 runs had already started. Saved config.yaml in C3 run directories confirms: `backends.validation` missing, Mumbai/Manhattan in training list. All historical eval numbers are upper-bound estimates contaminated by checkpoint selection on test backends. First clean runs: `repro_C3_*` (2026-04-10).
 
@@ -681,7 +682,7 @@ New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft
 - **Stage 1 pretrained checkpoint harmful**: Controlled test (2 pretrained vs 4 scratch runs) confirmed negative transfer. Pretrained avg eval PST 0.527, scratch avg 0.522 at best but with wider variance. Stage 1 CE-trained weights interfere with Stage 2 surrogate loss optimization.
 - **High run-to-run variance**: Same config + same seed produces eval PST range of 0.395-0.589 across runs. Non-deterministic CUDA ops, dataloader shuffle, and multi-programming random assignment contribute. Single-run results are unreliable — always run 2+ seeds.
 - **Sinkhorn >> Softmax (under re-evaluation)**: Previous controlled test showed Sinkhorn +0.086 PST over softmax, but that test (1) had val=test leakage and (2) used the old column-sum-squared exclusion loss which pushed toward uniform spread rather than preventing collision. Re-testing with pairwise collision exclusion loss (2026-04-10).
-- **HW feature gaps in older backends**: `single_qubit_error` ALL ZERO on 10 backends (burlington, essex, london, almaden, boeblingen, johannesburg, poughkeepsie, singapore, cambridge, rochester); `2q_gate_error` ALL ZERO on kyoto. Total 11/55 training backends (20%). These are FakeBackendV2 data gaps, not code bugs. Model learns to handle zero-variance features via z-score → all-zero column. Future experiment: exclude these backends and measure impact.
+- **HW feature gaps in older backends**: `single_qubit_error` ALL ZERO on 10 backends (burlington, essex, london, almaden, boeblingen, johannesburg, poughkeepsie, singapore, cambridge, rochester); `2q_gate_error` ALL ZERO on kyoto. These are FakeBackendV2 data gaps, not code bugs. Model learns to handle zero-variance features via z-score → all-zero column. **Note**: Rochester (53Q) is now a test backend (moved 2026-04-13) — its `single_qubit_error` ALL ZERO may affect eval PST. 9 remaining training backends with this gap + 1 test backend.
 - **Feature-indistinguishable circuits**: 16% of original training data (VQE, QNN, GHZ parametric circuits) had >30% indistinguishable qubit pairs. Removed via filtering. MLQD sqr=0 (57% of MLQD) retained — other features still differentiate qubits.
 - **Structural near-duplicates dominated training data (resolved 2026-04-08)**: Pre-Step-7 nominal 5,757 training circuits had only ~487 effective unique structures (8.5%) when grouped by `(num_qubits, num_edges, sorted_degree_sequence)` fingerprint. QUEKO had 215-circuit clusters of random-seed variants and MLQD had 359-circuit clusters of structurally identical small circuits across different algorithm names. Strong diversity filter (Step 7, K=1 per fingerprint) reduces training to 969 circuits — represents the actual structural variety the model can learn from. Validation set drops to 28 circuits → expect higher val metric variance.
 

@@ -2,13 +2,13 @@
 
 Usage:
     # Model evaluation with baselines (auto-saves to runs/eval/<run_name>/)
-    python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto brooklyn torino --reps 3
+    python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto rochester washington --reps 3
 
     # Custom output path
     python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto --reps 3 --output runs/eval/custom/eval_results.csv
 
     # Benchmark mode (baselines only, no model)
-    python evaluate.py --benchmark --backend toronto brooklyn torino
+    python evaluate.py --benchmark --backend toronto rochester washington
 """
 
 from __future__ import annotations

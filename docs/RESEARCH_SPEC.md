@@ -1105,9 +1105,9 @@ max_total_nodes = 512  # Total physical qubits per batch (tune to GPU memory)
 
 | Role | Backends |
 |------|----------|
-| **Training** (53 backends) | **5Q:** Athens, Belem, Bogota, Burlington, Essex, Lima, London, Manila, Ourense, Quito, Rome, Santiago, Valencia, Vigo, Yorktown · **7Q:** Casablanca, Jakarta, Lagos, Nairobi, Oslo, Perth · **15-16Q:** Melbourne, Guadalupe · **20Q:** Almaden, Boeblingen, Johannesburg, Poughkeepsie, Singapore · **27-28Q:** Algiers, Auckland, Cairo, Cambridge, Geneva, Hanoi, Kolkata, Montreal, Paris, Peekskill, Sydney · **33Q:** Prague · **53Q:** Rochester · **127Q:** Brisbane, Cusco, Kawasaki, Kyiv, Kyoto, Osaka, Quebec, Sherbrooke, Washington |
+| **Training** (49 backends) | **5Q:** Athens, Belem, Bogota, Burlington, Essex, Lima, London, Manila, Ourense, Quito, Rome, Santiago, Valencia, Vigo, Yorktown · **7Q:** Casablanca, Jakarta, Lagos, Nairobi, Oslo, Perth · **15-16Q:** Melbourne, Guadalupe · **20Q:** Almaden, Boeblingen, Johannesburg, Poughkeepsie, Singapore · **27-28Q:** Algiers, Auckland, Cairo, Cambridge, Geneva, Hanoi, Kolkata, Montreal, Paris, Peekskill, Sydney · **33Q:** Prague · **65Q:** Brooklyn · **127Q:** Brisbane, Cusco, Kawasaki, Kyiv, Kyoto, Osaka, Quebec, Sherbrooke · **133Q:** Torino |
 | **Validation** (held-out, checkpoint selection) | **FakeMumbai (27Q)**, **FakeManhattan (65Q)** — removed from training pool to prevent test leakage during PST validation |
-| **Test (UNSEEN)** | **FakeToronto (27Q)**, **FakeBrooklyn (65Q)**, **FakeTorino (133Q)** — completely excluded from training and validation |
+| **Test (UNSEEN)** | **FakeToronto (27Q)**, **FakeRochester (53Q)**, **FakeWashington (127Q)** — completely excluded from training and validation |
 
 This split enables rigorous evaluation of **hardware-agnostic generalization**.
 
@@ -1188,7 +1188,7 @@ Results presented as pandas DataFrame with per-circuit PST, depth, CX count, tim
     └── pst_heatmap_*.png    # PST heatmaps (circuit × method per backend)
 ```
 
-When evaluating multiple backends (e.g. `--backend toronto brooklyn torino`), all results are collected into a single combined CSV. Summary tables include per-backend sections with per-circuit breakdowns and AVG rows.
+When evaluating multiple backends (e.g. `--backend toronto rochester washington`), all results are collected into a single combined CSV. Summary tables include per-backend sections with per-circuit breakdowns and AVG rows.
 
 ### Baselines
 

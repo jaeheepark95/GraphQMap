@@ -105,8 +105,8 @@ backends:
     - FakeMumbai             # 27Q — same size class as Toronto
   test:
     - FakeToronto
-    - FakeBrooklyn
-    - FakeTorino
+    - FakeRochester
+    - FakeWashington
 
 seed: 42
 device: cuda

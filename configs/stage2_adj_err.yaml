@@ -150,8 +150,8 @@ backends:
     - FakePeekskill
     - FakeSydney
     - FakePrague
-    - FakeRochester
-    - FakeWashington
+    - FakeBrooklyn
+    - FakeTorino
     - FakeBrisbane
     - FakeCusco
     - FakeKawasaki
@@ -160,14 +160,13 @@ backends:
     - FakeOsaka
     - FakeQuebec
     - FakeSherbrooke
-    - FakeWashington
   validation:
     - FakeMumbai
     - FakeManhattan
   test:
     - FakeToronto
-    - FakeBrooklyn
-    - FakeTorino
+    - FakeRochester
+    - FakeWashington
 
 # ---- Misc ----
 seed: 43

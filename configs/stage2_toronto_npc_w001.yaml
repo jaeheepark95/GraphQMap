@@ -108,8 +108,8 @@ backends:
     - FakeManhattan          # 65Q
   test:
     - FakeToronto
-    - FakeBrooklyn
-    - FakeTorino
+    - FakeRochester
+    - FakeWashington
 
 seed: 42
 device: cuda

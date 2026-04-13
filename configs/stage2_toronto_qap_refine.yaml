@@ -114,8 +114,8 @@ backends:
     - FakeMumbai
   test:
     - FakeToronto
-    - FakeBrooklyn
-    - FakeTorino
+    - FakeRochester
+    - FakeWashington
 
 seed: 42
 device: cuda

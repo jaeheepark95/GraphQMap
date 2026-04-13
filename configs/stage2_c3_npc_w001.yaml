@@ -150,7 +150,7 @@ backends:
     - FakePeekskill
     - FakeSydney
     - FakePrague
-    - FakeRochester
+    - FakeBrooklyn
     - FakeBrisbane
     - FakeCusco
     - FakeKawasaki
@@ -159,14 +159,14 @@ backends:
     - FakeOsaka
     - FakeQuebec
     - FakeSherbrooke
-    - FakeWashington
+    - FakeTorino
   validation:
     - FakeMumbai
     - FakeManhattan
   test:
     - FakeToronto
-    - FakeBrooklyn
-    - FakeTorino
+    - FakeRochester
+    - FakeWashington
 
 seed: 42
 device: cuda

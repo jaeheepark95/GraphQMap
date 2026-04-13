@@ -101,15 +101,15 @@ batching:
 backends:
   training:
     - FakeKolkata            # 27Q  — small
-    - FakeRochester          # 53Q  — medium
+    - FakeBrooklyn          # 65Q  — medium
     - FakeSherbrooke         # 127Q — large
   validation:
     - FakeMumbai             # 27Q
     - FakeManhattan          # 65Q
   test:
     - FakeToronto
-    - FakeBrooklyn
-    - FakeTorino
+    - FakeRochester
+    - FakeWashington
 
 seed: 42
 device: cuda

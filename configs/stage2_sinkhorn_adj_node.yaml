@@ -166,7 +166,7 @@ backends:
     # 33Q
     - FakePrague
     # 53Q
-    - FakeRochester
+    - FakeBrooklyn
     # 127Q
     - FakeBrisbane
     - FakeCusco
@@ -176,7 +176,7 @@ backends:
     - FakeOsaka
     - FakeQuebec
     - FakeSherbrooke
-    - FakeWashington
+    - FakeTorino
     # NOTE: Synthetic backends (queko_*, mlqd_*) are Stage 1 only.
     # Stage 2 uses 55 real Qiskit backends; QUEKO/MLQD circuits are
     # randomly re-assigned to real backends at data load time.
@@ -185,8 +185,8 @@ backends:
     - FakeManhattan          # 65Q
   test:
     - FakeToronto            # 27Q
-    - FakeBrooklyn           # 65Q
-    - FakeTorino             # 133Q
+    - FakeRochester           # 53Q
+    - FakeWashington             # 127Q
 
 # ---- Misc ----
 seed: 42

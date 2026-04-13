@@ -178,7 +178,7 @@ backends:
     # 33Q
     - FakePrague
     # 53Q
-    - FakeRochester
+    - FakeBrooklyn
     # 65Q (Manhattan held out → validation)
     # 127Q
     - FakeBrisbane
@@ -189,14 +189,14 @@ backends:
     - FakeOsaka
     - FakeQuebec
     - FakeSherbrooke
-    - FakeWashington
+    - FakeTorino
   validation:
     - FakeMumbai             # 27Q
     - FakeManhattan          # 65Q
   test:
     - FakeToronto
-    - FakeBrooklyn
-    - FakeTorino
+    - FakeRochester
+    - FakeWashington
 
 # ---- Misc ----
 seed: 42
