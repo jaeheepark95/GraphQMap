@@ -1,12 +1,14 @@
-# Stage 2: Toronto-only QAP Fidelity + Iterative Refinement
+# Stage 2: Toronto-only, ZERO SCORE INIT (S=0, refinement only)
 #
-# Single-backend experiment to test:
-# 1. C_eff cost matrix (3×ε₂ SWAP cost)
-# 2. Unified QAP loss: tr(Ã_c P C_eff P^T)
-# 3. Iterative score refinement (5-step mirror descent)
+# Decisive experiment: S^(0) = 0, no GNN/CrossAttn/ScoreHead.
+# Only refine_lambda (1 param) is learned.
+# Tests whether iterative QAP refinement alone matches
+# the full 70K-param GNN model — i.e., whether the GNN
+# contributes anything beyond analytical QAP optimization.
 
 model:
   embedding_dim: 64
+  zero_score_init: true
 
   circuit_gnn:
     node_features:
@@ -44,14 +46,14 @@ model:
     noise_bias_dim: 0
 
   iterative_refinement:
-    iterations: 0
+    iterations: 5
     lambda_init: 1.0
     beta: 0.9
 
 sinkhorn:
   score_norm: sinkhorn
-  tau_max: 0.5
-  tau_min: 0.5
+  tau_max: 1.0
+  tau_min: 0.05
   schedule: exponential
   max_iter: 20
   tolerance: 1.0e-6
@@ -91,7 +93,7 @@ loss:
 data:
   data_root: data/circuits
   splits:
-    train: data/circuits/splits/stage2_all.json
+    train: data/circuits/splits/stage2_curated.json
 
   multi_programming:
     scenarios: [1, 2, 4]

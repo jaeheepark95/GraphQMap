@@ -472,9 +472,10 @@ def main() -> None:
             # Generate plots
             import matplotlib
             matplotlib.use("Agg")
-            from scripts.visualize import plot_eval
+            from scripts.visualize import plot_eval, plot_pst_table
             for bname in args.backend:
                 plot_eval(output_path, save_dir=eval_dir, backend_label=bname)
+            plot_pst_table(output_path, save_dir=eval_dir)
             logger.info("Eval results saved to %s", eval_dir)
 
 

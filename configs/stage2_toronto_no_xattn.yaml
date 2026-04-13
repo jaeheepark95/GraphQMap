@@ -1,9 +1,9 @@
-# Stage 2: Toronto-only QAP Fidelity + Iterative Refinement
+# Stage 2: Toronto-only, NO Cross-Attention (bypass)
 #
-# Single-backend experiment to test:
-# 1. C_eff cost matrix (3×ε₂ SWAP cost)
-# 2. Unified QAP loss: tr(Ã_c P C_eff P^T)
-# 3. Iterative score refinement (5-step mirror descent)
+# Experiment 1b: Remove cross-attention entirely.
+# GNN output goes directly to ScoreHead.
+# Motivation: Cross-attention collapses logical qubit embeddings
+# (cos_sim 0.74 → 0.999), destroying qubit identity.
 
 model:
   embedding_dim: 64
@@ -34,6 +34,7 @@ model:
     residual_layers: [2, 3]
 
   cross_attention:
+    bypass: true
     num_layers: 2
     num_heads: 4
     ffn_hidden_dim: 128
@@ -44,14 +45,14 @@ model:
     noise_bias_dim: 0
 
   iterative_refinement:
-    iterations: 0
+    iterations: 5
     lambda_init: 1.0
     beta: 0.9
 
 sinkhorn:
   score_norm: sinkhorn
-  tau_max: 0.5
-  tau_min: 0.5
+  tau_max: 1.0
+  tau_min: 0.05
   schedule: exponential
   max_iter: 20
   tolerance: 1.0e-6
@@ -91,7 +92,7 @@ loss:
 data:
   data_root: data/circuits
   splits:
-    train: data/circuits/splits/stage2_all.json
+    train: data/circuits/splits/stage2_curated.json
 
   multi_programming:
     scenarios: [1, 2, 4]

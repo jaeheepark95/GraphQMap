@@ -679,9 +679,12 @@ class GraMALoss(nn.Module):
 class QAPFidelityLoss(nn.Module):
     """L_qap: Unified QAP fidelity loss using C_eff.
 
-    Implements tr(Ã_c P C_eff P^T) — the matrix form of the QAP objective
-    where C_eff encodes SWAP chain costs (3×ε₂ per SWAP) and direct gate
-    costs (ε₂ for adjacent pairs) in a single cost matrix.
+    Implements tr(Ã_c P C_eff P^T) + 1^T P ε_r — the full QAP objective
+    (Eq. 1 from noise-aware iterative attention paper).
+
+    Edge term: tr(Ã_c P C_eff P^T) — gate-weighted SWAP chain + direct gate cost.
+    Readout term: 1^T P ε_r = Σ_j ε_r(j)·c_j — sum of readout errors of
+    mapped physical qubits (c_j = column sum of l×h slice of P).
 
     Advantages over separate error_distance + adjacency losses:
     - No artificial weighting between loss components needed
@@ -690,14 +693,23 @@ class QAPFidelityLoss(nn.Module):
     - Gradient does not saturate: SWAP chain costs provide large dynamic range
     - Naturally size-aware: larger backends have larger C_eff values
 
-    The gradient ∂L/∂P = 2·Ã_c·P·C_eff is also used for iterative score
-    refinement (mirror descent feedback term).
+    The gradient ∂L/∂P = 2·Ã_c·P·C_eff + ε_r is also used for iterative
+    score refinement (mirror descent feedback term).
+
+    Normalization: default "per_term" normalizes edge by Σg (total gate weight)
+    and readout by l (num logical qubits), producing size-invariant loss values.
+    edge/Σg ≈ "per-gate avg fidelity cost", readout/l ≈ "per-qubit avg readout
+    cost". Both are ~O(0.01-1.0) regardless of circuit size.
 
     Args:
-        normalize: If True, divide by (l + |E|) for cross-batch comparability.
+        normalize: Normalization mode.
+            - "legacy": divide (edge + readout) by (l + |E|). Size-dependent.
+            - True / "per_term": edge/Σg + readout/l. Size-invariant,
+              each term in natural units (per-gate cost + per-qubit cost).
+            - False: no normalization (raw sums).
     """
 
-    def __init__(self, normalize: bool = True) -> None:
+    def __init__(self, normalize: bool | str = True) -> None:
         super().__init__()
         self.normalize = normalize
 
@@ -707,6 +719,8 @@ class QAPFidelityLoss(nn.Module):
         Required kwargs:
             c_eff: (h, h) effective cost matrix.
             circuit_adj: (l, l) gate-count weighted adjacency matrix Ã_c.
+        Optional kwargs:
+            grama_s_read: (h,) raw readout error vector ε_r per physical qubit.
         """
         c_eff = kwargs.get("c_eff")
         circuit_adj = kwargs.get("circuit_adj")
@@ -717,18 +731,38 @@ class QAPFidelityLoss(nn.Module):
         c_eff = c_eff.to(device=P.device, dtype=P.dtype)
         circuit_adj = circuit_adj.to(device=P.device, dtype=P.dtype)
 
-        # tr(Ã_c P C_eff P^T) = sum_{i,j,k,l} Ã_c[i,j] P[j,k] C_eff[k,l] P[i,l]
+        # Edge term: tr(Ã_c P C_eff P^T)
         # Efficient: PC = P @ C_eff, then sum (Ã_c @ PC) * P
         PC = torch.matmul(P, c_eff)          # (B, l, h)
         APC = torch.matmul(circuit_adj, PC)   # (B, l, h) — Ã_c broadcast over batch
-        trace = (APC * P).sum(dim=(-2, -1))   # (B,)
+        edge_term = (APC * P).sum(dim=(-2, -1))   # (B,)
 
-        if self.normalize:
+        # Readout term: 1^T P ε_r = Σ_j ε_r(j) · c_j
+        # Encourages mapping to low-readout-error physical qubits.
+        # c_j = column sum of P (l×h slice) — varies per physical qubit.
+        eps_r = kwargs.get("grama_s_read")
+        readout_term = torch.zeros_like(edge_term)
+        if eps_r is not None:
+            eps_r = eps_r.to(device=P.device, dtype=P.dtype)
+            readout_term = torch.matmul(P.sum(dim=1), eps_r)  # (B,)
+
+        norm_mode = self.normalize
+        if norm_mode == "legacy":
+            # Old normalization: (edge + readout) / (l + |E|)
             l = P.size(1)
             num_edges = max((circuit_adj > 0).sum().item() // 2, 1)
-            trace = trace / (l + num_edges)
+            loss = (edge_term + readout_term) / (l + num_edges)
+        elif norm_mode is True or norm_mode == "per_term":
+            # Per-term normalization: edge/Σg + readout/l
+            # Σg = total gate weight = sum of all entries in Ã_c / 2 (symmetric)
+            total_gate_weight = circuit_adj.sum().item() / 2.0
+            total_gate_weight = max(total_gate_weight, 1.0)
+            l = P.size(1)
+            loss = edge_term / total_gate_weight + readout_term / l
+        else:
+            loss = edge_term + readout_term
 
-        return trace.mean()
+        return loss.mean()
 
 
 @register_loss("exclusion")
