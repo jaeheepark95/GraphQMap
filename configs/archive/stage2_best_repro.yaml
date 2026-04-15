@@ -1,0 +1,198 @@
+# GraphQMap Stage 2: Reproduction of Historical Best (20260402_004812_filtered_sinkhorn_adj)
+#
+# Source: runs/stage2/20260402_004812_filtered_sinkhorn_adj/config.yaml
+# Original eval (with val=test leakage): OURS+SABRE 3-backend avg 0.589
+#
+# Differences from original:
+# - Hardware backends: Mumbai/Manhattan/Washington moved to validation (held-out)
+# - cfg.backends.validation added → train.py uses it for PST checkpoint selection
+# - Test backends now evaluated only at the end (no leakage)
+#
+# Reproducible vs original (same hyperparameters):
+# - HW node_input_dim: 5 (NOT 6 — pre-Phase 2; no t2_t1_ratio)
+# - HW edge_input_dim: 1 (NOT 2 — pre-Phase 2; no edge_coherence_ratio)
+# - Circuit edge_input_dim: 3 (NOT 5 — pre-Phase 3; no span/density)
+# - Loss: error_distance(1.0) + adjacency(0.3)
+# - Score norm: sinkhorn
+
+# ---- Model Architecture ----
+model:
+  embedding_dim: 64
+
+  circuit_gnn:
+    node_features:
+      - gate_count
+      - two_qubit_gate_count
+      - single_qubit_gate_ratio
+      - critical_path_fraction
+    rwpe_k: 2                  # node_input_dim = 4 + 2 = 6
+    edge_input_dim: 3
+    num_layers: 3
+    num_heads: 4
+    activation: elu
+    dropout: 0.1
+    use_batchnorm: true
+    residual_layers: [2, 3]
+
+  hardware_gnn:
+    node_input_dim: 5          # readout_err, sq_err, degree, t1_cx_ratio, t2_cx_ratio
+    edge_input_dim: 1          # 2q_gate_error only
+    num_layers: 3
+    num_heads: 4
+    activation: elu
+    dropout: 0.1
+    use_batchnorm: true
+    residual_layers: [2, 3]
+
+  cross_attention:
+    num_layers: 2
+    num_heads: 4
+    ffn_hidden_dim: 128
+    dropout: 0.1
+
+  score_head:
+    d_k: 64
+    noise_bias_dim: 0          # disabled
+
+# ---- Sinkhorn ----
+sinkhorn:
+  score_norm: sinkhorn
+  tau_max: 1.0
+  tau_min: 0.05
+  schedule: exponential
+  max_iter: 20
+  tolerance: 1.0e-6
+
+# ---- Training ----
+training:
+  optimizer:
+    type: adamw
+    lr: 5.0e-4
+    weight_decay: 1.0e-4
+  scheduler:
+    type: cosine_annealing
+    T_max: 100
+    eta_min: 1.0e-5
+  warmup_epochs: 2
+  grad_clip_norm: 2.0
+
+  max_epochs: 100
+  early_stopping:
+    monitor: val_pst
+    patience: 10
+    min_delta: 0.005
+
+  pst_validation:
+    interval: 5
+    num_circuits: 200
+    convergence_checks: 3
+
+# ---- Loss ----
+loss:
+  type: surrogate
+  components:
+    - name: error_distance
+      weight: 1.0
+    - name: adjacency
+      weight: 0.3
+
+# ---- Data ----
+data:
+  data_root: data/circuits
+  splits:
+    train: data/circuits/splits/stage2_all.json
+
+  multi_programming:
+    scenarios: [1, 2, 4]
+    proportions: [0.5, 0.3, 0.2]
+    occupancy_min: 0.3
+    occupancy_max: 0.75
+
+  normalization:
+    epsilon: 1.0e-8
+
+# ---- Batching ----
+batching:
+  max_total_nodes: 512
+  backend_balanced: true
+  large_backend_boost: 2.0
+
+# ---- Hardware Backends ----
+backends:
+  training:
+    # 5Q
+    - FakeAthens
+    - FakeBelem
+    - FakeBogota
+    - FakeBurlington
+    - FakeEssex
+    - FakeLima
+    - FakeLondon
+    - FakeManila
+    - FakeOurense
+    - FakeQuito
+    - FakeRome
+    - FakeSantiago
+    - FakeValencia
+    - FakeVigo
+    - FakeYorktown
+    # 7Q
+    - FakeCasablanca
+    - FakeJakarta
+    - FakeLagos
+    - FakeNairobi
+    - FakeOslo
+    - FakePerth
+    # 15-16Q
+    - FakeMelbourne
+    - FakeGuadalupe
+    # 20Q
+    - FakeAlmaden
+    - FakeBoeblingen
+    - FakeJohannesburg
+    - FakePoughkeepsie
+    - FakeSingapore
+    # 27-28Q (Mumbai held out → validation)
+    - FakeAlgiers
+    - FakeAuckland
+    - FakeCairo
+    - FakeCambridge
+    - FakeGeneva
+    - FakeHanoi
+    - FakeKolkata
+    - FakeMontreal
+    - FakeParis
+    - FakePeekskill
+    - FakeSydney
+    # 33Q
+    - FakePrague
+    # 53Q
+    - FakeBrooklyn
+    # 65Q (Manhattan held out → validation)
+    # 127Q
+    - FakeTorino
+    - FakeBrisbane
+    - FakeCusco
+    - FakeKawasaki
+    - FakeKyiv
+    - FakeKyoto
+    - FakeOsaka
+    - FakeQuebec
+    - FakeSherbrooke
+  validation:
+    # Held-out from training pool — used for PST checkpoint selection.
+    - FakeMumbai             # 27Q,  Falcon r5.11 — Toronto match
+    - FakeManhattan          # 65Q,  Hummingbird r2 — Rochester match
+    # FakeWashington (127Q) had segfault in PST val — now test backend, monitor carefully
+  test:
+    # Final eval only — never seen during training or model selection.
+    - FakeToronto            # 27Q
+    - FakeRochester          # 53Q
+    - FakeWashington         # 127Q
+
+# ---- Misc ----
+seed: 43
+device: cuda
+num_workers: 4
+log_dir: logs/stage2
+checkpoint_dir: checkpoints/stage2

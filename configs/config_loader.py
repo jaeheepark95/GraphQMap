@@ -90,14 +90,13 @@ def load_config_with_base(base_path: str | Path, override_path: str | Path) -> C
 def _setup_run_dir(cfg_dict: dict[str, Any], name: str | None, config_path: str) -> None:
     """Create timestamped run directory and update checkpoint_dir/log_dir in-place.
 
-    Directory structure: runs/stage{N}/{YYYYMMDD_HHMMSS}_{name}/
+    Directory structure: runs/train/{YYYYMMDD_HHMMSS}_{name}/
     Also saves a config snapshot (config.yaml) into the run directory.
     """
-    stage = cfg_dict.get("training", {}).get("stage", "unknown")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"{timestamp}_{name}" if name else timestamp
 
-    run_dir = Path("runs") / f"stage{stage}" / run_name
+    run_dir = Path("runs/train") / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     cfg_dict["checkpoint_dir"] = str(run_dir / "checkpoints")
@@ -112,13 +111,10 @@ def _setup_run_dir(cfg_dict: dict[str, Any], name: str | None, config_path: str)
         f.write(config_path)
 
     # Generate experiment note template
-    overrides = [f"  - {k}: {v}" for k, v in cfg_dict.items()
-                 if k in ("pretrained_checkpoint",)]
     note_path = run_dir / "note.md"
     if not note_path.exists():
         with open(note_path, "w") as f:
             f.write(f"# {run_name}\n\n")
-            f.write(f"**Stage**: {stage}\n")
             f.write(f"**Base config**: {config_path}\n\n")
             f.write("## What changed\n\n- \n\n")
             f.write("## Hypothesis\n\n\n\n")
@@ -129,8 +125,8 @@ def parse_args_with_config() -> Config:
     """Parse CLI arguments and load the specified config file.
 
     Usage:
-        python train.py --config configs/stage1.yaml
-        python train.py --config configs/stage1.yaml --name baseline_v1
+        python train.py --config configs/base.yaml
+        python train.py --config configs/base.yaml --name baseline_v1
     """
     parser = argparse.ArgumentParser(description="GraphQMap")
     parser.add_argument(

@@ -10,7 +10,7 @@
 2. [Core Pipeline](#2-core-pipeline)
 3. [Graph Representation](#3-graph-representation)
 4. [Model Architecture](#4-model-architecture)
-5. [Training Strategy: 2-Stage Curriculum](#5-training-strategy-2-stage-curriculum)
+5. [Training Strategy](#5-training-strategy)
 6. [Dataset Usage](#6-dataset-usage)
 7. [Multi-Programming Training Data](#7-multi-programming-training-data)
 8. [Batching Strategy](#8-batching-strategy)
@@ -35,7 +35,7 @@
 
 ### What the Model Does NOT Do
 
-GraphQMap outputs **only the initial layout**. All subsequent compilation stages — routing, optimization, scheduling — are handled by the transpiler (via custom PassManager). The model does not perform routing or scheduling; routing method is configurable at evaluation time (e.g., SABRE, NASSC). The unsupervised training (Stage 2) uses surrogate losses that evaluate layout quality **without routing**, making the model routing-agnostic by design.
+GraphQMap outputs **only the initial layout**. All subsequent compilation stages — routing, optimization, scheduling — are handled by the transpiler (via custom PassManager). The model does not perform routing or scheduling; routing method is configurable at evaluation time (e.g., SABRE, NASSC). The unsupervised training uses surrogate losses that evaluate layout quality **without routing**, making the model routing-agnostic by design.
 
 ### The Non-Differentiability Problem
 
@@ -45,7 +45,7 @@ The pipeline has a non-differentiable barrier:
 GraphQMap → Initial Layout (A) → [Transpile (routing + optimization) — NON-DIFFERENTIABLE] → Transpiled Circuit (B) → PST Evaluation
 ```
 
-The model cannot receive gradients through routing. This constraint shapes the entire training strategy — Stage 2's surrogate losses bypass routing entirely, evaluating layout quality directly from the circuit-hardware graph structure.
+The model cannot receive gradients through routing. This constraint shapes the entire training strategy — The surrogate losses bypass routing entirely, evaluating layout quality directly from the circuit-hardware graph structure.
 
 ### Key Environment
 
@@ -88,7 +88,7 @@ Output: Initial layout (logical qubit → physical qubit mapping)
 
 Same as above except:
 - **No Hungarian algorithm** during training — P matrix is used directly for loss computation
-- **Softmax temperature τ** is annealed during both Stage 1 and Stage 2
+- **Softmax temperature τ** is annealed during training
 
 ### Multi-Programming Pipeline
 
@@ -158,7 +158,7 @@ model:
     # node_input_dim is auto-computed: len(node_features) + rwpe_k = 6
 ```
 
-**Feature diagnostics:** Run `python scripts/diagnose_features.py --config configs/stage1.yaml` to measure effective dimensionality, cosine similarity, and column correlations before training.
+**Feature diagnostics:** Run `python scripts/diagnose_features.py --config configs/base.yaml` to measure effective dimensionality, cosine similarity, and column correlations before training.
 
 **Feature analysis findings (from `scripts/analyze_circuit_features.py`, 520 circuits, 2026-04-06):**
 
@@ -480,39 +480,9 @@ Use `scipy.optimize.linear_sum_assignment` with cost matrix `(1 - P)` (since Hun
 
 ---
 
-## 5. Training Strategy: 2-Stage Curriculum
+## 5. Training Strategy
 
-> **Note:** RL fine-tuning has been excluded from scope. The training consists of 2 stages only.
-
-### 5.1 Stage 1: Supervised Pre-training
-
-> **Status: Under investigation.** Early experiments suggest Stage 1 pretraining may not improve final PST over Stage 2 from scratch. See "Experimental Findings" below.
-
-**Objective:** Learn the basic sense of what constitutes a good qubit mapping.
-
-**Training Order:** MLQD + QUEKO (large quantity, existing labels) → QUEKO only (high quality true optimal, fine-tuning)
-
-**Optimizer:** AdamW with cosine annealing LR scheduler.
-
-**Loss Function: Cross-Entropy**
-
-Ground truth layout π is converted to binary permutation matrix Y (h×h):
-- Y[i, π(i)] = 1 for each logical qubit i
-- All other entries = 0
-- Dummy rows in Y are set to complete the permutation (each assigned to a remaining physical qubit)
-
-```
-L_sup = -Σ_i Σ_j Y_ij · log(P_ij)
-```
-
-**Softmax τ:** Annealed from τ_max=1.0 to τ_min=0.05 via exponential decay.
-
-**MLQD + QUEKO → QUEKO-only Transition:**
-- Criterion: Validation cross-entropy loss early stopping (patience = 15 epochs main, 10 epochs QUEKO)
-- When switching to QUEKO: reduce learning rate to 1/10 of previous LR (lr_factor=0.1)
-- QUEKO termination: same validation CE loss early stopping (patience = 10)
-
-### 5.2 Stage 2: Noise-Aware Surrogate Metric Fine-tuning
+### 5.1 Noise-Aware Surrogate Metric Training
 
 **Objective:** Fine-tune toward actual NISQ PST correlation without running the full transpile pipeline.
 
@@ -524,10 +494,10 @@ L_sup = -Σ_i Σ_j Y_ij · log(P_ij)
 
 #### Loss Component Registry
 
-Stage 2 uses a **modular loss registry** (`@register_loss()` in `training/losses.py`). Components are configured declaratively in YAML — no code changes needed to switch loss combinations. Each component receives P and all available kwargs (d_error, d_hw, hw_node_features, etc.).
+Training uses a **modular loss registry** (`@register_loss()` in `training/losses.py`). Components are configured declaratively in YAML — no code changes needed to switch loss combinations. Each component receives P and all available kwargs (d_error, d_hw, hw_node_features, etc.).
 
 ```yaml
-# configs/stage2_sinkhorn_adj_sizeaware.yaml (current best)
+# configs/archive/stage2_sinkhorn_adj_sizeaware.yaml (current best)
 loss:
   type: surrogate
   components:
@@ -559,6 +529,8 @@ L_surr = (1/W) · Σ_{(i,j)∈E_circuit} f_ij · Σ_{p,q} P_ip · P_jq · d_erro
 ```
 
 Where f_ij = 2Q gate count for pair (i,j), W = Σ f_ij. d_error(p,q) = error-weighted shortest path between physical qubits p and q. Gate-frequency weighting ensures frequently-interacting pairs contribute proportionally more. Fully differentiable w.r.t. P. Bounded in [0, ∞).
+
+**Per-sample computation:** Each sample b in the batch uses its own `circuit_edge_pairs[b]` and `circuit_edge_weights[b]`. Loss is computed per-sample then averaged across the batch. This ensures each circuit's unique topology drives its own gradient signal.
 
 **Known limitations:** (1) Uses additive error sums via Floyd-Warshall, but quantum fidelity is multiplicative: F = Π(1-ε). Correct edge weight would be -log(1-ε). (2) Does not model SWAP 3× CX overhead: a hop=2 path costs ~4× a direct CX (1 SWAP + 1 CX = 4 CX), but d_error only sums 2 edge errors. (3) Raw error values (0.01-0.05) produce weak gradient signals → saturates by epoch 3. See `swap_count` for a physics-corrected alternative.
 
@@ -684,9 +656,9 @@ Trace-form QAP objective using the unified effective cost matrix C_eff.
 L_qap = tr(Ã_c P C_eff P^T) / (l + |E|)
 ```
 
-Where Ã_c (l×l) = gate-count weighted circuit adjacency, P (B×l×h) = soft assignment, C_eff (h×h) = unified cost matrix (3×ε₂ SWAP cost for non-adjacent, raw ε₂ for adjacent). Normalization by (l + |E|) ensures cross-batch comparability.
+Where Ã_c (B×l×l) = per-sample gate-count weighted circuit adjacency, P (B×l×h) = soft assignment, C_eff (h×h) = unified cost matrix (3×ε₂ SWAP cost for non-adjacent, raw ε₂ for adjacent). Normalization by (l + |E|) ensures cross-batch comparability.
 
-**Efficient computation:** PC = P @ C_eff → (B,l,h), APC = Ã_c @ PC → (B,l,h), trace = (APC * P).sum(). No per-edge loop — pure matrix ops.
+**Efficient computation:** PC = P @ C_eff → (B,l,h), APC = bmm(Ã_c, PC) → (B,l,h), trace = (APC * P).sum(). Per-sample Ã_c via batched matmul — pure matrix ops, no per-edge loop. Normalization uses per-sample gate weight: Σg = Ã_c[b].sum()/2.
 
 **Gradient:** ∂L/∂P = 2·Ã_c·P·C_eff. Gate count g_{ii'} appears explicitly — high-frequency edges receive stronger gradient. This is the same term used as the feedback signal in iterative score refinement (Section 4.6).
 
@@ -708,7 +680,7 @@ Encourages physical distance between qubits of different circuits. Bounded in [-
 L_sep = -(1/|E_cross|) · Σ_{(i,j)∈cross-circuit} Σ_{p,q} P_ip · P_jq · d_hw_norm(p,q)
 ```
 
-#### Combined Stage 2 Loss
+#### Combined Surrogate Loss
 
 ```
 L_2 = Σ_k weight_k · component_k(P, ...)
@@ -739,7 +711,7 @@ L_2 = Σ_k weight_k · component_k(P, ...)
 **Size-aware adjacency (Phase 4, 2026-04-09):** Diagnosis revealed that constant L_adj weight creates an irreconcilable trade-off between small (27Q) and large (133Q) backends. `adjacency_size_aware` applies piecewise multipliers based on backend qubit count:
 
 ```yaml
-# configs/stage2_sinkhorn_adj_sizeaware.yaml (current best)
+# configs/archive/stage2_sinkhorn_adj_sizeaware.yaml (current best)
 loss:
   type: surrogate
   components:
@@ -765,13 +737,9 @@ loss:
 
 **Experimenting with loss combinations:** Modify YAML only. Components with constructor parameters use `params` dict. CLI override: `--override loss.components.0.weight=2.0`. Each run's `config.yaml` records exact configuration.
 
-### 5.3 Stage Transition Criteria
+### 5.3 Termination Criteria
 
-| Transition | Criterion | Details |
-|------------|-----------|---------|
-| MLQD + QUEKO → QUEKO-only | Validation CE loss early stopping | Patience 10 epochs; LR reduced to 1/10 |
-| Stage 1 → Stage 2 | Validation PST convergence | Measure actual PST every 5–10 epochs on 50–100 representative circuits (Hungarian → transpile → noise sim); stop when 3 consecutive measurements improve < 0.5% |
-| Stage 2 termination | No early stopping; train full max_epochs | Best checkpoint selected by val PST (measured every 5 epochs on held-out backends) |
+No early stopping; train full max_epochs. Best checkpoint selected by val PST (measured every 5 epochs on held-out backends).
 
 **Validation PST measurement procedure (used for best checkpoint selection):**
 1. Take P matrix from model
@@ -797,16 +765,7 @@ Replacement features (gate_count, two_qubit_gate_count, single_qubit_gate_ratio,
 
 Note: `weighted_degree` was found to be mathematically identical to `two_qubit_gate_count` (r = 1.0), providing no independent information.
 
-#### Stage 1 Supervised Learning Results
-
-| Experiment | Features | Stage 1 Best Val Loss (Phase 1 / Phase 2) |
-|------------|----------|-------------------------------------------|
-| 1-A | old (gc,2qc,deg,dp) | 35.70 / 55.36 |
-| 1-C | new (gc,2qc,sqr,cpf+RWPE2) | 37.73 / 69.65 |
-
-Old features performed better in Stage 1 supervised learning. This is expected — Stage 1 is essentially label memorization, and the original features (including degree, which directly reflects graph topology) may be more aligned with the specific label encoding scheme.
-
-#### Stage 2 Surrogate Learning Results
+#### Surrogate Learning Results
 
 **Historical runs (pre-filtering, 6,887 circuits):**
 
@@ -815,7 +774,6 @@ Old features performed better in Stage 1 supervised learning. This is expected �
 | scratch_error_dist_adj | **Sinkhorn** | err_dist + adj | old 4dim, HW 7dim, bias=7 | **0.3440** | Previous best |
 | stage2_200epochs | Sinkhorn | err_dist + node_q | old 4dim | 0.3572 | Best but 200ep |
 | scratch_default | Sinkhorn | err_dist + node_q | old 4dim | 0.3495 | |
-| s2_old_feat_pretrained | Softmax | err_dist + node_q | old 4dim | 0.3044 | With Stage 1 |
 | s2_new_feat_scratch | Softmax | err_dist + node_q | new 6dim | 0.2410 | New features |
 | Baseline (QAP+NASSC) | — | — | — | **0.3785** | Target to beat |
 
@@ -845,8 +803,7 @@ Layout diagnosis (Phase D) revealed constant L_adj weight creates irreconcilable
 4. **New features >> Old features (confirmed)**: gc,2qc,sqr,cpf+RWPE2 → 0.3588 vs gc,2qc,deg,dp → 0.2473 (+0.111).
 5. **HW v1 5dim > v2 6dim+2dim (confirmed)**: v2 adds t2_t1_ratio (node) and edge_coherence_ratio (edge) → −0.035 PST. **hw_feat_v1 only.**
 6. **node_quality harmful**: Without 0.3588 vs with 0.3474. Learned MLP collapses to trivial solution.
-7. **Stage 1 no longer in use**: Supervised pretraining adds complexity without clear benefit. All current experiments run Stage 2 from scratch.
-8. **L_swap rejected**: 2 configs × 2 seeds, all −0.10~0.15 vs baseline. Dynamic range too large, large backends dominant.
+7. **L_swap rejected**: 2 configs × 2 seeds, all −0.10~0.15 vs baseline. Dynamic range too large, large backends dominant.
 9. **Feature-indistinguishable filtering**: 1,118 circuits removed (16.2%) — primarily MQT Bench parametric circuits.
 
 ---
@@ -855,14 +812,14 @@ Layout diagnosis (Phase D) revealed constant L_adj weight creates irreconcilable
 
 ### Available Datasets
 
-| Dataset | Original | After Steps 1-6 | After Step 7 (Diversity) | Stage | Label Source | Notes |
-|---------|:--------:|:---------------:|:------------------------:|-------|--------------|-------|
-| **MQT Bench** | 1,219 | 433 | **305** | Stage 2 (Unsupervised) | None | 786 indist + 128 structural duplicates removed |
-| **MLQD** | 4,443 | 4,159 | **267** | Stage 1 + 2 | OLSQ2 solver labels | 275 indist + 14 mid-measure + 3,892 structural duplicates removed |
-| **QUEKO** | 900 | 894 | **245** | Stage 1 + 2 | τ⁻¹ (true optimal) | 6 indist + 649 random-seed variants removed |
-| **QASMBench** | 94 | 52 | **39** | Stage 2 (Unsupervised) | None | 42 + 7 mid-measure/dup removed |
-| **RevLib** | 231 | 219 | **113** | Stage 2 (Unsupervised) | None | 12 indist + 106 indexed-variants removed |
-| **Total** | **6,887** | **5,757** | **969** | | | |
+| Dataset | Original | After Steps 1-6 | After Step 7 (Diversity) | Notes |
+|---------|:--------:|:---------------:|:------------------------:|-------|
+| **MQT Bench** | 1,219 | 433 | **305** | 786 indist + 128 structural duplicates removed |
+| **MLQD** | 4,443 | 4,159 | **267** | 275 indist + 14 mid-measure + 3,892 structural duplicates removed |
+| **QUEKO** | 900 | 894 | **245** | 6 indist + 649 random-seed variants removed |
+| **QASMBench** | 94 | 52 | **39** | 42 + 7 mid-measure/dup removed |
+| **RevLib** | 231 | 219 | **113** | 12 indist + 106 indexed-variants removed |
+| **Total** | **6,887** | **5,757** | **969** | |
 
 ### Dataset Directory Structure
 
@@ -876,8 +833,7 @@ data/circuits/
 │   ├── queko/                   # 900 circuits (540 with τ⁻¹ labels, 360 without)
 │   ├── qasmbench/               # 94 circuits (2Q-127Q, label-free)
 │   └── revlib/                  # 231 circuits (3Q-127Q, converted from .real)
-├── labels/                      # Label files — only for circuits with usable labels
-│   ├── mqt_bench/               # (no labels — Stage 2 unsupervised only)
+├── labels/                      # Label files (reference only)
 │   ├── mlqd/labels.json         # OLSQ2 solver labels (3,729 circuits)
 │   └── queko/labels.json        # τ⁻¹ true optimal labels (540 circuits)
 ├── backends/                    # Synthetic backend definitions for non-Qiskit hardware
@@ -886,11 +842,8 @@ data/circuits/
 │   ├── queko_rochester.json     # IBM Rochester (53Q) — QUEKO only
 │   ├── queko_sycamore.json      # Google Sycamore (54Q) — QUEKO + MLQD
 │   └── mlqd_grid5x5.json       # 5x5 Grid (25Q) — MLQD only
-└── splits/                          # Defines which circuits are used in each stage
-    ├── stage1_supervised.json       # 288 labeled circuits → Stage 1 training
-    ├── stage1_queko_only.json       # 73 QUEKO circuits → Stage 1 fine-tuning phase
-    ├── stage1_unsupervised.json     # 653 unlabeled circuits → Stage 2 only
-    ├── stage2_all.json              # 969 all circuits → Stage 2 surrogate loss
+└── splits/
+    ├── train_all.json              # 969 training circuits → surrogate loss
     ├── val.json                     # 28 labeled validation
     ├── val_queko_only.json          # 2 QUEKO validation
     ├── filter_log.json              # Combined removal log (indist + mid-measure + diversity)
@@ -902,10 +855,10 @@ data/circuits/
 ```
 
 **Design rationale:**
-- **Circuits and labels are decoupled.** Even within a labeled dataset (e.g., MQT Bench), only a subset may have labels compatible with our experimental setup. The remaining circuits are still valuable for Stage 2 unsupervised training.
+- **Circuits and labels are decoupled.** Even within a labeled dataset (e.g., MQT Bench), only a subset may have labels compatible with our experimental setup. The remaining circuits are still valuable for unsupervised training.
 - **Label format:** JSON mapping from circuit filename to layout: `{"circuit.qasm": {"backend": "manila", "layout": [0, 1, 3, 2, 4]}, ...}`
 - **Split files control training behavior.** Adding new labels or circuits only requires updating `labels/*.json` and `splits/*.json` — no reorganization of circuit files.
-- **QASMBench and RevLib** have no `labels/` directory entry (always unsupervised, Stage 2 only).
+- **QASMBench and RevLib** have no `labels/` directory entry (always unsupervised).
 #### Dataset Preprocessing Pipeline
 
 All raw circuit datasets undergo the following preprocessing before use in training. Each step is applied once and the results are stored in place.
@@ -921,7 +874,7 @@ All raw circuit datasets undergo the following preprocessing before use in train
 - Removed: 32 circuits with QASM file size > 10 MB (24 from MQT Bench, 8 from RevLib) — Qiskit DAG parsing requires tens of GB memory, causing OOM
 
 **Step 3: Evaluation Benchmark Deduplication**
-- Circuits in `data/circuits/qasm/benchmarks/` (23 evaluation circuits) are checked against all training datasets for filename overlap
+- Circuits in `data/circuits/qasm/benchmarks/` (36 evaluation circuits, including 25 Pozzi benchmarks) are checked against all training datasets for filename overlap
 - Removed from training sets: 17 RevLib circuits + 2 MQT Bench circuits (`bv_n3`, `bv_n4`) that duplicate benchmark circuits
 - **Why:** Training on evaluation circuits would make PST benchmarks unfair
 
@@ -997,7 +950,7 @@ QUEKO circuits are designed for 4 specific hardware topologies (Aspen-4, Tokyo, 
 - Noise values (T1, T2, readout_error, sq_gate_error, cx_error, cx_duration) are sampled from clipped normal distributions fitted to 11 real FakeBackends. The JSON files also include `frequency`, but it is not used as a model feature.
 - Generated once with fixed seed (42) for reproducibility, stored in `data/circuits/backends/`
 - QUEKO's optimal layouts are topology-based (zero-SWAP), so synthetic noise does not affect label correctness
-- The model learns topology-aware mapping from QUEKO in Stage 1; noise-aware optimization follows in Stage 2
+- Noise-aware optimization is driven by surrogate losses over real hardware profiles
 
 See `scripts/generate_queko_noise.py` for the generation script.
 
@@ -1007,7 +960,7 @@ MLQD provides OLSQ2-mapped result circuits but not explicit initial layouts. Lay
 
 1. Parsing measurement lines in the result circuit to obtain the **final mapping** (logical → physical after all SWAPs)
 2. Detecting SWAP patterns (3-CNOT decomposition: `cx a,b; cx b,a; cx a,b`) and reversing them to recover the **initial layout**
-3. Circuits where SWAP detection fails (pattern mismatch) are kept as unlabeled for Stage 2
+3. Circuits where SWAP detection fails (pattern mismatch) are kept unlabeled
 
 **Backend mapping for MLQD:**
 - **Melbourne, Rochester** → Qiskit FakeMelbourneV2 / FakeRochesterV2 (real noise data available)
@@ -1016,19 +969,9 @@ MLQD provides OLSQ2-mapped result circuits but not explicit initial layouts. Lay
 
 See `scripts/process_mlqd.py` for the extraction script.
 
-### Training Strategy: Hybrid Supervised + Unsupervised
+### Training Strategy: Unsupervised
 
-**Stage 1 (Supervised):** Use existing labels directly from MLQD (OLSQ2 solver labels) and QUEKO (τ⁻¹ true optimal). No self-generated label pipeline required — existing labels provide sufficient supervised signal for learning basic mapping quality, and any router-specific bias is corrected in Stage 2.
-
-**Stage 2 (Unsupervised):** Fine-tune with configurable surrogate losses (default: L_surr + L_node) on all available circuits, including label-free datasets (MQT Bench, QASMBench, RevLib). Loss components are modular and configured via YAML registry. This stage aligns the model toward NISQ-aware PST optimization, compensating for any mismatch between existing labels and the evaluation pipeline. **Stage 2 uses only the 55 real Qiskit FakeBackendV2 backends** — synthetic backends are excluded. QUEKO/MLQD circuits (which were originally assigned to synthetic backends) are randomly re-assigned to real backends at data load time. This ensures the model's unsupervised fine-tuning generalizes to real hardware noise profiles.
-
-### Rationale for Using Existing Labels
-
-- **MLQD OLSQ2 labels** were optimized for the OLSQ2 routing pipeline, but still encode meaningful mapping quality signal (e.g., minimizing qubit interaction distance)
-- **QUEKO τ⁻¹ labels** are true topology-optimal mappings (zero-SWAP overhead) — the highest quality supervised signal available
-- **MQT Bench** was initially considered for pseudo-labels but excluded because mapped-level data is effectively unavailable from MQT Bench web/API
-- **Stage 2 unsupervised fine-tuning corrects router-specific bias** — surrogate losses directly optimize layout quality metrics
-- This approach **eliminates the massive computational cost** of self-generating labels while maintaining training effectiveness
+Train with configurable surrogate losses (default: L_surr + L_node) on all available circuits, including label-free datasets (MQT Bench, QASMBench, RevLib). Loss components are modular and configured via YAML registry. Uses only the real Qiskit FakeBackendV2 backends — synthetic backends are excluded. QUEKO/MLQD circuits (which were originally assigned to synthetic backends) are randomly re-assigned to real backends at data load time.
 
 ---
 
@@ -1077,6 +1020,18 @@ Use **PyTorch Geometric standard batching**: multiple graphs merged into a singl
 **Samples using the same hardware backend are grouped into the same mini-batch.** This ensures:
 - All samples in a batch have identical h (physical qubit count)
 - Score Matrix / Softmax / Loss computed as 3D tensor `(batch_size × l × h)` in parallel
+
+### Per-Sample Circuit Metadata in Collation
+
+While hardware data (d_error, d_hw, c_eff, hw_node_features) is shared per-backend across all batch samples, **circuit metadata must be passed per-sample** because each circuit has a different topology:
+
+- `circuit_edge_pairs`: list of lists — `[s.circuit_edge_pairs for s in samples]`
+- `circuit_edge_weights`: list of lists — `[s.circuit_edge_weights for s in samples]`
+- `qubit_importance`: `(B, l)` tensor — stacked per-sample
+- `circuit_adj` (Ã_c): `(B, l, l)` tensor — per-sample gate-count weighted adjacency
+- `grama_g_single`: `(B, l)` tensor — per-sample 1Q gate counts
+
+All loss components iterate over the batch dimension using each sample's own circuit metadata. A `_ensure_per_sample_lists()` helper auto-wraps flat lists (old test format) for backward compatibility.
 
 ### Dynamic Batch Size
 
@@ -1161,13 +1116,18 @@ Per-stage timing measured: init, layout, routing, optimization, scheduling. Meta
 
 ### Benchmark Circuits
 
-Standard evaluation set (shared with MQM colleague for direct comparison):
-`toffoli_3`, `fredkin_3`, `3_17_13`, `4mod5-v1_22`, `mod5mils_65`, `alu-v0_27`, `decod24-v2_43`, `4gt13_92`
+25 Pozzi benchmark circuits, split into 12 train + 13 test to match colleague's attention-based qubit mapping paper.
+Gate-normalized to `{cx, id, rz, sx, x}` basis (same as training data). Original Clifford+T versions in `data/circuits/qasm/pozzi_benchmarks/`. Stored in `data/circuits/qasm/benchmarks/`.
 
-Extended set adds: `bv_n3`, `bv_n4`, `peres_3`, `xor5_254`
+**Train 12** (`POZZI_TRAIN_CIRCUITS`): Colleague trains their model on these circuits.
+`bv_n3`(4Q), `bv_n4`(5Q), `peres_3`(3Q), `toffoli_3`(3Q), `fredkin_3`(3Q), `xor5_254`(6Q), `3_17_13`(3Q), `4mod5-v1_22`(5Q), `mod5mils_65`(5Q), `alu-v0_27`(5Q), `decod24-v2_43`(4Q), `4gt13_92`(5Q)
 
-All benchmark circuits stored in `data/circuits/qasm/benchmarks/` (23 total .qasm files, gate-normalized to `{cx, id, rz, sx, x}`).
-For fair comparison with MQM colleague, use original (non-normalized) circuits via `--circuit-dir references/colleague/tests2/benchmarks`. Gate normalization reduces basis translation overhead, which inflates PST relative to the colleague's results.
+**Test 13** (`POZZI_TEST_CIRCUITS`): Unseen by colleague's model — fair comparison set.
+`ham3_102`(3Q), `miller_11`(3Q), `decod24-v0_38`(4Q), `rd32-v0_66`(4Q), `4gt5_76`(5Q), `4mod7-v0_94`(5Q), `alu-v2_32`(5Q), `hwb4_49`(4Q), `ex1_226`(6Q), `decod24-bdd_294`(6Q), `ham7_104`(7Q), `rd53_138`(8Q), `qft_10`(16Q)
+
+**Circuit source**: RevLib reversible logic benchmarks. Raw (Clifford+T basis) circuits also available in `data/circuits/qasm/pozzi_benchmarks/` (158 total, all 16Q register).
+
+**CLI usage**: `--circuit-set train12|test13|all25` (default: all25 when no `--circuits` specified).
 
 ### Statistical Reliability
 
@@ -1212,7 +1172,6 @@ When evaluating multiple backends (e.g. `--backend toronto rochester washington`
 | Ablation | Tests |
 |----------|-------|
 | Loss component ablation | error_distance vs swap_count; adjacency vs soft_proximity; standalone vs combined |
-| Stage 1 only vs. Stage 1+2 | Surrogate fine-tuning contribution |
 | Single-hardware vs. Multi-hardware training | Hardware-agnostic claim |
 
 ### Priority 2: Architecture
@@ -1240,14 +1199,42 @@ These items are not yet finalized and need to be decided during implementation:
 
 ### Optimizer Details (Decided)
 - **Confirmed:** AdamW + Cosine Annealing LR scheduler
-- **Stage 1 LR:** 1e-3, weight decay 1e-4, cosine eta_min 1e-6
-- **Stage 2 LR:** 5e-4, weight decay 1e-4, cosine eta_min 1e-5, warmup 2 epochs
-- **Stage 2 Softmax τ:** exponential decay from 1.0 to 0.05 (starts softer for wider exploration with surrogate losses)
-- **Gradient clipping (Stage 2):** max_norm 2.0
+- **LR:** 5e-4, weight decay 1e-4, cosine eta_min 1e-5, warmup 2 epochs
+- **Softmax τ:** exponential decay from 1.0 to 0.05 (starts softer for wider exploration with surrogate losses)
+- **Gradient clipping:** max_norm 2.0
 
 ### Reproducibility Settings (Decided)
 - Random seed: 42 (training), 43 (evaluation)
 - Seed applied to: Python random, NumPy, PyTorch (CPU + CUDA)
+
+---
+
+## 11. Bug Fixes & Critical Corrections
+
+### Per-Sample Collation Bug (Fixed 2026-04-14)
+
+**Severity: Critical. Affected ALL training runs prior to 2026-04-14.**
+
+The `collate_mapping_samples()` function in `data/dataset.py` took per-circuit metadata from only the **first sample (s0)** in each mini-batch:
+
+```python
+# BUG: only s0's topology used for ALL samples in the batch
+result["circuit_edge_pairs"] = s0.circuit_edge_pairs      # ← s0 only
+result["circuit_edge_weights"] = s0.circuit_edge_weights   # ← s0 only
+result["qubit_importance"] = s0.qubit_importance           # ← s0 only
+result["circuit_adj"] = build_adj(s0)                      # ← s0 only
+result["grama_g_single"] = s0.grama_g_single               # ← s0 only
+```
+
+These are **per-circuit** properties (each circuit has a different edge topology), not per-backend. Since the BackendBucketSampler groups by (backend, num_logical), batches typically contain 4-18 different circuits. All loss components — error_distance, adjacency, QAP, GraMA, node_placement_cost, node_quality, and all variants — received the wrong circuit topology for non-first batch samples.
+
+**Impact:** 75-95% of training samples had incorrect loss gradients. The model could not learn circuit-specific behavior because loss signals for most samples were disconnected from their actual circuit structure. This explains the observed circuit-invariant layouts, PST non-convergence, and score matrix row collapse.
+
+**Fix:** Collation now passes per-sample metadata (list of lists for edge pairs/weights, (B, l) tensors for importance/g_single, (B, l, l) tensor for circuit_adj). All loss components iterate over the batch dimension using each sample's own metadata. A `_ensure_per_sample_lists()` helper maintains backward compatibility with flat-list callers.
+
+**Additional fix:** `trainer.py` used `losses.get("l_total")` but the dict key is `"total"` — the `best_loss` checkpoint was never saved. Corrected to `losses.get("total")`.
+
+**All 152 tests pass after the fix.** All prior experiment results need re-evaluation with the corrected code.
 
 ---
 
@@ -1419,25 +1406,19 @@ def hungarian_decode(P, l):
 | | Hidden dim | 16 |
 | **SoftmaxNorm** | τ_max | 1.0 |
 | | τ_min | 0.05 |
-| | Schedule | Exponential decay (Stage 1), Fixed (Stage 2) |
-| **Stage 2 Loss** | Components | Configurable via YAML registry |
+| | Schedule | Exponential decay |
+| **Loss** | Components | Configurable via YAML registry |
 | | Current best | error_distance (1.0) + adjacency_size_aware (1.0, piecewise 0.3/0.5/1.0) |
 | | Available | error_distance, adjacency, adjacency_size_aware, hop_distance, swap_count, soft_proximity, node_quality, separation, exclusion (pairwise collision) |
 | **Batching** | Max total nodes | 512 (tune to GPU) |
 | | large_backend_boost | 2.0 (oversample 50Q+ backends) |
 | **Multi-prog** | Scenarios | Configurable (default: [1, 2, 4] with proportions [0.5, 0.3, 0.2]) |
-| **Labels** | Stage 1 sources | MLQD (OLSQ2, 3,729), QUEKO (τ⁻¹, 540) |
-| | Stage 2 (unsupervised) | MQT Bench, QASMBench, RevLib (+ all Stage 1 circuits) |
 | **Optimizer** | Type | AdamW |
 | | Weight Decay | 1e-4 |
-| | LR (Stage 1) | 1e-3, reduced to 1e-4 for QUEKO fine-tuning (lr_factor=0.1) |
-| | LR (Stage 2) | 5e-4 |
-| | LR Scheduler | Cosine Annealing (eta_min=1e-5 for Stage 2) |
-| | Warmup (Stage 2) | 2 epochs |
-| | Grad Clip (Stage 2) | max_norm 2.0 |
-| **Transitions** | MLQD+QUEKO→QUEKO | Val CE early stop, patience 15 |
-| | QUEKO fine-tuning end | Val CE early stop, patience 10 |
-| | Stage 1→2 | Manual (after Stage 1 completes) |
-| | Stage 2 end | No early stopping; full max_epochs, best checkpoint by val PST |
+| | LR | 5e-4 |
+| | LR Scheduler | Cosine Annealing (eta_min=1e-5) |
+| | Warmup | 2 epochs |
+| | Grad Clip | max_norm 2.0 |
+| **Termination** | | No early stopping; full max_epochs, best checkpoint by val PST |
 | **Reproducibility** | Training seed | 42 |
 | | Evaluation seed | 43 |

@@ -5,18 +5,18 @@ Highlighted (colored) nodes = mapped physical qubits, with virtual qubit labels.
 
 Usage:
     python scripts/visualize_layouts.py \
-        --config configs/stage2.yaml \
+        --config configs/base.yaml \
         --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
         --circuit toffoli_3 fredkin_3 alu-v0_27
 
     # All benchmark circuits on all test backends
     python scripts/visualize_layouts.py \
-        --config configs/stage2.yaml \
+        --config configs/base.yaml \
         --checkpoint runs/stage2/<RUN>/checkpoints/best.pt
 
     # Specific backend only
     python scripts/visualize_layouts.py \
-        --config configs/stage2.yaml \
+        --config configs/base.yaml \
         --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
         --backend toronto --circuit toffoli_3
 """

@@ -231,6 +231,10 @@ class GraphQMap(nn.Module):
             c_eff_dev = c_eff.to(device=S.device, dtype=S.dtype)
             A_c = circuit_adj.to(device=S.device, dtype=S.dtype)
 
+            # Ensure A_c is batched (B, l, l) for per-sample refinement
+            if A_c.dim() == 2:
+                A_c = A_c.unsqueeze(0).expand(batch_size, -1, -1)
+
             if self.zero_score_init:
                 # S_init is already 0, no normalization needed
                 pass
@@ -256,8 +260,8 @@ class GraphQMap(nn.Module):
                 # Z = P @ C_eff: expected cost landscape
                 Z = torch.matmul(P_t, c_eff_dev)  # (B, l, h)
 
-                # QAP gradient feedback: Ã_c @ Z
-                feedback = torch.matmul(A_c, Z)  # (B, l, h) — A_c broadcast
+                # QAP gradient feedback: Ã_c @ Z — per-sample adjacency
+                feedback = torch.bmm(A_c, Z)  # (B, l, h)
 
                 # Update score: subtract fidelity-improving direction
                 S_current = S_init - self.refine_lambda * feedback

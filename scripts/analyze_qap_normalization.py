@@ -235,7 +235,7 @@ def main():
     print("SECTION 2: Circuit Size Distribution")
     print("=" * 80)
 
-    split_path = PROJECT_ROOT / "data" / "circuits" / "splits" / "stage2_all.json"
+    split_path = PROJECT_ROOT / "data" / "circuits" / "splits" / "train_all.json"
     with open(split_path) as f:
         split_data = json.load(f)
 

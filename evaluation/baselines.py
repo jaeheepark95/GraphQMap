@@ -162,10 +162,9 @@ def evaluate_baseline(
     Returns:
         Dict with pst, swap_count, depth, method, layout.
     """
-    # Ensure circuit has measurements
-    if circuit.num_clbits == 0:
-        circuit = circuit.copy()
-        circuit.measure_all()
+    # Ensure circuit has measurements (single-register, used-qubits only).
+    from evaluation.benchmark import add_measurements
+    circuit = add_measurements(circuit)
 
     tc, metadata = transpile_with_timing(
         circuit, backend,

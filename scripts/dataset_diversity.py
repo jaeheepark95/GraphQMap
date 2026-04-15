@@ -29,7 +29,7 @@ For each category, compute:
     effective_unique    — exp(entropy of cluster distribution) — "effective
                           number of unique circuits" accounting for repetition
 
-Active set only (post-filter, from stage2_all.json).
+Active set only (post-filter, from train_all.json).
 
 Output:
   - stdout markdown table
@@ -212,7 +212,7 @@ def shannon_entropy(counts: list[int]) -> float:
 # ======================================================================
 
 def main() -> None:
-    stage2 = json.load(open(SPLITS_DIR / "stage2_all.json"))
+    stage2 = json.load(open(SPLITS_DIR / "train_all.json"))
     active = {(e["source"], Path(e["file"]).stem) for e in stage2}
 
     rows = []

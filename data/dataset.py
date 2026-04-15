@@ -56,15 +56,15 @@ class MappingSample:
     Attributes:
         circuit_graph: PyG Data for the circuit.
         hardware_graph: PyG Data for the hardware.
-        label_matrix: (h, h) permutation matrix (None for Stage 2).
+        label_matrix: (h, h) permutation matrix (None if unsupervised).
         backend_name: Name of the hardware backend.
         num_logical: Number of logical qubits.
         num_physical: Number of physical qubits.
         layout: Raw layout list (optional).
-        d_error: (h, h) error-weighted distance matrix (Stage 2).
-        d_hw: (h, h) hardware distance matrix (Stage 2).
-        c_eff: (h, h) unified effective cost matrix (Stage 2).
-        hw_node_features: (h, 7) quality features for QualityScore (Stage 2).
+        d_error: (h, h) error-weighted distance matrix.
+        d_hw: (h, h) hardware distance matrix.
+        c_eff: (h, h) unified effective cost matrix.
+        hw_node_features: (h, 7) quality features for QualityScore.
         circuit_edge_pairs: List of (i, j) logical qubit pairs with 2Q gates.
         circuit_edge_weights: Per-edge interaction count (parallel to circuit_edge_pairs).
         qubit_importance: (l,) 2Q gate count per logical qubit.
@@ -224,7 +224,7 @@ def _get_grama_sq_costs(backend_name: str) -> dict[str, np.ndarray]:
 class _SampleMetadata:
     """Lightweight metadata for a single sample (kept in memory for grouping)."""
     __slots__ = ("cache_path", "backend_name", "num_logical", "num_physical",
-                 "label_matrix", "layout", "include_stage2_fields")
+                 "label_matrix", "layout", "include_training_fields")
 
     def __init__(
         self,
@@ -234,7 +234,7 @@ class _SampleMetadata:
         num_physical: int,
         label_matrix: np.ndarray | None,
         layout: list[int] | None,
-        include_stage2_fields: bool,
+        include_training_fields: bool,
     ) -> None:
         self.cache_path = cache_path
         self.backend_name = backend_name
@@ -242,7 +242,7 @@ class _SampleMetadata:
         self.num_physical = num_physical
         self.label_matrix = label_matrix
         self.layout = layout
-        self.include_stage2_fields = include_stage2_fields
+        self.include_training_fields = include_training_fields
 
 
 class LazyMappingDataset(Dataset):
@@ -304,7 +304,7 @@ class LazyMappingDataset(Dataset):
         # Hardware graph from memory cache
         hw_graph = _get_hardware_graph(meta.backend_name)
 
-        # Stage 2 fields
+        # Training fields
         d_error = None
         d_hw = None
         c_eff = None
@@ -317,7 +317,7 @@ class LazyMappingDataset(Dataset):
         grama_s_gate = None
         grama_g_single = None
 
-        if meta.include_stage2_fields:
+        if meta.include_training_fields:
             d_error = _get_error_distance(meta.backend_name)
             d_hw = _get_hop_distance(meta.backend_name)
             c_eff = _get_c_eff(meta.backend_name)
@@ -519,13 +519,14 @@ def collate_mapping_samples(
         - num_physical: int
         - backend_name: str
         - batch_size: int
-        Stage 2 fields (present if first sample has them):
+        Training fields (present if first sample has them):
         - d_error: (h, h) tensor
         - d_hw: (h, h) tensor
         - hw_node_features: (h, 7) tensor
-        - circuit_edge_pairs: list of (i, j) tuples
-        - circuit_edge_weights: list of interaction counts per edge
-        - qubit_importance: (l,) tensor
+        - circuit_edge_pairs: list of lists — per-sample (i, j) tuples
+        - circuit_edge_weights: list of lists — per-sample interaction counts
+        - qubit_importance: (batch, l) tensor
+        - circuit_adj: (batch, l, l) tensor
     """
     circuit_graphs = [s.circuit_graph for s in samples]
     hardware_graphs = [s.hardware_graph for s in samples]
@@ -536,7 +537,7 @@ def collate_mapping_samples(
     num_physical = samples[0].num_physical
     num_logical_list = [s.num_logical for s in samples]
 
-    # Label matrices (Stage 1) — only stack if ALL samples have labels with consistent shapes
+    # Label matrices — only stack if ALL samples have labels with consistent shapes
     if all(s.label_matrix is not None for s in samples):
         shapes = {s.label_matrix.shape for s in samples}
         if len(shapes) == 1:
@@ -560,7 +561,7 @@ def collate_mapping_samples(
         "batch_size": len(samples),
     }
 
-    # Stage 2 metadata — shared per backend, take from first sample
+    # Training metadata — shared per backend, take from first sample
     s0 = samples[0]
     if s0.d_error is not None:
         result["d_error"] = torch.tensor(s0.d_error, dtype=torch.float32)
@@ -573,25 +574,29 @@ def collate_mapping_samples(
             s0.hw_node_features, dtype=torch.float32,
         )
 
-    # Per-sample circuit metadata
-    result["circuit_edge_pairs"] = s0.circuit_edge_pairs
-    result["circuit_edge_weights"] = s0.circuit_edge_weights
+    # Per-sample circuit metadata — collect from ALL samples (not just s0)
+    result["circuit_edge_pairs"] = [s.circuit_edge_pairs for s in samples]
+    result["circuit_edge_weights"] = [s.circuit_edge_weights for s in samples]
     if s0.qubit_importance is not None:
-        result["qubit_importance"] = torch.tensor(
-            s0.qubit_importance, dtype=torch.float32,
-        )
+        result["qubit_importance"] = torch.stack([
+            torch.tensor(s.qubit_importance, dtype=torch.float32)
+            for s in samples
+        ])  # (batch, l)
 
-    # Build gate-count weighted adjacency Ã_c (l×l) for QAP loss and refinement
+    # Build gate-count weighted adjacency Ã_c per sample → (batch, l, l)
     l = num_logical_list[0]
-    circuit_adj = torch.zeros(l, l, dtype=torch.float32)
-    edge_pairs = s0.circuit_edge_pairs
-    edge_weights = s0.circuit_edge_weights or [1.0] * len(edge_pairs)
-    for (i, j), w in zip(edge_pairs, edge_weights):
-        circuit_adj[i, j] = w
-        circuit_adj[j, i] = w
-    result["circuit_adj"] = circuit_adj
+    adj_list = []
+    for s in samples:
+        adj = torch.zeros(l, l, dtype=torch.float32)
+        ep = s.circuit_edge_pairs
+        ew = s.circuit_edge_weights or [1.0] * len(ep)
+        for (i, j), w in zip(ep, ew):
+            adj[i, j] = w
+            adj[j, i] = w
+        adj_list.append(adj)
+    result["circuit_adj"] = torch.stack(adj_list)  # (batch, l, l)
 
-    # GraMA fields (per-backend W/s_read/s_gate from s0; per-circuit g_single from s0)
+    # GraMA fields — per-backend (W/s_read/s_gate from s0), per-circuit (g_single from ALL)
     if s0.grama_W is not None:
         result["grama_W"] = torch.tensor(s0.grama_W, dtype=torch.float32)
     if s0.grama_s_read is not None:
@@ -599,7 +604,10 @@ def collate_mapping_samples(
     if s0.grama_s_gate is not None:
         result["grama_s_gate"] = torch.tensor(s0.grama_s_gate, dtype=torch.float32)
     if s0.grama_g_single is not None:
-        result["grama_g_single"] = torch.tensor(s0.grama_g_single, dtype=torch.float32)
+        result["grama_g_single"] = torch.stack([
+            torch.tensor(s.grama_g_single, dtype=torch.float32)
+            for s in samples
+        ])  # (batch, l)
 
     return result
 
@@ -635,7 +643,7 @@ def load_split(
     split_path: str | Path,
     data_root: str | Path = "data/circuits",
     training_backends: list[str] | None = None,
-    include_stage2_fields: bool = False,
+    include_training_fields: bool = False,
     lazy: bool = True,
     node_feature_names: list[str] | None = None,
     rwpe_k: int = 0,
@@ -652,7 +660,7 @@ def load_split(
         split_path: Path to a splits/*.json file.
         data_root: Root of data/circuits/ directory.
         training_backends: List of backend names for unsupervised circuit assignment.
-        include_stage2_fields: If True, populate d_error, qubit_importance, etc.
+        include_training_fields: If True, populate d_error, qubit_importance, etc.
         lazy: If True, use lazy loading from cached .pt files.
         node_feature_names: Circuit node features to use (None = defaults).
         rwpe_k: Number of RWPE steps (0 = disabled).
@@ -663,12 +671,12 @@ def load_split(
     """
     if lazy:
         return _load_split_lazy(
-            split_path, data_root, training_backends, include_stage2_fields,
+            split_path, data_root, training_backends, include_training_fields,
             node_feature_names=node_feature_names, rwpe_k=rwpe_k,
             edge_dim=edge_dim,
         )
     return _load_split_eager(
-        split_path, data_root, training_backends, include_stage2_fields,
+        split_path, data_root, training_backends, include_training_fields,
         node_feature_names=node_feature_names, rwpe_k=rwpe_k,
     )
 
@@ -677,7 +685,7 @@ def _load_split_lazy(
     split_path: str | Path,
     data_root: str | Path,
     training_backends: list[str] | None,
-    include_stage2_fields: bool,
+    include_training_fields: bool,
     node_feature_names: list[str] | None = None,
     rwpe_k: int = 0,
     edge_dim: int | None = None,
@@ -769,7 +777,7 @@ def _load_split_lazy(
             num_physical=num_physical,
             label_matrix=label_matrix,
             layout=layout,
-            include_stage2_fields=include_stage2_fields,
+            include_training_fields=include_training_fields,
         )
         dataset.add_entry(meta)
         loaded += 1
@@ -782,7 +790,7 @@ def _load_split_eager(
     split_path: str | Path,
     data_root: str | Path,
     training_backends: list[str] | None,
-    include_stage2_fields: bool,
+    include_training_fields: bool,
     node_feature_names: list[str] | None = None,
     rwpe_k: int = 0,
 ) -> MappingDataset:
@@ -874,7 +882,7 @@ def _load_split_eager(
         grama_s_read = None
         grama_s_gate = None
         grama_g_single = None
-        if include_stage2_fields:
+        if include_training_fields:
             d_error = _get_error_distance(backend_name)
             d_hw = _get_hop_distance(backend_name)
             c_eff = _get_c_eff(backend_name)

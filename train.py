@@ -1,9 +1,8 @@
 """GraphQMap training entry point.
 
 Usage:
-    python train.py --config configs/stage1.yaml
-    python train.py --config configs/stage2.yaml
-    python train.py --config configs/stage1.yaml --override training.optimizer.lr=0.0005
+    python train.py --config configs/base.yaml
+    python train.py --config configs/base.yaml --override training.optimizer.lr=0.0005
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from data.circuit_graph import extract_circuit_features
 from data.dataset import create_dataloader, load_split
 from data.hardware_graph import configure_hw_features, precompute_c_eff
 from models.graphqmap import GraphQMap
-from training.trainer import Stage1Trainer, Stage2Trainer
+from training.trainer import Trainer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,7 +57,7 @@ def _get_training_backends(cfg) -> list[str]:
 
 
 def _build_val_pst_fn(cfg, device: torch.device):
-    """Build a PST validation function for Stage 2.
+    """Build a PST validation function.
 
     Uses benchmark circuits on held-out validation backends to measure
     actual PST during training. NASSC routing is used instead of SABRE
@@ -75,7 +74,7 @@ def _build_val_pst_fn(cfg, device: torch.device):
 
     from data.circuit_graph import build_circuit_graph
     from data.hardware_graph import build_hardware_graph, get_backend
-    from evaluation.benchmark import BENCHMARK_CIRCUITS, load_benchmark_circuit
+    from evaluation.benchmark import BENCHMARK_CIRCUITS, CIRCUIT_SETS, load_benchmark_circuit
     from evaluation.pst import compute_pst, create_ideal_simulator, create_noisy_simulator
     from evaluation.transpiler import transpile_with_timing
 
@@ -105,8 +104,11 @@ def _build_val_pst_fn(cfg, device: torch.device):
         noisy_sim = create_noisy_simulator(backend)
 
         # Preload benchmark circuits that fit this backend
+        circuit_set_name = getattr(cfg.training.pst_validation, "circuit_set", None)
+        circuit_names = CIRCUIT_SETS.get(circuit_set_name, BENCHMARK_CIRCUITS) \
+            if circuit_set_name else BENCHMARK_CIRCUITS
         circuits = []
-        for cname in BENCHMARK_CIRCUITS:
+        for cname in circuit_names:
             try:
                 circ = load_benchmark_circuit(cname, measure=True)
                 if 2 <= circ.num_qubits <= num_physical:
@@ -217,27 +219,17 @@ def _generate_plots(cfg) -> None:
     import matplotlib
     matplotlib.use("Agg")
 
-    from scripts.visualize import detect_stage, plot_stage1, plot_stage2
+    from scripts.visualize import plot_training
 
     run_dir = Path(cfg.checkpoint_dir).parent
     save_dir = run_dir / "plots"
     save_dir.mkdir(parents=True, exist_ok=True)
-    stage = detect_stage(run_dir)
-
-    if stage == 1:
-        plot_stage1([run_dir], save_dir=save_dir)
-    elif stage == 2:
-        plot_stage2([run_dir], save_dir=save_dir)
-    else:
-        logger.warning("Could not detect stage for plotting")
-        return
-
+    plot_training([run_dir], save_dir=save_dir)
     logger.info("Plots saved to %s", save_dir)
 
 
 def main() -> None:
     cfg = parse_args_with_config()
-    stage = cfg.training.stage
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
     _set_seed(cfg.seed)
@@ -250,7 +242,7 @@ def main() -> None:
         exclude_degree=exclude_degree,
     )
 
-    logger.info("=== GraphQMap Training — Stage %d ===", stage)
+    logger.info("=== GraphQMap Training ===")
     logger.info("Device: %s", device)
     logger.info("Run directory: %s", cfg.checkpoint_dir.rsplit("/checkpoints", 1)[0])
 
@@ -266,87 +258,28 @@ def main() -> None:
     feature_kwargs = {"node_feature_names": node_feature_names, "rwpe_k": rwpe_k,
                       "edge_dim": edge_dim}
 
-    if stage == 1:
-        model = GraphQMap.from_config(cfg)
-        trainer = Stage1Trainer(model, cfg, device)
+    model = GraphQMap.from_config(cfg)
+    trainer = Trainer(model, cfg, device)
 
-        # Load main supervised train/val datasets
-        logger.info("Loading Stage 1 supervised training data...")
-        train_ds = load_split(cfg.data.splits.train, data_root=data_root, **feature_kwargs)
-        val_ds = load_split(cfg.data.splits.val, data_root=data_root, **feature_kwargs)
-        logger.info("Train: %d samples, Val: %d samples", len(train_ds), len(val_ds))
+    logger.info("Loading training data (all circuits)...")
+    train_ds = load_split(
+        cfg.data.splits.train,
+        data_root=data_root,
+        training_backends=training_backends,
+        include_training_fields=True,
+        **feature_kwargs,
+    )
+    logger.info("Train: %d samples", len(train_ds))
 
-        train_loader = create_dataloader(
-            train_ds, max_total_nodes=max_nodes, shuffle=True,
-            num_workers=num_workers, seed=cfg.seed,
-        )
-        val_loader = create_dataloader(
-            val_ds, max_total_nodes=max_nodes, shuffle=False,
-            num_workers=num_workers, seed=cfg.seed,
-        )
+    train_loader = create_dataloader(
+        train_ds, max_total_nodes=max_nodes, shuffle=True,
+        num_workers=num_workers, seed=cfg.seed,
+    )
 
-        # Load QUEKO-only data for fine-tuning phase
-        queko_train_loader = None
-        queko_val_loader = None
-        queko_train_path = getattr(cfg.data.splits, "queko_train", None)
-        queko_val_path = getattr(cfg.data.splits, "queko_val", None)
-        if queko_train_path and queko_val_path:
-            logger.info("Loading QUEKO fine-tuning data...")
-            queko_train_ds = load_split(queko_train_path, data_root=data_root, **feature_kwargs)
-            queko_val_ds = load_split(queko_val_path, data_root=data_root, **feature_kwargs)
-            logger.info("QUEKO Train: %d, Val: %d", len(queko_train_ds), len(queko_val_ds))
-
-            queko_train_loader = create_dataloader(
-                queko_train_ds, max_total_nodes=max_nodes, shuffle=True,
-                num_workers=num_workers, seed=cfg.seed,
-            )
-            queko_val_loader = create_dataloader(
-                queko_val_ds, max_total_nodes=max_nodes, shuffle=False,
-                num_workers=num_workers, seed=cfg.seed,
-            )
-
-        trainer.run(train_loader, val_loader, queko_train_loader, queko_val_loader)
-        _generate_plots(cfg)
-
-    elif stage == 2:
-        model = GraphQMap.from_config(cfg)
-
-        # Load Stage 1 checkpoint
-        pretrained = getattr(cfg, "pretrained_checkpoint", None)
-        if pretrained:
-            logger.info("Loading pretrained checkpoint: %s", pretrained)
-            ckpt = torch.load(pretrained, map_location=device, weights_only=True)
-            missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-            if missing:
-                logger.info("New keys (randomly initialized): %s", missing)
-            if unexpected:
-                logger.warning("Unexpected keys in checkpoint: %s", unexpected)
-
-        trainer = Stage2Trainer(model, cfg, device)
-
-        # Load all circuits for Stage 2 surrogate training
-        logger.info("Loading Stage 2 training data (all circuits)...")
-        train_ds = load_split(
-            cfg.data.splits.train,
-            data_root=data_root,
-            training_backends=training_backends,
-            include_stage2_fields=True,
-            **feature_kwargs,
-        )
-        logger.info("Train: %d samples", len(train_ds))
-
-        train_loader = create_dataloader(
-            train_ds, max_total_nodes=max_nodes, shuffle=True,
-            num_workers=num_workers, seed=cfg.seed,
-        )
-
-        # PST validation function using benchmark circuits on held-out backends
-        val_pst_fn = _build_val_pst_fn(cfg, device)
-        trainer.run(train_loader, val_pst_fn=val_pst_fn)
-        _generate_plots(cfg)
-
-    else:
-        raise ValueError(f"Unknown stage: {stage}")
+    # PST validation function using benchmark circuits on held-out backends
+    val_pst_fn = _build_val_pst_fn(cfg, device)
+    trainer.run(train_loader, val_pst_fn=val_pst_fn)
+    _generate_plots(cfg)
 
 
 if __name__ == "__main__":

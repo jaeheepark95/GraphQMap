@@ -31,18 +31,8 @@ def test_deep_merge_no_mutation():
     assert base["a"]["b"] == 1  # original unchanged
 
 
-def test_load_stage1_config():
-    cfg = load_config("configs/stage1.yaml")
-    assert cfg.model.embedding_dim == 64
-    assert cfg.training.stage == 1
-    assert cfg.sinkhorn.tau_max == 1.0
-    assert cfg.sinkhorn.tau_min == 0.05
-    assert cfg.loss.type == "cross_entropy"
-
-
-def test_load_stage2_config():
-    cfg = load_config("configs/stage2.yaml")
-    assert cfg.training.stage == 2
+def test_load_base_config():
+    cfg = load_config("configs/base.yaml")
     assert cfg.sinkhorn.tau_max == 1.0
     assert cfg.sinkhorn.tau_min == 0.05
     assert cfg.sinkhorn.schedule == "exponential"

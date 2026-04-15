@@ -64,7 +64,7 @@
 ## 실험 결과
 
 ### v1: Score normalization 없음
-- Run: `runs/stage2/20260413_040016_toronto_qap_refine_v1`
+- Run: `runs/train/20260413_040016_toronto_qap_refine_v1`
 - Config: `stage2_toronto_qap_refine.yaml`, Toronto-only, qap_fidelity loss, iterations=5
 - Best Val PST: 0.6664 (epoch 44)
 - **Eval Toronto OURS+SABRE 0.3216, OURS+NASSC 0.3626 — SABRE(0.3550)보다 낮음**
@@ -72,7 +72,7 @@
 - QAP loss 단독으로는 GNN에 충분한 gradient signal 제공 못함
 
 ### v2: Score normalization 적용 (현재 코드 상태)
-- Run: `runs/stage2/20260413_050340_toronto_qap_refine_v2_normscore`
+- Run: `runs/train/20260413_050340_toronto_qap_refine_v2_normscore`
 - 동일 config, S^(0)를 z-score normalize한 것만 다름
 - Best Val PST: **0.7954** (epoch 9)
 - **Eval Toronto OURS+SABRE 0.5116, OURS+NASSC 0.5369 — QAP+NASSC(0.5351)과 대등**

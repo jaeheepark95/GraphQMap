@@ -176,7 +176,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Load current split
-    split_path = SPLITS_DIR / "stage2_all.json"
+    split_path = SPLITS_DIR / "train_all.json"
     stage2 = json.load(open(split_path))
     active = {}
     for e in stage2:
@@ -290,7 +290,7 @@ def main() -> None:
     if args.apply:
         # Build new split
         new_split = [c["entry"] for c in sorted(selected, key=lambda c: (c["source"], c["stem"]))]
-        out_path = SPLITS_DIR / "stage2_curated.json"
+        out_path = SPLITS_DIR / "train_curated.json"
         with open(out_path, "w") as f:
             json.dump(new_split, f, indent=2)
         logger.info(f"\nSaved curated split: {out_path} ({len(new_split)} circuits)")

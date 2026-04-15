@@ -1,13 +1,12 @@
 """Loss functions for GraphQMap training.
 
-Stage 1: L_sup  — Cross-entropy between P and ground-truth permutation matrix Y.
-Stage 2: Configurable loss components via registry pattern.
-         Available components:
-         - error_distance: Error-weighted shortest path distance (L_surr)
-         - adjacency: Adjacency matching with gate-frequency weighting (L_adj)
-         - hop_distance: Hop distance tiebreaker (L_hop)
-         - node_quality: NISQ node quality via learnable MLP (L_node)
-         - separation: Multi-programming separation (L_sep)
+Configurable loss components via registry pattern.
+Available components:
+    - error_distance: Error-weighted shortest path distance (L_surr)
+    - adjacency: Adjacency matching with gate-frequency weighting (L_adj)
+    - hop_distance: Hop distance tiebreaker (L_hop)
+    - node_quality: NISQ node quality via learnable MLP (L_node)
+    - separation: Multi-programming separation (L_sep)
 """
 
 from __future__ import annotations
@@ -18,6 +17,27 @@ import torch
 import torch.nn as nn
 
 from training.quality_score import QualityScore
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_per_sample_lists(
+    edge_pairs: list, edge_weights: list, batch_size: int,
+) -> tuple[list[list], list[list]]:
+    """Normalize edge_pairs/weights to per-sample list of lists.
+
+    Handles backward compatibility: if a flat list of tuples is passed
+    (old format), wraps it as a single-sample list of lists.
+    """
+    if not edge_pairs:
+        return [[] for _ in range(batch_size)], [[] for _ in range(batch_size)]
+    # Detect flat list (old format): first element is a tuple, not a list
+    if isinstance(edge_pairs[0], tuple):
+        edge_pairs = [edge_pairs] * batch_size
+        edge_weights = [edge_weights] * batch_size if edge_weights else [[] for _ in range(batch_size)]
+    return edge_pairs, edge_weights
 
 
 # ---------------------------------------------------------------------------
@@ -42,39 +62,7 @@ def get_available_losses() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 1: Supervised Cross-Entropy Loss
-# ---------------------------------------------------------------------------
-
-class SupervisedCELoss(nn.Module):
-    """Cross-entropy loss between softmax output P and label matrix Y.
-
-    L_sup = -sum_{i,j} Y_ij * log(P_ij)
-
-    Args:
-        eps: Small value to clamp P for numerical stability in log.
-    """
-
-    def __init__(self, eps: float = 1e-8) -> None:
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, P: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """Compute cross-entropy loss.
-
-        Args:
-            P: (batch, l, h) row-stochastic matrix from softmax.
-            Y: (batch, l, h) binary label matrix (ground truth).
-
-        Returns:
-            Scalar loss.
-        """
-        log_P = torch.log(P.clamp(min=self.eps))
-        loss = -(Y * log_P).sum(dim=(-2, -1)).mean()
-        return loss
-
-
-# ---------------------------------------------------------------------------
-# Stage 2: Surrogate Loss Components
+# Surrogate Loss Components
 # ---------------------------------------------------------------------------
 
 @register_loss("error_distance")
@@ -95,28 +83,36 @@ class ErrorAwareEdgeLoss(nn.Module):
 
         Required kwargs: d_error, circuit_edge_pairs.
         Optional kwargs: circuit_edge_weights (gate frequency per edge).
+
+        circuit_edge_pairs/weights are lists of lists (one per batch sample).
         """
         d_error = kwargs["d_error"]
-        circuit_edge_pairs = kwargs["circuit_edge_pairs"]
-        circuit_edge_weights = kwargs.get("circuit_edge_weights", [])
-
-        if not circuit_edge_pairs:
-            return torch.tensor(0.0, device=P.device, requires_grad=True)
-
-        if not circuit_edge_weights:
-            circuit_edge_weights = [1.0] * len(circuit_edge_pairs)
+        B = P.size(0)
+        edge_pairs_list, edge_weights_list = _ensure_per_sample_lists(
+            kwargs["circuit_edge_pairs"], kwargs.get("circuit_edge_weights", []), B,
+        )
 
         total_loss = torch.tensor(0.0, device=P.device)
-        total_weight = 0.0
+        valid_samples = 0
 
-        for (i, j), w in zip(circuit_edge_pairs, circuit_edge_weights):
-            P_i = P[:, i, :]
-            P_j = P[:, j, :]
-            cost = (P_i @ d_error * P_j).sum(dim=-1)
-            total_loss = total_loss + w * cost.mean()
-            total_weight += w
+        for b in range(B):
+            pairs = edge_pairs_list[b]
+            weights = edge_weights_list[b] if edge_weights_list else []
+            if not pairs:
+                continue
+            if not weights:
+                weights = [1.0] * len(pairs)
 
-        return total_loss / max(total_weight, 1e-8)
+            sample_loss = torch.tensor(0.0, device=P.device)
+            sample_weight = 0.0
+            for (i, j), w in zip(pairs, weights):
+                cost = (P[b, i, :] @ d_error * P[b, j, :]).sum()
+                sample_loss = sample_loss + w * cost
+                sample_weight += w
+            total_loss = total_loss + sample_loss / max(sample_weight, 1e-8)
+            valid_samples += 1
+
+        return total_loss / max(valid_samples, 1)
 
 
 @register_loss("adjacency")
@@ -133,30 +129,37 @@ class AdjacencyMatchingLoss(nn.Module):
 
         Required kwargs: d_hw, circuit_edge_pairs.
         Optional kwargs: circuit_edge_weights.
+
+        circuit_edge_pairs/weights are lists of lists (one per batch sample).
         """
         d_hw = kwargs["d_hw"]
-        circuit_edge_pairs = kwargs["circuit_edge_pairs"]
-        circuit_edge_weights = kwargs.get("circuit_edge_weights", [])
-
-        if not circuit_edge_pairs:
-            return torch.tensor(0.0, device=P.device, requires_grad=True)
+        B = P.size(0)
+        edge_pairs_list, edge_weights_list = _ensure_per_sample_lists(
+            kwargs["circuit_edge_pairs"], kwargs.get("circuit_edge_weights", []), B,
+        )
 
         A_hw = (d_hw == 1).float()
-
-        if not circuit_edge_weights:
-            circuit_edge_weights = [1.0] * len(circuit_edge_pairs)
-
         total_adj = torch.tensor(0.0, device=P.device)
-        total_weight = 0.0
+        valid_samples = 0
 
-        for (i, j), w in zip(circuit_edge_pairs, circuit_edge_weights):
-            P_i = P[:, i, :]
-            P_j = P[:, j, :]
-            adj_score = (P_i @ A_hw * P_j).sum(dim=-1)
-            total_adj = total_adj + w * adj_score.mean()
-            total_weight += w
+        for b in range(B):
+            pairs = edge_pairs_list[b]
+            weights = edge_weights_list[b] if edge_weights_list else []
+            if not pairs:
+                continue
+            if not weights:
+                weights = [1.0] * len(pairs)
 
-        loss = -total_adj / max(total_weight, 1e-8)
+            sample_adj = torch.tensor(0.0, device=P.device)
+            sample_weight = 0.0
+            for (i, j), w in zip(pairs, weights):
+                adj_score = (P[b, i, :] @ A_hw * P[b, j, :]).sum()
+                sample_adj = sample_adj + w * adj_score
+                sample_weight += w
+            total_adj = total_adj + sample_adj / max(sample_weight, 1e-8)
+            valid_samples += 1
+
+        loss = -total_adj / max(valid_samples, 1)
         return loss
 
 
@@ -181,35 +184,42 @@ class AdjacencyErrorAwareLoss(nn.Module):
 
         Required kwargs: d_hw, d_error, circuit_edge_pairs.
         Optional kwargs: circuit_edge_weights.
+
+        circuit_edge_pairs/weights are lists of lists (one per batch sample).
         """
         d_hw = kwargs["d_hw"]
         d_error = kwargs["d_error"]
-        circuit_edge_pairs = kwargs["circuit_edge_pairs"]
-        circuit_edge_weights = kwargs.get("circuit_edge_weights", [])
-
-        if not circuit_edge_pairs:
-            return torch.tensor(0.0, device=P.device, requires_grad=True)
+        B = P.size(0)
+        edge_pairs_list, edge_weights_list = _ensure_per_sample_lists(
+            kwargs["circuit_edge_pairs"], kwargs.get("circuit_edge_weights", []), B,
+        )
 
         # A_hw * (1 - eps_2Q): adjacent edges weighted by fidelity
         A_hw = (d_hw == 1).float()
-        # For adjacent pairs, d_error gives raw 2Q error
         fidelity = (1.0 - d_error).clamp(min=0.0)
         A_fidelity = A_hw * fidelity
 
-        if not circuit_edge_weights:
-            circuit_edge_weights = [1.0] * len(circuit_edge_pairs)
-
         total_adj = torch.tensor(0.0, device=P.device)
-        total_weight = 0.0
+        valid_samples = 0
 
-        for (i, j), w in zip(circuit_edge_pairs, circuit_edge_weights):
-            P_i = P[:, i, :]
-            P_j = P[:, j, :]
-            adj_score = (P_i @ A_fidelity * P_j).sum(dim=-1)
-            total_adj = total_adj + w * adj_score.mean()
-            total_weight += w
+        for b in range(B):
+            pairs = edge_pairs_list[b]
+            weights = edge_weights_list[b] if edge_weights_list else []
+            if not pairs:
+                continue
+            if not weights:
+                weights = [1.0] * len(pairs)
 
-        loss = -total_adj / max(total_weight, 1e-8)
+            sample_adj = torch.tensor(0.0, device=P.device)
+            sample_weight = 0.0
+            for (i, j), w in zip(pairs, weights):
+                adj_score = (P[b, i, :] @ A_fidelity * P[b, j, :]).sum()
+                sample_adj = sample_adj + w * adj_score
+                sample_weight += w
+            total_adj = total_adj + sample_adj / max(sample_weight, 1e-8)
+            valid_samples += 1
+
+        loss = -total_adj / max(valid_samples, 1)
         return loss
 
 
@@ -272,25 +282,33 @@ class HopDistanceLoss(nn.Module):
         """Compute hop distance loss.
 
         Required kwargs: d_hw, circuit_edge_pairs.
+
+        circuit_edge_pairs is a list of lists (one per batch sample).
         """
         d_hw = kwargs["d_hw"]
-        circuit_edge_pairs = kwargs["circuit_edge_pairs"]
-
-        if not circuit_edge_pairs:
-            return torch.tensor(0.0, device=P.device, requires_grad=True)
+        B = P.size(0)
+        edge_pairs_list, _ = _ensure_per_sample_lists(
+            kwargs["circuit_edge_pairs"], [], B,
+        )
 
         d_max = d_hw.max().clamp(min=1e-8)
         d_hop_norm = d_hw / d_max
 
         total_loss = torch.tensor(0.0, device=P.device)
+        valid_samples = 0
 
-        for i, j in circuit_edge_pairs:
-            P_i = P[:, i, :]
-            P_j = P[:, j, :]
-            cost = (P_i @ d_hop_norm * P_j).sum(dim=-1)
-            total_loss = total_loss + cost.mean()
+        for b in range(B):
+            pairs = edge_pairs_list[b]
+            if not pairs:
+                continue
+            sample_loss = torch.tensor(0.0, device=P.device)
+            for i, j in pairs:
+                cost = (P[b, i, :] @ d_hop_norm * P[b, j, :]).sum()
+                sample_loss = sample_loss + cost
+            total_loss = total_loss + sample_loss / len(pairs)
+            valid_samples += 1
 
-        return total_loss / len(circuit_edge_pairs)
+        return total_loss / max(valid_samples, 1)
 
 
 @register_loss("swap_count")
@@ -318,13 +336,14 @@ class SwapCountLoss(nn.Module):
 
         Required kwargs: d_hw, circuit_edge_pairs.
         Optional kwargs: circuit_edge_weights (gate frequency per edge).
+
+        circuit_edge_pairs/weights are lists of lists (one per batch sample).
         """
         d_hw = kwargs["d_hw"]
-        circuit_edge_pairs = kwargs["circuit_edge_pairs"]
-        circuit_edge_weights = kwargs.get("circuit_edge_weights", [])
-
-        if not circuit_edge_pairs:
-            return torch.tensor(0.0, device=P.device, requires_grad=True)
+        B = P.size(0)
+        edge_pairs_list, edge_weights_list = _ensure_per_sample_lists(
+            kwargs["circuit_edge_pairs"], kwargs.get("circuit_edge_weights", []), B,
+        )
 
         # d_swap = 3 * max(hop - 1, 0): adjacent=0, 2-hop=3, 3-hop=6, ...
         d_swap = 3.0 * (d_hw - 1).clamp(min=0)
@@ -333,20 +352,27 @@ class SwapCountLoss(nn.Module):
             d_max = d_swap.max().clamp(min=1e-8)
             d_swap = d_swap / d_max
 
-        if not circuit_edge_weights:
-            circuit_edge_weights = [1.0] * len(circuit_edge_pairs)
-
         total_loss = torch.tensor(0.0, device=P.device)
-        total_weight = 0.0
+        valid_samples = 0
 
-        for (i, j), w in zip(circuit_edge_pairs, circuit_edge_weights):
-            P_i = P[:, i, :]
-            P_j = P[:, j, :]
-            cost = (P_i @ d_swap * P_j).sum(dim=-1)
-            total_loss = total_loss + w * cost.mean()
-            total_weight += w
+        for b in range(B):
+            pairs = edge_pairs_list[b]
+            weights = edge_weights_list[b] if edge_weights_list else []
+            if not pairs:
+                continue
+            if not weights:
+                weights = [1.0] * len(pairs)
 
-        return total_loss / max(total_weight, 1e-8)
+            sample_loss = torch.tensor(0.0, device=P.device)
+            sample_weight = 0.0
+            for (i, j), w in zip(pairs, weights):
+                cost = (P[b, i, :] @ d_swap * P[b, j, :]).sum()
+                sample_loss = sample_loss + w * cost
+                sample_weight += w
+            total_loss = total_loss + sample_loss / max(sample_weight, 1e-8)
+            valid_samples += 1
+
+        return total_loss / max(valid_samples, 1)
 
 
 @register_loss("soft_proximity")
@@ -377,31 +403,39 @@ class SoftProximityLoss(nn.Module):
 
         Required kwargs: d_hw, circuit_edge_pairs.
         Optional kwargs: circuit_edge_weights (gate frequency per edge).
+
+        circuit_edge_pairs/weights are lists of lists (one per batch sample).
         """
         d_hw = kwargs["d_hw"]
-        circuit_edge_pairs = kwargs["circuit_edge_pairs"]
-        circuit_edge_weights = kwargs.get("circuit_edge_weights", [])
-
-        if not circuit_edge_pairs:
-            return torch.tensor(0.0, device=P.device, requires_grad=True)
+        B = P.size(0)
+        edge_pairs_list, edge_weights_list = _ensure_per_sample_lists(
+            kwargs["circuit_edge_pairs"], kwargs.get("circuit_edge_weights", []), B,
+        )
 
         # reward(p,q) = exp(-alpha * max(hop - 1, 0))
         reward = torch.exp(-self.alpha * (d_hw - 1).clamp(min=0))
 
-        if not circuit_edge_weights:
-            circuit_edge_weights = [1.0] * len(circuit_edge_pairs)
-
         total_reward = torch.tensor(0.0, device=P.device)
-        total_weight = 0.0
+        valid_samples = 0
 
-        for (i, j), w in zip(circuit_edge_pairs, circuit_edge_weights):
-            P_i = P[:, i, :]
-            P_j = P[:, j, :]
-            score = (P_i @ reward * P_j).sum(dim=-1)
-            total_reward = total_reward + w * score.mean()
-            total_weight += w
+        for b in range(B):
+            pairs = edge_pairs_list[b]
+            weights = edge_weights_list[b] if edge_weights_list else []
+            if not pairs:
+                continue
+            if not weights:
+                weights = [1.0] * len(pairs)
 
-        loss = -total_reward / max(total_weight, 1e-8)
+            sample_reward = torch.tensor(0.0, device=P.device)
+            sample_weight = 0.0
+            for (i, j), w in zip(pairs, weights):
+                score = (P[b, i, :] @ reward * P[b, j, :]).sum()
+                sample_reward = sample_reward + w * score
+                sample_weight += w
+            total_reward = total_reward + sample_reward / max(sample_weight, 1e-8)
+            valid_samples += 1
+
+        loss = -total_reward / max(valid_samples, 1)
         return loss
 
 
@@ -425,18 +459,21 @@ class NodeQualityLoss(nn.Module):
         """Compute node quality loss.
 
         Required kwargs: hw_node_features, qubit_importance.
+        qubit_importance is (B, l) — per-sample importance weights.
         """
         hw_node_features = kwargs["hw_node_features"]
         qubit_importance = kwargs["qubit_importance"]
 
         q_scores = self.quality_score(hw_node_features)
-        expected_quality = (P * q_scores.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+        expected_quality = (P * q_scores.unsqueeze(0).unsqueeze(0)).sum(dim=-1)  # (B, l)
 
-        w = qubit_importance.unsqueeze(0)
-        w_sum = w.sum(dim=-1, keepdim=True).clamp(min=1e-8)
-        w_norm = w / w_sum
+        # qubit_importance: (B, l) — per-sample
+        if qubit_importance.dim() == 1:
+            qubit_importance = qubit_importance.unsqueeze(0).expand(P.size(0), -1)
+        w_sum = qubit_importance.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        w_norm = qubit_importance / w_sum  # (B, l)
 
-        weighted = (w_norm * expected_quality).sum(dim=-1)
+        weighted = (w_norm * expected_quality).sum(dim=-1)  # (B,)
         loss = -weighted.mean()
         return loss
 
@@ -503,7 +540,7 @@ class NodePlacementCostLoss(nn.Module):
         """Compute node placement cost loss.
 
         Required kwargs:
-            grama_g_single: (l,) per-logical-qubit 1Q gate count.
+            grama_g_single: (B, l) per-logical-qubit 1Q gate count (batched).
             grama_s_gate: (h,) per-physical-qubit 1Q gate error (raw).
             grama_s_read: (h,) per-physical-qubit readout error (raw).
         """
@@ -514,17 +551,21 @@ class NodePlacementCostLoss(nn.Module):
         if g_single is None or s_gate is None or s_read is None:
             return torch.tensor(0.0, device=P.device, requires_grad=True)
 
-        g_single = g_single.to(P.device)  # (l,)
+        g_single = g_single.to(P.device)  # (B, l) or (l,)
         s_gate = s_gate.to(P.device)      # (h,)
         s_read = s_read.to(P.device)      # (h,)
 
-        # cost(i, p) = n_1Q(i) * eps_1Q(p) + lambda_r * eps_readout(p)
-        # Shape: (l, h)
-        cost_matrix = g_single.unsqueeze(1) * s_gate.unsqueeze(0) \
-            + self.lambda_r * s_read.unsqueeze(0)
+        # Ensure g_single is (B, l)
+        if g_single.dim() == 1:
+            g_single = g_single.unsqueeze(0).expand(P.size(0), -1)
+
+        # cost(b, i, p) = n_1Q(b, i) * eps_1Q(p) + lambda_r * eps_readout(p)
+        # Shape: (B, l, h)
+        cost_matrix = g_single.unsqueeze(2) * s_gate.unsqueeze(0).unsqueeze(0) \
+            + self.lambda_r * s_read.unsqueeze(0).unsqueeze(0)
 
         # L = sum_i sum_p P_ip * cost(i, p), averaged over batch
-        loss = (P * cost_matrix.unsqueeze(0)).sum(dim=(-2, -1)).mean()
+        loss = (P * cost_matrix).sum(dim=(-2, -1)).mean()
         return loss
 
 
@@ -590,9 +631,9 @@ class GraMALoss(nn.Module):
             grama_W: (h, h) hardware weighted-distance matrix.
             grama_s_read: (h,) raw readout error per physical qubit.
             grama_s_gate: (h,) raw max single-qubit gate error per physical qubit.
-            grama_g_single: (l,) per-logical 1Q gate count.
-            circuit_edge_pairs: list of (i, j) logical qubit pairs with 2Q gates.
-            circuit_edge_weights: optional list of 2Q gate counts per edge.
+            grama_g_single: (B, l) per-logical 1Q gate count (batched).
+            circuit_edge_pairs: list of lists — per-sample (i, j) pairs.
+            circuit_edge_weights: list of lists — per-sample 2Q gate counts.
         """
         device = P.device
         dtype = P.dtype
@@ -602,8 +643,8 @@ class GraMALoss(nn.Module):
         s_read = kwargs.get("grama_s_read")
         s_gate = kwargs.get("grama_s_gate")
         g_single = kwargs.get("grama_g_single")
-        edge_pairs = kwargs.get("circuit_edge_pairs", [])
-        edge_weights = kwargs.get("circuit_edge_weights", [])
+        raw_edge_pairs = kwargs.get("circuit_edge_pairs", [])
+        raw_edge_weights = kwargs.get("circuit_edge_weights", [])
 
         if W is None or s_read is None or s_gate is None or g_single is None:
             return torch.tensor(0.0, device=device, requires_grad=True)
@@ -612,64 +653,68 @@ class GraMALoss(nn.Module):
         s_read = s_read.to(device=device, dtype=dtype)
         s_gate = s_gate.to(device=device, dtype=dtype)
         g_single = g_single.to(device=device, dtype=dtype)
+        # Ensure g_single is (B, l)
+        if g_single.dim() == 1:
+            g_single = g_single.unsqueeze(0).expand(B, -1)
 
-        # ---- Build logical adjacency A (l × l) ----
-        A = torch.zeros((l, l), device=device, dtype=dtype)
-        if edge_pairs:
-            if self.binary_adjacency or not edge_weights:
-                weights = [1.0] * len(edge_pairs)
-            else:
-                weights = list(edge_weights)
-            idx = torch.tensor(edge_pairs, device=device, dtype=torch.long)
-            w = torch.tensor(weights, device=device, dtype=dtype)
-            # Symmetric
-            A[idx[:, 0], idx[:, 1]] = w
-            A[idx[:, 1], idx[:, 0]] = w
+        edge_pairs_list, edge_weights_list = _ensure_per_sample_lists(
+            raw_edge_pairs, raw_edge_weights, B,
+        )
 
-        # ---- Build single-qubit cost S (h × l) ----
-        # S[i, j] = s_read[i] + s_gate[i] * g_single[j]
-        S = s_read.unsqueeze(1) + torch.outer(s_gate, g_single)  # (h, l)
+        # ---- Build per-sample logical adjacency A (B, l, l) ----
+        A = torch.zeros((B, l, l), device=device, dtype=dtype)
+        per_sample_num_edges = []
+        for b in range(B):
+            pairs = edge_pairs_list[b] if edge_pairs_list else []
+            weights = edge_weights_list[b] if edge_weights_list else []
+            per_sample_num_edges.append(max(len(pairs), 1))
+            if pairs:
+                if self.binary_adjacency or not weights:
+                    w_vals = [1.0] * len(pairs)
+                else:
+                    w_vals = list(weights)
+                idx = torch.tensor(pairs, device=device, dtype=torch.long)
+                w = torch.tensor(w_vals, device=device, dtype=dtype)
+                A[b, idx[:, 0], idx[:, 1]] = w
+                A[b, idx[:, 1], idx[:, 0]] = w
+
+        # ---- Build per-sample single-qubit cost S (B, h, l) ----
+        # S[b, i, j] = s_read[i] + s_gate[i] * g_single[b, j]
+        S = s_read.unsqueeze(0).unsqueeze(2) + \
+            s_gate.unsqueeze(0).unsqueeze(2) * g_single.unsqueeze(1)  # (B, h, l)
 
         # ---- Term 1: trace QAP — Tr(A P W P^T) per batch ----
-        # WP^T: einsum over physical: (h,h) @ (B,h,l) -> (B,h,l)
-        WP_T = torch.einsum("hk,blk->bhl", W, P)        # (B, h, l) — actually (B,h,l)
-        # A P: (l,l) @ (B,l,h) -> (B,l,h)
-        AP = torch.einsum("ij,bjh->bih", A, P)          # (B, l, h)
-        # trace term: sum over l,h of AP * (W P^T)^T = sum AP_{i,h} * WP_T[h, i] / per batch
-        # Equivalent compact form: (AP * (WP_T transposed))
+        WP_T = torch.einsum("hk,blk->bhl", W, P)        # (B, h, l)
+        AP = torch.bmm(A, P)                              # (B, l, h)
         trace_term = (AP * WP_T.transpose(1, 2)).sum(dim=(-1, -2))  # (B,)
 
         # ---- gamma (auto-balancing scalar, per Eq. 9) ----
-        # X_c = (1/n) 1_n 1_k^T (paper's notation, n=h, k=l)
-        # 2 W X_c A reduces to (2/n) * (W·1_h)[u] * (1_l^T A)[i]
-        # Its mean equals (2/n) * mean_h(W·1) * mean_l(A·1)  (since all entries factor)
         with torch.no_grad():
             if self.gamma_mode == "fixed":
                 gamma = torch.tensor(self.gamma_fixed, device=device, dtype=dtype)
             else:
                 row_sum_W = W.sum(dim=1)                # (h,)
-                col_sum_A = A.sum(dim=0)                # (l,)
-                # 2WX_cA shape (h, l); mean factors:
+                # Use mean A across batch for gamma computation
+                col_sum_A = A.mean(dim=0).sum(dim=0)    # (l,)
                 t_mean = (2.0 / h) * row_sum_W.mean() * col_sum_A.mean()
                 s_mean = S.mean()
                 if s_mean.abs() < 1e-12:
                     gamma = torch.tensor(0.0, device=device, dtype=dtype)
                 else:
                     gamma = t_mean / s_mean
-                # safety: clamp to non-negative finite range
                 if not torch.isfinite(gamma):
                     gamma = torch.tensor(0.0, device=device, dtype=dtype)
 
         # ---- Term 2: <S^T, P> per batch ----
-        # S has shape (h, l), so S^T (l, h) lines up with P (B, l, h).
-        S_T = S.transpose(0, 1)                          # (l, h)
-        single_term = (P * S_T.unsqueeze(0)).sum(dim=(-1, -2))  # (B,)
+        # S (B, h, l), S^T → (B, l, h) aligns with P (B, l, h)
+        S_T = S.transpose(1, 2)                          # (B, l, h)
+        single_term = (P * S_T).sum(dim=(-1, -2))        # (B,)
 
         # ---- Combine ----
         per_batch = trace_term + gamma * single_term     # (B,)
 
         if self.normalize_by_size:
-            denom = float(l + max(len(edge_pairs), 1))
+            denom = torch.tensor(per_sample_num_edges, device=device, dtype=dtype) + l
             per_batch = per_batch / denom
 
         return per_batch.mean()
@@ -718,7 +763,7 @@ class QAPFidelityLoss(nn.Module):
 
         Required kwargs:
             c_eff: (h, h) effective cost matrix.
-            circuit_adj: (l, l) gate-count weighted adjacency matrix Ã_c.
+            circuit_adj: (B, l, l) gate-count weighted adjacency matrix Ã_c.
         Optional kwargs:
             grama_s_read: (h,) raw readout error vector ε_r per physical qubit.
         """
@@ -731,15 +776,16 @@ class QAPFidelityLoss(nn.Module):
         c_eff = c_eff.to(device=P.device, dtype=P.dtype)
         circuit_adj = circuit_adj.to(device=P.device, dtype=P.dtype)
 
-        # Edge term: tr(Ã_c P C_eff P^T)
-        # Efficient: PC = P @ C_eff, then sum (Ã_c @ PC) * P
-        PC = torch.matmul(P, c_eff)          # (B, l, h)
-        APC = torch.matmul(circuit_adj, PC)   # (B, l, h) — Ã_c broadcast over batch
-        edge_term = (APC * P).sum(dim=(-2, -1))   # (B,)
+        # Ensure circuit_adj is batched (B, l, l)
+        if circuit_adj.dim() == 2:
+            circuit_adj = circuit_adj.unsqueeze(0).expand(P.size(0), -1, -1)
+
+        # Edge term: tr(Ã_c P C_eff P^T) — per-sample with per-sample Ã_c
+        PC = torch.matmul(P, c_eff)                        # (B, l, h)
+        APC = torch.bmm(circuit_adj, PC)                    # (B, l, h)
+        edge_term = (APC * P).sum(dim=(-2, -1))             # (B,)
 
         # Readout term: 1^T P ε_r = Σ_j ε_r(j) · c_j
-        # Encourages mapping to low-readout-error physical qubits.
-        # c_j = column sum of P (l×h slice) — varies per physical qubit.
         eps_r = kwargs.get("grama_s_read")
         readout_term = torch.zeros_like(edge_term)
         if eps_r is not None:
@@ -748,15 +794,15 @@ class QAPFidelityLoss(nn.Module):
 
         norm_mode = self.normalize
         if norm_mode == "legacy":
-            # Old normalization: (edge + readout) / (l + |E|)
             l = P.size(1)
-            num_edges = max((circuit_adj > 0).sum().item() // 2, 1)
+            # Per-sample edge count from per-sample circuit_adj
+            num_edges = (circuit_adj > 0).sum(dim=(-2, -1)).float() / 2.0
+            num_edges = num_edges.clamp(min=1.0)
             loss = (edge_term + readout_term) / (l + num_edges)
         elif norm_mode is True or norm_mode == "per_term":
-            # Per-term normalization: edge/Σg + readout/l
-            # Σg = total gate weight = sum of all entries in Ã_c / 2 (symmetric)
-            total_gate_weight = circuit_adj.sum().item() / 2.0
-            total_gate_weight = max(total_gate_weight, 1.0)
+            # Per-sample Σg = sum of per-sample Ã_c / 2
+            total_gate_weight = circuit_adj.sum(dim=(-2, -1)) / 2.0
+            total_gate_weight = total_gate_weight.clamp(min=1.0)
             l = P.size(1)
             loss = edge_term / total_gate_weight + readout_term / l
         else:
@@ -796,11 +842,11 @@ class ExclusionLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Combined Stage 2 Loss (built from config)
+# Combined Surrogate Loss (built from config)
 # ---------------------------------------------------------------------------
 
-class Stage2Loss(nn.Module):
-    """Combined Stage 2 loss built from config components.
+class SurrogateLoss(nn.Module):
+    """Combined surrogate loss built from config components.
 
     Each component is a registered loss with a weight. The total loss is
     the weighted sum of all active components.
@@ -847,7 +893,7 @@ class Stage2Loss(nn.Module):
             self.component_weights.append(weight)
 
     def forward(self, P: torch.Tensor, **kwargs: Any) -> dict[str, torch.Tensor]:
-        """Compute combined Stage 2 loss.
+        """Compute combined surrogate loss.
 
         All kwargs are passed through to each component.
 

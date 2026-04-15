@@ -5,7 +5,7 @@ for fast loading.
 
 Usage:
     python scripts/build_dataset.py --labels data/labels/labels.json \
-        --circuit-dir data/circuits/mqt_bench --output data/dataset_stage1.pkl
+        --circuit-dir data/circuits/mqt_bench --output data/dataset.pkl
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def build_dataset_from_labels(
     Args:
         labels: List of label dicts from generate_labels.py.
         circuit_dir: Directory with .qasm files.
-        include_labels: Whether to include label matrices (Stage 1).
+        include_labels: Whether to include label matrices.
 
     Returns:
         MappingDataset.

@@ -1,0 +1,181 @@
+# GraphQMap: QAP Fidelity Loss + Iterative Refinement
+#
+# Key changes from base.yaml sinkhorn_adj_sizeaware:
+#
+# 1. C_eff cost matrix: Floyd-Warshall with 3×ε₂ edge weights (SWAP = 3 CX).
+#    Adjacent pairs use raw ε₂. All terms in -log(fidelity) units.
+#
+# 2. Unified QAP loss: tr(Ã_c P C_eff P^T) replaces separate error_distance +
+#    adjacency losses. No artificial weight balancing needed — naturally
+#    size-aware because C_eff scales with backend size.
+#
+# 3. Iterative refinement: S^(t+1) = S^(0) - λ·Ã_c·P^(t)·C_eff
+#    Mirror descent feedback loop after GNN score computation.
+#    λ is learnable (init 1.0). Temperature annealing within refinement (β=0.9).
+#
+# Inspired by "Noise-Aware Iterative Attention for Scalable Qubit Mapping"
+# which interprets self-attention as QAP mirror descent.
+
+model:
+  embedding_dim: 64
+
+  circuit_gnn:
+    node_features:
+      - gate_count
+      - two_qubit_gate_count
+      - single_qubit_gate_ratio
+      - critical_path_fraction
+    rwpe_k: 2
+    edge_input_dim: 3
+    num_layers: 3
+    num_heads: 4
+    activation: elu
+    dropout: 0.1
+    use_batchnorm: true
+    residual_layers: [2, 3]
+
+  hardware_gnn:
+    node_input_dim: 5            # hw_feat_v1: readout, sq_err, degree, t1_cx_ratio, t2_cx_ratio
+    edge_input_dim: 1            # hw_feat_v1: 2q_error
+    num_layers: 3
+    num_heads: 4
+    activation: elu
+    dropout: 0.1
+    use_batchnorm: true
+    residual_layers: [2, 3]
+
+  cross_attention:
+    num_layers: 2
+    num_heads: 4
+    ffn_hidden_dim: 128
+    dropout: 0.1
+
+  score_head:
+    d_k: 64
+    noise_bias_dim: 0
+
+  iterative_refinement:
+    iterations: 5                # T: number of mirror descent steps
+    lambda_init: 1.0             # learnable scalar coefficient
+    beta: 0.9                    # temperature decay per iteration
+
+sinkhorn:
+  score_norm: sinkhorn
+  tau_max: 1.0
+  tau_min: 0.05
+  schedule: exponential
+  max_iter: 20
+  tolerance: 1.0e-6
+
+training:
+  optimizer:
+    type: adamw
+    lr: 5.0e-4
+    weight_decay: 1.0e-4
+  scheduler:
+    type: cosine_annealing
+    T_max: 100
+    eta_min: 1.0e-5
+  warmup_epochs: 2
+  grad_clip_norm: 2.0
+  max_epochs: 100
+  early_stopping:
+    monitor: val_pst
+    patience: 10
+    min_delta: 0.005
+  pst_validation:
+    interval: 5
+    num_circuits: 200
+    convergence_checks: 3
+
+loss:
+  type: surrogate
+  components:
+    - name: qap_fidelity
+      weight: 1.0
+      params:
+        normalize: true
+
+data:
+  data_root: data/circuits
+  splits:
+    train: data/circuits/splits/train_all.json
+    val: data/circuits/splits/val.json
+  multi_programming:
+    scenarios: [1, 2, 4]
+    proportions: [0.5, 0.3, 0.2]
+    occupancy_min: 0.3
+    occupancy_max: 0.75
+  normalization:
+    epsilon: 1.0e-8
+
+batching:
+  max_total_nodes: 512
+  backend_balanced: true
+  large_backend_boost: 2.0
+
+backends:
+  training:
+    - FakeAthens
+    - FakeBelem
+    - FakeBogota
+    - FakeBurlington
+    - FakeEssex
+    - FakeLima
+    - FakeLondon
+    - FakeManila
+    - FakeOurense
+    - FakeQuito
+    - FakeRome
+    - FakeSantiago
+    - FakeValencia
+    - FakeVigo
+    - FakeYorktown
+    - FakeCasablanca
+    - FakeJakarta
+    - FakeLagos
+    - FakeNairobi
+    - FakeOslo
+    - FakePerth
+    - FakeMelbourne
+    - FakeGuadalupe
+    - FakeAlmaden
+    - FakeBoeblingen
+    - FakeJohannesburg
+    - FakePoughkeepsie
+    - FakeSingapore
+    - FakeAlgiers
+    - FakeAuckland
+    - FakeCairo
+    - FakeCambridge
+    - FakeGeneva
+    - FakeHanoi
+    - FakeKolkata
+    - FakeMontreal
+    - FakeParis
+    - FakePeekskill
+    - FakeSydney
+    - FakePrague
+    - FakeBrooklyn
+    - FakeBrisbane
+    - FakeCusco
+    - FakeKawasaki
+    - FakeKyiv
+    - FakeKyoto
+    - FakeOsaka
+    - FakeQuebec
+    - FakeSherbrooke
+    - FakeTorino
+  validation:
+    - FakeMumbai             # 27Q
+    - FakeManhattan          # 65Q
+  test:
+    - FakeToronto
+    - FakeRochester
+    - FakeWashington
+
+seed: 42
+device: cuda
+num_workers: 4
+log_dir: logs/train
+checkpoint_dir: checkpoints/train

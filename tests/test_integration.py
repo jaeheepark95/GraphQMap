@@ -4,12 +4,11 @@ Tests the full pipeline with synthetic circuits:
   1. Graph construction (circuit + hardware)
   2. Model forward pass → P matrix
   3. Hungarian decoding → discrete layout
-  4. Label generation → permutation matrix
-  5. Loss computation (Stage 1 CE + Stage 2 surrogate)
-  6. Backward pass (gradient flow end-to-end)
-  7. Training step (optimizer update)
-  8. PST evaluation
-  9. Multi-programming scenario
+  4. Surrogate loss computation
+  5. Backward pass (gradient flow end-to-end)
+  6. Training step (optimizer update)
+  7. PST evaluation
+  8. Multi-programming scenario
 """
 
 import pytest
@@ -26,7 +25,7 @@ from data.label_generation import generate_label, layout_to_permutation_matrix
 from data.multi_programming import merge_circuits
 from evaluation.pst import measure_pst
 from models.graphqmap import GraphQMap
-from training.losses import SupervisedCELoss, Stage2Loss
+from training.losses import SurrogateLoss
 from training.quality_score import QualityScore
 from training.tau_scheduler import TauScheduler
 
@@ -96,48 +95,8 @@ class TestEndToEnd:
         assert len(set(layout.values())) == 3
         assert all(0 <= v < 5 for v in layout.values())
 
-    def test_stage1_training_step(self, model, circuit, backend):
-        """One complete Stage 1 training step with gradient update."""
-        circuit_graph = build_circuit_graph(circuit, edge_dim=3)
-        hw_graph = build_hardware_graph(backend)
-
-        # Generate label
-        label_result = generate_label(circuit, backend,
-                                      num_sabre_seeds=3, num_random=2, rng_seed=42)
-        Y = layout_to_permutation_matrix(label_result.layout, num_physical=5)
-        Y_tensor = torch.tensor(Y).unsqueeze(0)  # (1, 3, 5)
-
-        circuit_batch = Batch.from_data_list([circuit_graph])
-        hw_batch = Batch.from_data_list([hw_graph])
-
-        # Forward
-        optimizer = AdamW(model.parameters(), lr=1e-3)
-        criterion = SupervisedCELoss()
-
-        model.train()
-        optimizer.zero_grad()
-        P = model(circuit_batch, hw_batch, batch_size=1,
-                  num_logical=3, num_physical=5, tau=0.5)
-
-        loss = criterion(P, Y_tensor)
-        assert loss.item() > 0
-
-        # Backward
-        loss.backward()
-
-        # Check gradients exist
-        grad_count = sum(1 for p in model.parameters() if p.grad is not None)
-        total_params = sum(1 for p in model.parameters())
-        assert grad_count == total_params
-
-        # Optimizer step
-        param_before = next(model.parameters()).data.clone()
-        optimizer.step()
-        param_after = next(model.parameters()).data
-        assert not torch.equal(param_before, param_after)
-
-    def test_stage2_training_step(self, model, circuit, backend):
-        """One complete Stage 2 training step with surrogate loss."""
+    def test_training_step(self, model, circuit, backend):
+        """One complete training step with surrogate loss."""
         circuit_graph = build_circuit_graph(circuit, edge_dim=3)
         hw_graph = build_hardware_graph(backend)
 
@@ -161,7 +120,7 @@ class TestEndToEnd:
 
         # Setup
         quality_score = QualityScore(num_features=6)
-        criterion = Stage2Loss(
+        criterion = SurrogateLoss(
             components=[
                 {"name": "error_distance", "weight": 1.0},
                 {"name": "node_quality", "weight": 0.3},
@@ -281,7 +240,7 @@ class TestEndToEnd:
 
     def test_from_config_and_predict(self):
         """Load model from YAML config → predict → valid output."""
-        cfg = load_config("configs/stage1.yaml")
+        cfg = load_config("configs/base.yaml")
         model = GraphQMap.from_config(cfg)
 
         backend = get_backend("manila")
@@ -303,44 +262,3 @@ class TestEndToEnd:
         assert len(layout) == 3
         assert len(set(layout.values())) == 3
 
-    def test_multiple_epochs_loss_decreases(self, backend):
-        """Training over multiple epochs should decrease loss."""
-        circuit = _make_circuit(3, 3, seed=0)
-        circuit_graph = build_circuit_graph(circuit, edge_dim=3)
-        hw_graph = build_hardware_graph(backend)
-
-        label_result = generate_label(circuit, backend,
-                                      num_sabre_seeds=3, num_random=2, rng_seed=0)
-        Y = layout_to_permutation_matrix(label_result.layout, num_physical=5)
-        Y_tensor = torch.tensor(Y).unsqueeze(0)
-
-        circuit_batch = Batch.from_data_list([circuit_graph])
-        hw_batch = Batch.from_data_list([hw_graph])
-
-        model = GraphQMap(
-            circuit_node_dim=4, circuit_edge_dim=3,
-            hardware_node_dim=6, hardware_edge_dim=2,
-            embedding_dim=32, gnn_layers=2, gnn_heads=4,
-            gnn_dropout=0.0, cross_attn_layers=1, cross_attn_heads=4,
-            cross_attn_ffn_dim=64, cross_attn_dropout=0.0,
-            score_d_k=32,
-        )
-        optimizer = AdamW(model.parameters(), lr=1e-3)
-        criterion = SupervisedCELoss()
-        tau_sched = TauScheduler(tau_max=1.0, tau_min=0.1, schedule="exponential",
-                                 total_epochs=20)
-
-        losses = []
-        model.train()
-        for epoch in range(20):
-            tau = tau_sched.get_tau(epoch)
-            optimizer.zero_grad()
-            P = model(circuit_batch, hw_batch, batch_size=1,
-                      num_logical=3, num_physical=5, tau=tau)
-            loss = criterion(P, Y_tensor)
-            loss.backward()
-            optimizer.step()
-            losses.append(loss.item())
-
-        # Loss should decrease over training
-        assert losses[-1] < losses[0], f"Loss did not decrease: {losses[0]:.4f} → {losses[-1]:.4f}"

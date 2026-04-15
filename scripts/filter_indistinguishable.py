@@ -287,10 +287,7 @@ def main() -> None:
         remove_set.add((src, stem))
 
     split_files = [
-        "stage2_all.json",
-        "stage1_supervised.json",
-        "stage1_unsupervised.json",
-        "stage1_queko_only.json",
+        "train_all.json",
         "val.json",
         "val_queko_only.json",
     ]

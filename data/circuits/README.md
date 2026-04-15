@@ -4,14 +4,14 @@ Quantum circuit dataset for training and evaluating the GraphQMap qubit mapping 
 
 ## Overview
 
-| | Circuits | Labels | Purpose |
-|---|:---:|:---:|---|
-| **Total** | **7,165** | **4,269** | |
-| QUEKO | 900 | 540 | Stage 1 supervised + Stage 2 |
-| MLQD | 4,443 | 3,729 | Stage 1 supervised + Stage 2 |
-| MQT Bench | 1,448 | — | Stage 2 unsupervised |
-| QASMBench | 111 | — | Stage 2 unsupervised |
-| RevLib | 263 | — | Stage 2 unsupervised |
+| | Circuits | Labels |
+|---|:---:|:---:|
+| **Total** | **7,165** | **4,269** |
+| QUEKO | 900 | 540 |
+| MLQD | 4,443 | 3,729 |
+| MQT Bench | 1,448 | — |
+| QASMBench | 111 | — |
+| RevLib | 263 | — |
 
 ## Directory Structure
 
@@ -33,10 +33,7 @@ data/circuits/
 │   ├── queko_sycamore.json
 │   └── mlqd_grid5x5.json
 ├── splits/                         # Train/val split definitions
-│   ├── stage1_supervised.json
-│   ├── stage1_queko_only.json
-│   ├── stage1_unsupervised.json
-│   ├── stage2_all.json
+│   ├── train_all.json
 │   ├── val.json
 │   └── val_queko_only.json
 └── README.md                       # This file
@@ -88,7 +85,7 @@ Circuits derived from QASMBench, processed through OLSQ2 optimal qubit mapper on
 
 **Source**: [MQT Bench](https://github.com/munich-quantum-toolkit/bench) (Python API, v2.1.1)
 
-Generated via `scripts/generate_mqt_bench.py` with 29 algorithm types across 2-127 qubits. No labels (Stage 2 unsupervised only).
+Generated via `scripts/generate_mqt_bench.py` with 29 algorithm types across 2-127 qubits. No labels (unsupervised only).
 
 **Algorithm types**: ae, bmw_quark_cardinality, bmw_quark_copula, bv, cdkm_ripple_carry_adder, dj, draper_qft_adder, full_adder, ghz, graphstate, grover, half_adder, hhl, modular_adder, multiplier, qaoa, qft, qftentangled, qnn, qpeexact, qpeinexact, qwalk, randomcircuit, rg_qft_multiplier, vbe_ripple_carry_adder, vqe_real_amp, vqe_su2, vqe_two_local, wstate
 
@@ -152,23 +149,11 @@ Split files in `splits/` define which circuits participate in each training stag
 
 | File | Entries | Description |
 |---|:---:|---|
-| `stage1_supervised.json` | 3,846 | Labeled circuits for Stage 1 training (90% of all labels) |
-| `stage1_queko_only.json` | 486 | QUEKO subset for Stage 1 fine-tuning phase |
-| `val.json` | 423 | Labeled validation set (10% of all labels, stratified) |
-| `val_queko_only.json` | 54 | QUEKO validation for fine-tuning phase |
-| `stage2_all.json` | 7,165 | All circuits for Stage 2 surrogate loss training |
-| `stage1_unsupervised.json` | 2,896 | Unlabeled circuits (for reference) |
+| `val.json` | 28 | Labeled validation set |
+| `val_queko_only.json` | 2 | QUEKO validation |
+| `train_all.json` | 969 | All training circuits (surrogate loss) |
 
-**Split format** (supervised):
-```json
-[
-  {"source": "queko", "file": "16QBT_05CYC_TFL_0.qasm", "backend": "queko_aspen4"},
-  {"source": "mlqd", "file": "melbourne_qasmbench_adder_n4_transpiled.qasm", "backend": "melbourne"},
-  ...
-]
-```
-
-**Split format** (unsupervised, stage2_all):
+**Split format**:
 ```json
 [
   {"source": "queko", "file": "16QBT_05CYC_TFL_0.qasm"},

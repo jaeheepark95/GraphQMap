@@ -5,7 +5,7 @@ Metrics:
   - Additional CNOT: (final 2Q gates) - (original 2Q gates), i.e. routing overhead
 
 Usage:
-    python scripts/measure_transpile.py --config configs/stage2.yaml \
+    python scripts/measure_transpile.py --config configs/base.yaml \
       --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
       --backend torino --reps 3
 """

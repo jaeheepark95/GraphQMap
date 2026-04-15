@@ -278,7 +278,7 @@ class TestGraphQMap:
 
     def test_from_config(self):
         from configs.config_loader import load_config
-        cfg = load_config("configs/stage1.yaml")
+        cfg = load_config("configs/base.yaml")
         model = GraphQMap.from_config(cfg)
         assert model.circuit_gnn.embedding_dim == 64
         assert model.hardware_gnn.embedding_dim == 64

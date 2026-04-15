@@ -12,8 +12,7 @@ from training.losses import (
     HopDistanceLoss,
     NodeQualityLoss,
     SeparationLoss,
-    Stage2Loss,
-    SupervisedCELoss,
+    SurrogateLoss,
     get_available_losses,
 )
 from training.quality_score import QualityScore
@@ -118,49 +117,6 @@ class TestQualityScore:
         assert num_params > 0
 
 
-# ---- Supervised CE Loss ----
-
-class TestSupervisedCELoss:
-    def test_perfect_match_low_loss(self):
-        """P ≈ Y should give low loss."""
-        loss_fn = SupervisedCELoss()
-        # (1, 3, 5) — 3 logical, 5 physical
-        Y = torch.zeros(1, 3, 5)
-        Y[0, 0, 0] = Y[0, 1, 1] = Y[0, 2, 2] = 1.0
-        P = Y * 0.95 + 0.01            # near-perfect match
-        loss = loss_fn(P, Y)
-        assert loss.item() < 1.0
-
-    def test_bad_match_high_loss(self):
-        """P far from Y should give higher loss."""
-        loss_fn = SupervisedCELoss()
-        Y = torch.zeros(1, 3, 5)
-        Y[0, 0, 0] = Y[0, 1, 1] = Y[0, 2, 2] = 1.0
-        P = torch.ones(1, 3, 5) / 5    # uniform = bad
-        loss_good = loss_fn(Y * 0.95 + 0.01, Y)
-        loss_bad = loss_fn(P, Y)
-        assert loss_bad.item() > loss_good.item()
-
-    def test_gradient_flow(self):
-        loss_fn = SupervisedCELoss()
-        P = torch.rand(2, 3, 5, requires_grad=True)
-        Y = torch.zeros(2, 3, 5)
-        Y[0, 0, 0] = Y[0, 1, 1] = Y[0, 2, 2] = 1.0
-        Y[1, 0, 0] = Y[1, 1, 1] = Y[1, 2, 2] = 1.0
-        loss = loss_fn(P, Y)
-        loss.backward()
-        assert P.grad is not None
-
-    def test_batch_dimension(self):
-        loss_fn = SupervisedCELoss()
-        P = torch.rand(4, 3, 5)
-        Y = torch.zeros(4, 3, 5)
-        for b in range(4):
-            Y[b, 0, 0] = Y[b, 1, 1] = Y[b, 2, 2] = 1.0
-        loss = loss_fn(P, Y)
-        assert loss.shape == ()
-
-
 # ---- Loss Registry ----
 
 class TestLossRegistry:
@@ -176,11 +132,11 @@ class TestLossRegistry:
     def test_unknown_loss_raises(self):
         qs = QualityScore(num_features=6)
         with pytest.raises(ValueError, match="Unknown loss component"):
-            Stage2Loss(components=[{"name": "nonexistent", "weight": 1.0}], quality_score=qs)
+            SurrogateLoss(components=[{"name": "nonexistent", "weight": 1.0}], quality_score=qs)
 
     def test_node_quality_without_qs_raises(self):
         with pytest.raises(ValueError, match="requires quality_score"):
-            Stage2Loss(components=[{"name": "node_quality", "weight": 1.0}])
+            SurrogateLoss(components=[{"name": "node_quality", "weight": 1.0}])
 
 
 # ---- Error-Aware Edge Loss ----
@@ -322,9 +278,9 @@ class TestNodeQualityLoss:
             assert param.grad is not None
 
 
-# ---- Stage 2 Combined Loss (Registry-based) ----
+# ---- Combined Surrogate Loss (Registry-based) ----
 
-class TestStage2Loss:
+class TestSurrogateLoss:
     def _make_d_hw(self, n=5):
         """Create hop distance matrix for a path graph."""
         d_hw = torch.zeros(n, n)
@@ -356,7 +312,7 @@ class TestStage2Loss:
     def test_original_config(self):
         """Test the original loss: error_distance + node_quality."""
         qs = QualityScore(num_features=6)
-        loss_fn = Stage2Loss(
+        loss_fn = SurrogateLoss(
             components=[
                 {"name": "error_distance", "weight": 1.0},
                 {"name": "node_quality", "weight": 0.3},
@@ -374,7 +330,7 @@ class TestStage2Loss:
     def test_adj_hop_config(self):
         """Test adjacency + hop + node config."""
         qs = QualityScore(num_features=6)
-        loss_fn = Stage2Loss(
+        loss_fn = SurrogateLoss(
             components=[
                 {"name": "adjacency", "weight": 1.0},
                 {"name": "hop_distance", "weight": 0.2},
@@ -391,7 +347,7 @@ class TestStage2Loss:
 
     def test_single_component(self):
         """Test with just one loss component."""
-        loss_fn = Stage2Loss(
+        loss_fn = SurrogateLoss(
             components=[{"name": "error_distance", "weight": 1.0}],
         )
         P = torch.rand(2, 3, 5)
@@ -403,7 +359,7 @@ class TestStage2Loss:
 
     def test_component_names_tracked(self):
         qs = QualityScore(num_features=6)
-        loss_fn = Stage2Loss(
+        loss_fn = SurrogateLoss(
             components=[
                 {"name": "error_distance", "weight": 1.0},
                 {"name": "node_quality", "weight": 0.3},
@@ -416,7 +372,7 @@ class TestStage2Loss:
     def test_weighted_sum(self):
         """Total should equal weighted sum of components."""
         qs = QualityScore(num_features=6)
-        loss_fn = Stage2Loss(
+        loss_fn = SurrogateLoss(
             components=[
                 {"name": "error_distance", "weight": 2.0},
                 {"name": "node_quality", "weight": 0.5},
@@ -432,7 +388,7 @@ class TestStage2Loss:
     def test_with_separation(self):
         """Test that separation loss works when cross_circuit_pairs provided."""
         qs = QualityScore(num_features=6)
-        loss_fn = Stage2Loss(
+        loss_fn = SurrogateLoss(
             components=[
                 {"name": "error_distance", "weight": 1.0},
                 {"name": "separation", "weight": 0.1},

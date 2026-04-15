@@ -164,7 +164,7 @@ Latest experiment settings: `v7_norefine_tau05_s42` (2026-04-13)
 | **Checkpoint** | best val PST (every 5 epochs) |
 | **Backend (train)** | FakeToronto only |
 | **Backend (val)** | FakeMumbai, FakeManhattan |
-| **Dataset** | curated split (stage2_curated.json) |
+| **Dataset** | curated split (train_curated.json) |
 
 ---
 

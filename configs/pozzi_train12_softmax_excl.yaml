@@ -1,0 +1,108 @@
+backends:
+  test:
+  - FakeToronto
+  - FakeRochester
+  - FakeWashington
+  training:
+  - FakeToronto
+  validation:
+  - FakeToronto
+batching:
+  backend_balanced: true
+  large_backend_boost: 1.0
+  max_total_nodes: 512
+data:
+  data_root: data/circuits
+  multi_programming:
+    occupancy_max: 0.75
+    occupancy_min: 0.3
+    proportions:
+    - 1.0
+    scenarios:
+    - 1
+  normalization:
+    epsilon: 1.0e-08
+  splits:
+    train: data/circuits/splits/pozzi_train12.json
+    val: data/circuits/splits/pozzi_train12.json
+device: cuda
+loss:
+  components:
+  - name: qap_fidelity
+    params:
+      normalize: true
+    weight: 1.0
+  - name: exclusion
+    weight: 0.5
+  type: surrogate
+model:
+  circuit_gnn:
+    activation: elu
+    dropout: 0.1
+    edge_input_dim: 3
+    node_features:
+    - gate_count
+    - two_qubit_gate_count
+    - single_qubit_gate_ratio
+    - critical_path_fraction
+    num_heads: 4
+    num_layers: 3
+    residual_layers:
+    - 2
+    - 3
+    rwpe_k: 2
+    use_batchnorm: true
+  cross_attention:
+    dropout: 0.1
+    ffn_hidden_dim: 128
+    num_heads: 4
+    num_layers: 2
+  embedding_dim: 64
+  hardware_gnn:
+    activation: elu
+    dropout: 0.1
+    edge_input_dim: 1
+    node_input_dim: 5
+    num_heads: 4
+    num_layers: 3
+    residual_layers:
+    - 2
+    - 3
+    use_batchnorm: true
+  iterative_refinement:
+    beta: 0.9
+    iterations: 0
+    lambda_init: 1.0
+  score_head:
+    d_k: 64
+    noise_bias_dim: 0
+num_workers: 4
+seed: 43
+sinkhorn:
+  max_iter: 20
+  schedule: fixed
+  score_norm: softmax
+  tau_max: 0.5
+  tau_min: 0.5
+  tolerance: 1.0e-06
+training:
+  early_stopping:
+    min_delta: 0.005
+    monitor: val_pst
+    patience: 10
+  grad_clip_norm: 2.0
+  max_epochs: 100
+  optimizer:
+    lr: 0.0005
+    type: adamw
+    weight_decay: 0.0001
+  pst_validation:
+    convergence_checks: 3
+    interval: 5
+    num_circuits: 200
+    circuit_set: train12
+  scheduler:
+    T_max: 100
+    eta_min: 1.0e-05
+    type: cosine_annealing
+  warmup_epochs: 2

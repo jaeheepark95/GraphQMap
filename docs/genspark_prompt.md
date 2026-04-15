@@ -215,51 +215,34 @@ layout = Hungarian(P)             — discrete 1:1 mapping (inference only)
 
 ---
 
-### Slide 6: Training Strategy — 2-Stage Curriculum
-
-**다이어그램 위주. 텍스트 최소화.**
-
-**시각적 구성 (위→아래 흐름도):**
+### Slide 6: Training Strategy
 
 ```
 ┌──────────────────────────────────────────────┐
-│  Stage 1: Supervised Pre-training            │
-│  L_sup = -Σ_{i,j} Y_ij · log(P_ij)          │
-│  (Y: 정답 permutation, P: Sinkhorn output)   │
-│                                              │
-│  Phase 1: MLQD + QUEKO (3,846 labeled)       │
-│           ↓                                  │
-│  Phase 2: QUEKO only (486 circuits)          │
-│  • Router-agnostic optimal로 보정            │
-└──────────────────┬───────────────────────────┘
-                   ↓
-┌──────────────────────────────────────────────┐
-│  Stage 2: Unsupervised Surrogate Fine-tuning │
+│  Unsupervised Surrogate Training             │
 │                                              │
 │  전체 6,887 회로 (label 불필요)               │
 │  L = L_surr + α·L_node                        │
 │  • L_surr: error-weighted 최단경로 거리 최소화 │
 │  • L_node: 바쁜 큐빗 → 고품질 큐빗 (MLP)     │
-│  Fixed τ = 0.05                              │
+│  τ annealing (1.0 → 0.05)                    │
 └──────────────────────────────────────────────┘
 ```
 
-**오른쪽에 보조 설명 박스: "왜 2-Stage인가?"**
 - Non-differentiable barrier → PST 직접 최적화 불가
-- Stage 1: label로 "좋은 매핑의 기본 구조" 학습 (cold start 해결)
-- Stage 2: surrogate loss로 noise-aware fine-tuning
+- Surrogate loss로 noise-aware 학습
 
-**Speaker Notes:** Non-differentiable barrier 때문에 PST를 직접 최적화할 수 없어 2단계 전략을 사용합니다. Stage 1에서 기존 label(MLQD의 OLSQ2 label + QUEKO의 optimal label)로 기본 매핑 감각을 학습합니다. Phase 2에서 QUEKO의 router-agnostic 정답으로 보정합니다. Stage 2에서는 label 없이 계산 가능한 surrogate loss로 fine-tuning합니다. L_surr은 상호작용하는 큐빗 쌍을 error-weighted 최단경로 거리가 가까운 물리 큐빗에 배치하도록 유도하고, L_node는 MLP 기반 품질 점수로 바쁜 큐빗을 고품질 물리 큐빗에 유도합니다.
+**Speaker Notes:** Non-differentiable barrier 때문에 PST를 직접 최적화할 수 없어 미분 가능한 surrogate loss로 학습합니다. L_surr은 상호작용하는 큐빗 쌍을 error-weighted 최단경로 거리가 가까운 물리 큐빗에 배치하도록 유도하고, L_node는 MLP 기반 품질 점수로 바쁜 큐빗을 고품질 물리 큐빗에 유도합니다.
 
 ---
 
-### Slide 7: Stage 2 Loss Design (상세)
+### Slide 7: Loss Design (상세)
 
 **이 슬라이드는 수식과 다이어그램을 함께 사용. 각 loss의 직관을 시각적으로 표현해주세요.**
 
 **Combined Loss:**
 ```
-L_2 = L_surr + α·L_node
+L = L_surr + α·L_node
 ```
 
 **2개 loss를 각각 블록으로 구분하여 시각화:**
@@ -285,7 +268,7 @@ L_2 = L_surr + α·L_node
 | L_surr | 1.0 | Primary: error-weighted 거리 최소화 |
 | L_node | α=0.3 | 노드 품질: 저오류 큐빗 선호 |
 
-**Speaker Notes:** Stage 2의 핵심인 surrogate loss 설계입니다. L_surr이 primary loss로, 상호작용하는 큐빗 쌍을 error-weighted 최단경로 거리가 가까운 물리 큐빗에 배치하도록 유도합니다. 단순 hop distance가 아닌 cx_error를 가중치로 한 최단경로를 사용하여 오류율이 낮은 경로를 선호합니다. Floyd-Warshall로 모든 쌍 간 거리를 사전 계산합니다. L_node는 MLP로 학습된 품질 점수를 사용하여 바쁜 논리 큐빗을 고품질 물리 큐빗에 유도합니다. 모든 loss term은 per-pair/per-qubit 정규화되어 회로/하드웨어 크기에 무관하게 스케일이 맞습니다.
+**Speaker Notes:** Surrogate loss 설계입니다. L_surr이 primary loss로, 상호작용하는 큐빗 쌍을 error-weighted 최단경로 거리가 가까운 물리 큐빗에 배치하도록 유도합니다. 단순 hop distance가 아닌 cx_error를 가중치로 한 최단경로를 사용하여 오류율이 낮은 경로를 선호합니다. Floyd-Warshall로 모든 쌍 간 거리를 사전 계산합니다. L_node는 MLP로 학습된 품질 점수를 사용하여 바쁜 논리 큐빗을 고품질 물리 큐빗에 유도합니다. 모든 loss term은 per-pair/per-qubit 정규화되어 회로/하드웨어 크기에 무관하게 스케일이 맞습니다.
 
 ---
 
@@ -295,27 +278,26 @@ L_2 = L_surr + α·L_node
 
 **상단: Dataset 요약 표**
 
-| Dataset | 회로 수 | Label | Stage | Label Source |
-|---------|:-------:|:-----:|-------|-------------|
-| QUEKO | 540 labeled / 900 total | O | 1+2 | τ⁻¹ optimal (zero-SWAP) |
-| MLQD | 3,729 labeled / 4,443 total | O | 1+2 | OLSQ2 solver 역추적 |
-| MQT Bench | 1,219 | X | 2 | — |
-| QASMBench | 94 | X | 2 | — |
-| RevLib | 231 | X | 2 | — |
-| **Total** | **6,887** | **4,269** | | |
-| Benchmark | 23 circuits (3Q~9Q) | — | 평가 전용 | 훈련 데이터와 중복 없음 |
+| Dataset | 회로 수 | Label |
+|---------|:-------:|:-----:|
+| QUEKO | 540 labeled / 900 total | O |
+| MLQD | 3,729 labeled / 4,443 total | O |
+| MQT Bench | 1,219 | X |
+| QASMBench | 94 | X |
+| RevLib | 231 | X |
+| **Total** | **6,887** (**4,269** labeled) | |
+| Benchmark | 23 circuits (3Q~9Q, 평가 전용) | — |
 
 - **Benchmark 회로는 훈련 데이터와 완전 분리** — 훈련 데이터셋에서 benchmark과 겹치는 회로는 사전에 제거 (deduplication)
 
 **하단: Hardware 구성**
-- **Stage 1:** 7 backends (2 real: Melbourne, Rochester + 5 synthetic: Aspen-4, Tokyo, Rochester, Sycamore, Grid5x5) — labeled data에 종속된 backend만
-- **Stage 2:** 55 Qiskit FakeBackendV2 (real noise만 사용, synthetic 제외)
+- **Training:** 49 Qiskit FakeBackendV2 (real noise만 사용, synthetic 제외)
   - QUEKO/MLQD 회로는 real backend에 재할당
 - **Test (UNSEEN):** FakeToronto(27Q), FakeBrooklyn(65Q), FakeTorino(133Q)
   - "UNSEEN" 라벨을 빨간/주황으로 강조
 - 의미: 학습 때 본 적 없는 하드웨어 → 진정한 hardware-agnostic 검증
 
-**Speaker Notes:** 5개 데이터셋에서 총 6,887개 훈련 회로를 사용하고, 평가용 benchmark 23개 회로는 훈련 데이터와 완전히 분리했습니다. 훈련 데이터에서 benchmark과 겹치는 회로는 사전에 제거하여 공정한 평가를 보장합니다. Stage 1은 labeled data만 사용하므로 QUEKO/MLQD의 label에 종속된 7개 backend(2 real + 5 synthetic)에서 학습합니다. Stage 2는 noise-aware fine-tuning이 목적이므로 실제 noise를 가진 55개 real Qiskit FakeBackendV2만 사용하고, QUEKO/MLQD 회로는 real backend에 재할당합니다. 평가는 한 번도 본 적 없는 Toronto, Brooklyn, Torino 3개 백엔드에서 수행합니다.
+**Speaker Notes:** 5개 데이터셋에서 총 6,887개 훈련 회로를 사용하고, 평가용 benchmark 23개 회로는 훈련 데이터와 완전히 분리했습니다. 훈련 데이터에서 benchmark과 겹치는 회로는 사전에 제거하여 공정한 평가를 보장합니다. 실제 noise를 가진 Qiskit FakeBackendV2만 사용하고, QUEKO/MLQD 회로는 real backend에 재할당합니다. 평가는 한 번도 본 적 없는 Toronto, Brooklyn, Torino 3개 백엔드에서 수행합니다.
 
 ---
 

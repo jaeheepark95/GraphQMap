@@ -6,14 +6,14 @@ sufficient qubit-level differentiation for the GNN.
 
 Usage:
     # Diagnose current config features
-    python scripts/diagnose_features.py --config configs/stage1.yaml
+    python scripts/diagnose_features.py --config configs/base.yaml
 
     # Compare specific feature sets
     python scripts/diagnose_features.py --features gate_count two_qubit_gate_count degree depth_participation
     python scripts/diagnose_features.py --features gate_count two_qubit_gate_count weighted_degree --rwpe-k 4
 
     # Sample more circuits for robust statistics
-    python scripts/diagnose_features.py --config configs/stage1.yaml --num-samples 500
+    python scripts/diagnose_features.py --config configs/base.yaml --num-samples 500
 """
 
 from __future__ import annotations

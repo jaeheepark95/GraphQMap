@@ -208,51 +208,18 @@ Layer n:
 
 ## Slide 12: Training Strategy Overview
 
-**2-Stage Curriculum Learning**
+**Unsupervised Surrogate Training**
 
 ```
-Stage 1: Supervised Pre-training (labeled data)
-  Phase 1: MLQD + QUEKO → CE Loss (기본 매핑 감각 학습)
-  Phase 2: QUEKO only → CE Loss (true optimal로 정밀 보정)
-      |
-Stage 2: Unsupervised Surrogate Fine-tuning (all data)
-  L_adj + beta * L_hop + alpha * L_node
-  (label 불필요, noise-aware 최적화)
+L_adj + beta * L_hop + alpha * L_node
+(label 불필요, noise-aware 최적화, all data)
 ```
 
-- Non-differentiable barrier를 2단계 전략으로 우회
-
-**왜 Stage 1 (Supervised)이 반드시 필요한가?**
-- Stage 2의 surrogate loss만으로는 충분하지 않음:
-  1. **Cold start 문제:** 랜덤 초기화된 모델이 surrogate loss gradient만으로 "좋은 매핑"을 처음부터 발견하기 어려움
-  2. **Surrogate != PST:** surrogate는 PST와 상관되도록 설계한 것이지 PST 자체가 아님. 좋은 초기점 없이 surrogate만 최적화하면 surrogate는 감소하는데 PST는 안 올라가는 overfitting 위험
-  3. **Trivial solution 위험:** L_surr은 "가까이 매핑하라"만 지시 → 의미 있는 사전 지식 없이는 수렴 방향 불안정
-- Stage 1이 "좋은 매핑의 기본 구조"를 학습시키고, Stage 2가 그 위에서 실전(SABRE + real noise) 방향으로 fine-tuning하는 상호 보완 구조
+- Non-differentiable barrier를 surrogate loss로 우회
 
 ---
 
-## Slide 13: Stage 1 — Supervised Pre-training
-
-**목표:** 좋은 매핑의 기본 감각 학습
-
-**Loss:** Cross-Entropy (ground truth permutation matrix vs Sinkhorn output P)
-
-**Phase 1: MLQD + QUEKO (3,846 labeled circuits)**
-- MLQD labels: OLSQ2 solver에서 역추적하여 추출한 initial layout
-  - OLSQ2는 layout+routing을 동시에 최적화하는 SMT solver
-  - 결과 회로에서 SWAP 패턴을 역순 추적하여 initial layout 복원
-- QUEKO labels: tau^-1 true optimal (SWAP 0개 보장, 라우터 무관)
-- Sinkhorn tau: 1.0 → 0.05 exponential annealing
-
-**Phase 2: QUEKO only (486 circuits)**
-- Router bias 없는 true optimal label로 fine-tuning
-- LR을 1/10로 감소 (기존 학습 보존)
-- MLQD의 OLSQ2 label은 OLSQ2 라우터에 최적화된 것 → SABRE 기준과 불일치 가능
-- QUEKO label은 라우터에 무관한 절대 최적 → 이 방향으로 보정
-
----
-
-## Slide 14: Stage 2 — Unsupervised Surrogate Fine-tuning
+## Slide 14: Unsupervised Surrogate Training
 
 **목표:** Label 없이 NISQ PST와 상관되는 surrogate loss로 fine-tuning
 
@@ -275,13 +242,13 @@ Stage 2: Unsupervised Surrogate Fine-tuning (all data)
 
 ## Slide 15: Dataset Overview
 
-| Dataset | 회로 수 | Label | Stage | Label Source |
-|---------|:-------:|:-----:|-------|-------------|
-| QUEKO | 900 (540 labeled) | O | Stage 1 + 2 | tau^-1 optimal (zero-SWAP) |
-| MLQD | 4,443 (3,729 labeled) | O | Stage 1 + 2 | OLSQ2 solver (역추적) |
-| MQT Bench | 1,219 | X | Stage 2 | - |
-| QASMBench | 94 | X | Stage 2 | - |
-| RevLib | 231 | X | Stage 2 | - |
+| Dataset | 회로 수 | Label |
+|---------|:-------:|:-----:|
+| QUEKO | 900 (540 labeled) | O |
+| MLQD | 4,443 (3,729 labeled) | O |
+| MQT Bench | 1,219 | X |
+| QASMBench | 94 | X |
+| RevLib | 231 | X |
 
 - **총 6,887 training circuits, 4,269 labels**
 - 전처리: gate normalization ({cx, id, rz, sx, x}), extreme circuit filtering, benchmark dedup
@@ -323,7 +290,7 @@ Stage 2: Unsupervised Surrogate Fine-tuning (all data)
 **구현 완료:**
 - 데이터 파이프라인 (5개 데이터셋, 전처리, split 관리)
 - 모델 아키텍처 (Dual GNN, Cross-Attention, Score Head, Sinkhorn, Hungarian)
-- 2-Stage 학습 루프 (CE loss, surrogate losses, tau annealing)
+- 학습 루프 (surrogate losses, tau annealing)
 - 평가 프레임워크 (PST 측정, baseline 비교, benchmark runner)
 - 119 unit/integration tests
 
@@ -344,7 +311,7 @@ Stage 2: Unsupervised Surrogate Fine-tuning (all data)
 
 ## Slide 20: Timeline / Next Steps
 
-- Stage 1, Stage 2 학습 완료 및 하이퍼파라미터 튜닝
+- 학습 완료 및 하이퍼파라미터 튜닝
 - Unseen backend (Toronto, Brooklyn, Torino)에서 PST 평가
 - Ablation study (Cross-Attention 유무, L_node 기여도 등)
 - 논문 작성

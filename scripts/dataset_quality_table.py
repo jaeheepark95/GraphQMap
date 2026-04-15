@@ -5,7 +5,7 @@ across the 5 training datasets (queko, mlqd, mqt_bench, qasmbench, revlib).
 The goal is to identify categories that warrant additional filtering.
 
 Metrics:
-  Volume:    total cached, in active stage2_all split
+  Volume:    total cached, in active train_all split
   Size:      num_qubits (mean / median / max)
   Workload:  total_gates (mean / median), 2q_gates (mean), gates_per_qubit
   Edge:      num_edges (mean), edge_density (edges / max_possible)
@@ -154,7 +154,7 @@ def aggregate(records: list[dict]) -> dict:
 
 def main() -> None:
     # Active set membership (post-filtering)
-    stage2 = json.load(open(SPLITS_DIR / "stage2_all.json"))
+    stage2 = json.load(open(SPLITS_DIR / "train_all.json"))
     active = {(e["source"], Path(e["file"]).stem) for e in stage2}
 
     cat_stats: dict[str, dict] = {}

@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from qiskit import QuantumCircuit
+from qiskit.circuit import ClassicalRegister
 from qiskit_aer import AerSimulator
 from qiskit_ibm_runtime import fake_provider
 
@@ -33,8 +34,9 @@ from evaluation.transpiler import transpile_with_timing
 
 logger = logging.getLogger(__name__)
 
-# Default benchmark circuits (same as MQM colleague)
-BENCHMARK_CIRCUITS = [
+# Pozzi benchmark split (matching colleague's 12 train / 13 test setup)
+# Train: 12 RevLib circuits used for colleague's model training
+POZZI_TRAIN_CIRCUITS = [
     "bv_n3",
     "bv_n4",
     "peres_3",
@@ -48,6 +50,33 @@ BENCHMARK_CIRCUITS = [
     "decod24-v2_43",
     "4gt13_92",
 ]
+
+# Test: 13 Pozzi realistic benchmark circuits (unseen by colleague's model)
+POZZI_TEST_CIRCUITS = [
+    "ham3_102",
+    "miller_11",
+    "decod24-v0_38",
+    "rd32-v0_66",
+    "4gt5_76",
+    "4mod7-v0_94",
+    "alu-v2_32",
+    "hwb4_49",
+    "ex1_226",
+    "decod24-bdd_294",
+    "ham7_104",
+    "rd53_138",
+    "qft_10",
+]
+
+# All 25 Pozzi benchmark circuits
+BENCHMARK_CIRCUITS = POZZI_TRAIN_CIRCUITS + POZZI_TEST_CIRCUITS
+
+# Named circuit sets for --circuit-set CLI option
+CIRCUIT_SETS = {
+    "train12": POZZI_TRAIN_CIRCUITS,
+    "test13": POZZI_TEST_CIRCUITS,
+    "all25": BENCHMARK_CIRCUITS,
+}
 
 # Default method combinations: (routing_method, layout_method)
 DEFAULT_COMBINATIONS = [
@@ -70,6 +99,27 @@ DEFAULT_BACKENDS = {
 BENCHMARK_CIRCUIT_DIR = "data/circuits/qasm/benchmarks"
 
 
+def add_measurements(qc: QuantumCircuit) -> QuantumCircuit:
+    """Add measurements to the qubits actually used by any gate.
+
+    Mirrors the reference Attention_Qubit_Mapping implementation so PST
+    results are comparable. Reuses any pre-existing classical register from
+    the QASM file (e.g. ``creg c[16]``) instead of appending a new ``meas``
+    register, which would cause multi-register result bitstrings and the
+    0.5-floor PST bug.
+    """
+    if qc.count_ops().get("measure", 0) > 0:
+        return qc
+    used = sorted({qc.find_bit(q).index for inst in qc.data for q in inst.qubits})
+    new_qc = qc.copy()
+    if len(new_qc.clbits) == 0:
+        new_qc.add_register(ClassicalRegister(len(used), "meas"))
+    for idx, q in enumerate(used):
+        if idx < len(new_qc.clbits):
+            new_qc.measure(q, idx)
+    return new_qc
+
+
 def load_benchmark_circuit(
     name: str,
     circuit_dir: str = BENCHMARK_CIRCUIT_DIR,
@@ -87,8 +137,8 @@ def load_benchmark_circuit(
     """
     path = os.path.join(circuit_dir, f"{name}.qasm")
     circuit = QuantumCircuit.from_qasm_file(path)
-    if circuit.count_ops().get("measure", 0) == 0 and measure:
-        circuit.measure_all()
+    if measure:
+        circuit = add_measurements(circuit)
     return circuit
 
 

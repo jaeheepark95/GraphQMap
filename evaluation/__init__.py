@@ -10,6 +10,7 @@ from evaluation.baselines import (
 )
 from evaluation.benchmark import (
     BENCHMARK_CIRCUITS,
+    add_measurements,
     execute_on_simulators,
     load_benchmark_circuit,
     run_benchmark_single,
@@ -34,6 +35,7 @@ from evaluation.transpiler import (
 __all__ = [
     "BENCHMARK_CIRCUITS",
     "EvalResult",
+    "add_measurements",
     "aggregate_results",
     "build_transpiler",
     "compute_pst",

@@ -160,7 +160,7 @@ def stats(arr: list[float]) -> dict:
 
 
 def main():
-    split_path = DATA_ROOT / "splits" / "stage2_all.json"
+    split_path = DATA_ROOT / "splits" / "train_all.json"
     entries = load_split(split_path)
     print(f"Total circuits in split: {len(entries)}")
 

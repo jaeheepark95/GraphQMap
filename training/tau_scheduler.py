@@ -1,7 +1,6 @@
 """Sinkhorn temperature (τ) scheduler for GraphQMap.
 
-Stage 1: Exponential decay from τ_max to τ_min.
-Stage 2: Fixed at τ_min.
+Supports exponential decay (τ_max → τ_min) or a fixed temperature.
 """
 
 from __future__ import annotations

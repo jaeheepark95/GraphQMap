@@ -186,12 +186,12 @@ def measure_pst(
         - depth: compiled circuit depth
         - compiled_2q: total native 2Q gates in compiled circuit
     """
-    # Ensure circuit has measurements
-    if circuit.num_clbits == 0:
-        meas_circuit = circuit.copy()
-        meas_circuit.measure_all()
-    else:
-        meas_circuit = circuit
+    # Ensure circuit has measurements. Use add_measurements() (reuses existing
+    # creg, only measures used qubits) to match the reference Attention_Qubit_Mapping
+    # pipeline. Avoids the 0.5-floor PST bug caused by measure_all() appending
+    # a second `meas` register alongside a pre-existing `creg c[N]`.
+    from evaluation.benchmark import add_measurements
+    meas_circuit = add_measurements(circuit)
 
     # Transpile with given layout
     compiled = transpile(

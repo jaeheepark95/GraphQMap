@@ -45,7 +45,8 @@ data/circuits/
 │   ├── mqt_bench/                  # 1,219 circuits (no labels)
 │   ├── qasmbench/                  # 94 circuits (no labels, 2Q-127Q)
 │   ├── revlib/                     # 231 circuits (no labels, 3Q-127Q)
-│   └── benchmarks/                 # 23 evaluation benchmark circuits (3Q-13Q)
+│   ├── benchmarks/                 # 36 evaluation benchmark circuits (3Q-16Q)
+│   └── pozzi_benchmarks/           # 158 raw Pozzi benchmark circuits (Clifford+T, 16Q register)
 ├── labels/                         # 4,269 total labels
 │   ├── queko/labels.json           # 540 τ⁻¹ true optimal labels
 │   └── mlqd/labels.json            # 3,729 OLSQ2 solver labels
@@ -56,10 +57,7 @@ data/circuits/
 │   ├── queko_sycamore.json         # Google Sycamore (54Q)
 │   └── mlqd_grid5x5.json          # 5x5 Grid (25Q)
 └── splits/                         # Train/val split definitions
-    ├── stage1_supervised.json      # 288 labeled circuits for Stage 1
-    ├── stage1_queko_only.json      # 73 QUEKO circuits for fine-tuning
-    ├── stage1_unsupervised.json    # 653 unlabeled circuits
-    ├── stage2_all.json             # 969 all circuits for Stage 2
+    ├── train_all.json             # 969 training circuits
     ├── val.json                    # 28 validation (labeled)
     ├── val_queko_only.json         # 2 QUEKO validation
     ├── filter_log.json             # Indist + mid-measure + diversity removal log
@@ -70,14 +68,14 @@ data/circuits/
     └── original/                   # Pre-filter backup of all splits
 ```
 
-### Dataset Sources & Labels
-| Dataset | Circuits | Labels | Stage | Label Source | Backend Mapping |
-|---------|:--------:|:------:|-------|--------------|-----------------|
-| QUEKO | 900 | 540 | Stage 1 + 2 | τ⁻¹ optimal (zero-SWAP) | 4 synthetic backends |
-| MLQD | 4,443 | 3,729 | Stage 1 + 2 | OLSQ2 solver (extracted) | melbourne, rochester (Qiskit) + 3 synthetic |
-| MQT Bench | 1,219 | 0 | Stage 2 | None | Assigned randomly to training backends |
-| QASMBench | 94 | 0 | Stage 2 | None | Assigned randomly to training backends |
-| RevLib | 231 | 0 | Stage 2 | None | Assigned randomly to training backends |
+### Dataset Sources
+| Dataset | Circuits | Backend Mapping |
+|---------|:--------:|-----------------|
+| QUEKO | 900 | 4 synthetic backends |
+| MLQD | 4,443 | melbourne, rochester (Qiskit) + 3 synthetic |
+| MQT Bench | 1,219 | Assigned randomly to training backends |
+| QASMBench | 94 | Assigned randomly to training backends |
+| RevLib | 231 | Assigned randomly to training backends |
 
 ### Dataset Preprocessing
 Raw datasets are preprocessed before training (details in `docs/RESEARCH_SPEC.md`):
@@ -88,7 +86,8 @@ Raw datasets are preprocessed before training (details in `docs/RESEARCH_SPEC.md
 5. **Feature-indistinguishable filtering** — 1,118 circuits removed where node features cannot distinguish qubits (cosine similarity > 0.95 in > 30% of qubit pairs). MQT Bench: 786 (VQE/QNN/GHZ), MLQD: 275 (ising/dnn/bv), QASMBench: 39, RevLib: 12, QUEKO: 6. See `data/circuits/splits/filter_log.json` for details. Original splits backed up in `data/circuits/splits/original/`.
 6. **Mid-circuit measurement filtering** — 12 additional circuits removed (`scripts/filter_mid_measure.py`, scan via `scripts/check_mid_measure.py`). 21 mid-measure circuits found total (7 unique algorithms: bb84, ipea, shor, cc×3, seca; replicated across MLQD backend variants), of which 9 were already removed by indist filter. Mid-measure circuits cannot be modeled correctly by the GraphQMap circuit graph (single node per logical qubit) and may carry inconsistent labels. See `data/circuits/splits/mid_measure_log.json`.
 7. **Strong diversity filtering** (`scripts/filter_diversity.py`, applied 2026-04-08) — 4,788 additional circuits removed by collapsing structural near-duplicates. Two circuits sharing fingerprint `(num_qubits, num_edges, sorted_degree_sequence)` are considered duplicates; only K=1 representative per fingerprint per source is kept (alphabetical first). Motivation: pre-filter analysis showed nominal 5,757 training circuits had only ~487 effective unique structures (8.5%) — QUEKO's 215-circuit clusters of `*QBT_*CYC_QSE_*` random-seed variants and MLQD's 359-circuit cluster of identical small-circuit fingerprints across different algorithm names. Reduction: queko 894→245, mlqd 4159→267, mqt_bench 433→305, qasmbench 52→39, revlib 219→113. See `data/circuits/splits/diversity_filter_log.json` and `dataset_diversity.md` for the analysis. Validation splits (val.json 395→28, val_queko_only 52→2) significantly reduced — monitor val metric noise increase.
-- Original 7,165 → Post-preprocessing 6,887 → **Final 969 training circuits** (6,196 removed total, 86.5%)
+- Original 7,165 → Post-preprocessing 6,887 → Post-diversity 969 → **Final 964 training circuits** (Pozzi test dedup: 5 RevLib circuits removed)
+8. **Pozzi test circuit deduplication** — 5 circuits (`decod24-v0_38`, `ex1_226`, `decod24-bdd_294`, `ham7_104`, `rd53_138`) removed from training splits to prevent evaluation leakage. These appear in `POZZI_TEST_CIRCUITS` (13 evaluation circuits)
 - Most removal is structural deduplication (Step 7), not data quality issues
 - Quality/diversity analysis: `scripts/dataset_quality_table.py`, `scripts/dataset_diversity.py`
 
@@ -126,32 +125,35 @@ pytest tests/ -x -q  # expect 152 passed
 ```bash
 # Training (each run creates a timestamped directory under runs/)
 # Training plots are auto-generated in <run_dir>/plots/ on completion
-python train.py --config configs/stage1.yaml --name baseline_v1
-python train.py --config configs/stage2.yaml --name baseline_v1 \
-  --override pretrained_checkpoint=runs/stage1/<STAGE1_RUN>/checkpoints/best.pt
+python train.py --config configs/base.yaml --name baseline_v1
 
 # Config overrides (can stack multiple --override flags)
-python train.py --config configs/stage1.yaml --name lr_test \
+python train.py --config configs/base.yaml --name lr_test \
   --override training.optimizer.lr=0.0005 \
-  --override training.mlqd_queko.max_epochs=50
+  --override training.max_epochs=50
 
 # Evaluation (model + baselines on all 3 test backends, auto-saved to runs/eval/<RUN>/)
-python evaluate.py --config configs/stage2.yaml \
-  --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
+python evaluate.py --config configs/base.yaml \
+  --checkpoint runs/train/<RUN>/checkpoints/best.pt \
   --backend toronto rochester washington --reps 3
+
+# Evaluate on specific circuit set (train12, test13, all25)
+python evaluate.py --config configs/base.yaml \
+  --checkpoint runs/train/<RUN>/checkpoints/best.pt \
+  --backend toronto --circuit-set test13 --reps 3
 
 # Benchmark (baselines only, no model)
 python evaluate.py --benchmark --backend toronto rochester washington
 
 # Manual visualization (for comparing runs or standalone eval CSV)
-python scripts/visualize.py runs/stage1/<RUN> runs/stage2/<RUN>
+python scripts/visualize.py runs/train/<RUN>
 python scripts/visualize.py --eval runs/eval/<RUN>/eval_results.csv
 
 # Tests
-pytest tests/                                       # 152 tests
+pytest tests/
 
 # Feature diagnostics (run before training to verify feature quality)
-python scripts/diagnose_features.py --config configs/stage1.yaml
+python scripts/diagnose_features.py --config configs/base.yaml
 python scripts/diagnose_features.py --features gate_count two_qubit_gate_count single_qubit_gate_ratio --rwpe-k 4
 
 # Dataset scripts
@@ -172,29 +174,16 @@ Training plots are auto-generated on completion. Evaluation outputs go to `runs/
 ```
 runs/
 ├── EXPERIMENTS.md               # Central experiment log (all runs, results, changes)
-├── stage1/
-│   └── 20260323_221150_baseline_after_refactor/
-│       ├── config.yaml          # Actual config used (with overrides applied)
-│       ├── source_config.txt    # Original config file path
-│       ├── note.md              # Auto-generated: what changed, hypothesis, result
-│       ├── metrics.csv          # Per-epoch: epoch, phase, tau, lr, train_loss, val_loss
-│       ├── plots/               # Auto-generated training visualization
-│       │   └── stage1_training.png
-│       └── checkpoints/
-│           ├── mlqd_queko_best.pt
-│           ├── queko_best.pt
-│           └── best.pt
-├── stage2/
-│   └── 20260323_223946_baseline_after_refactor/
-│       ├── config.yaml
-│       ├── source_config.txt
-│       ├── note.md
-│       ├── metrics.csv          # Per-epoch: epoch, tau, lr, l_total, <active_components...>, val_pst
-│       ├── plots/               # Auto-generated training visualization
-│       │   └── stage2_training.png
-│       └── checkpoints/
-│           ├── best.pt
-│           └── final.pt
+├── 20260323_223946_baseline_after_refactor/
+│   ├── config.yaml              # Actual config used (with overrides applied)
+│   ├── source_config.txt        # Original config file path
+│   ├── note.md                  # Auto-generated: what changed, hypothesis, result
+│   ├── metrics.csv              # Per-epoch: epoch, tau, lr, l_total, <active_components...>, val_pst
+│   ├── plots/                   # Auto-generated training visualization
+│   │   └── training.png
+│   └── checkpoints/
+│       ├── best.pt
+│       └── final.pt
 └── eval/                        # Evaluation outputs (auto-derived from checkpoint run name)
     └── 20260323_223946_baseline_after_refactor/
         ├── eval_results.csv     # Raw evaluation results (all backends, all reps)
@@ -209,38 +198,31 @@ runs/
 - Previous runs are never overwritten; each run gets its own directory
 - `runs/` is gitignored
 - `checkpoint_dir`/`log_dir` in YAML configs are fallback values; overridden at runtime by `_setup_run_dir()`
-- Stage 2 `pretrained_checkpoint` must be specified via `--override` (no default path)
-- Stage 1→2 checkpoint loading uses `strict=False` (Stage 2 adds QualityScore layers not in Stage 1)
 
 ### Visualization
 Training and evaluation plots are auto-generated. Manual visualization is for comparing runs or standalone use:
 ```bash
 # Training curves (loss only — LR/tau schedules excluded as they are deterministic)
-python scripts/visualize.py runs/stage1/<RUN>    # Stage 1: train/val CE loss
-python scripts/visualize.py runs/stage2/<RUN>    # Stage 2: loss components + Val PST
+python scripts/visualize.py runs/train/<RUN>    # loss components + Val PST
 
 # Compare multiple runs (plots saved to each run's plots/ directory)
-python scripts/visualize.py runs/stage1/RUN_A runs/stage1/RUN_B
+python scripts/visualize.py runs/train/RUN_A runs/train/RUN_B
 
 # Evaluation results (PST bar chart + heatmap)
-python scripts/visualize.py --eval runs/stage2/<RUN>/eval_results.csv
+python scripts/visualize.py --eval runs/train/<RUN>/eval_results.csv
 
 # Headless (save PNG only, no display)
-python scripts/visualize.py runs/stage1/<RUN> --no-show
+python scripts/visualize.py runs/train/<RUN> --no-show
 ```
-- Stage 1 plots: Train/Val Loss (with phase boundaries)
-- Stage 2 plots: L_total + active components, Val PST (with best annotation)
-- Plots saved to each run's own `plots/` directory (not shared across stages)
+- Training plots: L_total + active components, Val PST (with best annotation)
 
 ## Hardware Backends
-- **Stage 1 Training (49 Qiskit + 5 synthetic = 54 backends)**:
+- **Training (49 Qiskit backends)**:
   - Qiskit FakeBackendV2: 5Q×15, 7Q×6, 15-16Q×2, 20Q×5, 27-28Q×11, 33Q×1, 65Q×1, 127Q×7, 133Q×1
-  - Synthetic: queko_aspen4(16Q), queko_tokyo(20Q), queko_rochester(53Q), queko_sycamore(54Q), mlqd_grid5x5(25Q)
-- **Stage 2 Training (49 Qiskit backends only)**:
-  - Synthetic backends excluded; QUEKO/MLQD circuits randomly re-assigned to real backends at data load time
+  - QUEKO/MLQD circuits randomly re-assigned to real backends at data load time
   - FakeBrooklyn(65Q) and FakeTorino(133Q) now in training pool (previously test, moved 2026-04-13)
 - **Validation (held-out, PST checkpoint selection)**: FakeMumbai(27Q, Falcon r5.11), FakeManhattan(65Q, Hummingbird r2)
-  - Used for PST checkpoint selection in Stage 2 (every `pst_validation.interval` epochs)
+  - Used for PST checkpoint selection during training (every `pst_validation.interval` epochs)
   - Removed from training pool; size-matched to test backends (Toronto 27Q, Rochester 53Q)
 - **Test (UNSEEN by both training and validation)**: FakeToronto(27Q), FakeRochester(53Q), FakeWashington(127Q)
   - Evaluated **once** at the end via `evaluate.py`; never used for checkpoint/model selection
@@ -254,7 +236,7 @@ Circuit node features are **configurable via YAML** — no code changes needed t
 **Available features:** `gate_count`, `two_qubit_gate_count`, `degree`, `depth_participation`, `weighted_degree`, `single_qubit_gate_ratio`, `critical_path_fraction`, `interaction_entropy`
 **Positional encoding:** RWPE (Random Walk PE, configurable k steps, start_step=2)
 
-**Current default** (configs/stage1.yaml, stage2.yaml):
+**Current default** (configs/base.yaml):
 ```yaml
 node_features: [gate_count, two_qubit_gate_count, single_qubit_gate_ratio, critical_path_fraction]
 rwpe_k: 2    # node_input_dim = 4 + 2 = 6
@@ -266,7 +248,7 @@ rwpe_k: 2    # node_input_dim = 4 + 2 = 6
 
 **Feature diagnostics** (run before training):
 ```bash
-python scripts/diagnose_features.py --config configs/stage1.yaml
+python scripts/diagnose_features.py --config configs/base.yaml
 python scripts/diagnose_features.py --features gate_count two_qubit_gate_count single_qubit_gate_ratio --rwpe-k 2
 python scripts/analyze_circuit_features.py --num-samples 500   # 7-phase comprehensive analysis
 ```
@@ -339,22 +321,62 @@ hardware_gnn:
 - Node: max |r| = 0.41 (t1_cx_ratio ↔ t2_cx_ratio), all pairs |r| < 0.7
 - Edge: r = 0.059 (2q_error ↔ edge_coherence_ratio) — near-independent
 
-## Training Strategy
-- **Stage 1**: Supervised CE loss on labeled data — **currently not in use**
-  - Was: MLQD + QUEKO → QUEKO fine-tuning with τ annealing
-  - Decision: Stage 2 from scratch achieves comparable results; Stage 1 pretrained checkpoint confirmed harmful (negative transfer, -0.07 PST in controlled test)
-- **Stage 2**: Unsupervised surrogate losses on 5,769 circuits (filtered dataset)
-  - Loss components configured via YAML registry pattern (see Loss Registry below)
-  - Score normalization: configurable via `sinkhorn.score_norm` ("softmax" or "sinkhorn")
-  - τ annealing (1.0→0.05, exponential), warm-up 2 epochs
-  - Large backend (50Q+) oversampling via `large_backend_boost`
-  - Runs from scratch (no Stage 1 pretrained checkpoint)
-  - **No early stopping**: trains for full max_epochs (100)
-  - **Best checkpoint**: selected by val PST (measured every `pst_validation.interval` epochs)
-  - **Val PST**: measured every 5 epochs on benchmark circuits via NASSC routing on held-out validation backends (cfg.backends.validation: FakeMumbai 27Q, FakeManhattan 65Q) — used for best checkpoint selection. Falls back to test backends if validation not configured (emits warning)
-  - **Val surrogate loss**: computed every epoch on 396 val circuits, logged to CSV (monitoring only, not used for checkpoint selection)
+## Pozzi Benchmark Circuits (Evaluation)
+25 circuits split into 12 train + 13 test, matching colleague's attention-based qubit mapping paper setup. Gate-normalized to `{cx, id, rz, sx, x}` basis (same as training data). Original Clifford+T versions available in `data/circuits/qasm/pozzi_benchmarks/`. Source: RevLib reversible logic benchmarks + Pozzi realistic benchmarks.
 
-### Loss Registry (Stage 2)
+**Train 12** (`POZZI_TRAIN_CIRCUITS`): Colleague trains their model on these circuits.
+
+| Circuit | Qubits | Gates | CX | Depth |
+|---------|:------:|:-----:|:--:|:-----:|
+| bv_n3 | 4 | 24 | 2 | 10 |
+| bv_n4 | 5 | 31 | 3 | 11 |
+| peres_3 | 3 | 20 | 7 | 14 |
+| toffoli_3 | 3 | 22 | 6 | 14 |
+| fredkin_3 | 3 | 23 | 8 | 15 |
+| xor5_254 | 6 | 5 | 5 | 5 |
+| 3_17_13 | 3 | 44 | 17 | 27 |
+| 4mod5-v1_22 | 5 | 25 | 11 | 15 |
+| mod5mils_65 | 5 | 43 | 16 | 27 |
+| alu-v0_27 | 5 | 44 | 17 | 29 |
+| decod24-v2_43 | 4 | 64 | 22 | 34 |
+| 4gt13_92 | 5 | 82 | 30 | 48 |
+
+**Test 13** (`POZZI_TEST_CIRCUITS`): Unseen by colleague's model — fair comparison set.
+
+| Circuit | Qubits | Gates | CX | Depth |
+|---------|:------:|:-----:|:--:|:-----:|
+| ham3_102 | 3 | 23 | 10 | 17 |
+| miller_11 | 3 | 59 | 20 | 42 |
+| decod24-v0_38 | 4 | 60 | 20 | 40 |
+| rd32-v0_66 | 4 | 40 | 14 | 28 |
+| 4gt5_76 | 5 | 65 | 31 | 54 |
+| 4mod7-v0_94 | 5 | 110 | 42 | 76 |
+| alu-v2_32 | 5 | 111 | 42 | 88 |
+| hwb4_49 | 4 | 193 | 73 | 143 |
+| ex1_226 | 6 | 7 | 5 | 5 |
+| decod24-bdd_294 | 6 | 83 | 28 | 50 |
+| ham7_104 | 7 | 213 | 90 | 155 |
+| rd53_138 | 8 | 156 | 52 | 76 |
+| qft_10 | 16 | 200 | 90 | 63 |
+
+**CLI usage**: `--circuit-set train12|test13|all25` (default: all25)
+**Data directory**: `data/circuits/qasm/benchmarks/` (all 25 normalized)
+**Raw source**: `data/circuits/qasm/pozzi_benchmarks/` (158 Pozzi circuits, Clifford+T basis, 16Q register)
+**Code**: `evaluation/benchmark.py` — `POZZI_TRAIN_CIRCUITS`, `POZZI_TEST_CIRCUITS`, `BENCHMARK_CIRCUITS` (all 25), `CIRCUIT_SETS`
+
+## Training Strategy
+Unsupervised surrogate losses on filtered circuits.
+- Loss components configured via YAML registry pattern (see Loss Registry below)
+- Score normalization: configurable via `sinkhorn.score_norm` ("softmax" or "sinkhorn")
+- τ annealing (1.0→0.05, exponential), warm-up 2 epochs
+- Large backend (50Q+) oversampling via `large_backend_boost`
+- Runs from scratch
+- **No early stopping**: trains for full max_epochs (100)
+- **Best checkpoint**: selected by val PST (measured every `pst_validation.interval` epochs)
+- **Val PST**: measured every 5 epochs on benchmark circuits via NASSC routing on held-out validation backends (cfg.backends.validation: FakeMumbai 27Q, FakeManhattan 65Q) — used for best checkpoint selection. Falls back to test backends if validation not configured (emits warning)
+- **Val surrogate loss**: computed every epoch on val circuits, logged to CSV (monitoring only, not used for checkpoint selection)
+
+### Loss Registry
 Loss components are modular and configured declaratively in YAML. Each component is registered via `@register_loss()` decorator in `training/losses.py`.
 
 **Available components:**
@@ -423,7 +445,7 @@ sinkhorn:
   max_iter: 20            # Sinkhorn iterations (ignored for softmax)
 ```
 
-See `configs/stage2_sinkhorn_adj.yaml` for Sinkhorn + adjacency loss config.
+See `configs/archive/stage2_sinkhorn_adj.yaml` for Sinkhorn + adjacency loss config.
 
 ## Experiment History & Best Configurations
 
@@ -443,7 +465,7 @@ Run `20260409_210121_C3_sizeaware_s42` — **Eval 3-backend avg OURS+SABRE PST 0
 4 runs with proper validation (Mumbai 27Q + Manhattan 65Q), test only at eval:
 - **repro_C3_s42/s43**: Sinkhorn + size-aware adj (same as C3 above, clean validation)
 - **repro_C3_softmax_excl_s42/s43**: Softmax + size-aware adj + **pairwise exclusion**(0.5)
-- Config: `stage2_sinkhorn_adj_sizeaware.yaml` / `stage2_softmax_adj_sizeaware_excl.yaml`
+- Config: `configs/archive/stage2_sinkhorn_adj_sizeaware.yaml` / `configs/archive/stage2_softmax_adj_sizeaware_excl.yaml`
 - Purpose: (1) establish true baseline without leakage, (2) re-evaluate softmax with improved exclusion loss
 
 ### Previous Best (2026-04-02)
@@ -477,7 +499,6 @@ Run `20260402_004812_filtered_sinkhorn_adj` — **Eval 3-backend avg OURS+SABRE 
 **Conclusions:**
 - PST-based checkpoint selection >> val surrogate loss-based (surrogate loss saturated too early; val surrogate loss removed)
 - No early stopping — train full max_epochs, select best PST checkpoint
-- Stage 1 pretrained: not reliably better, sometimes harmful
 - High variance across runs (0.395-0.589) — need multiple seeds
 
 ### Loss Gradient Analysis (2026-04-02)
@@ -626,7 +647,7 @@ L_npc weight tuning on C3 piecewise baseline (current best):
 | c3_npc_w001_prediv_s42 | 5762 | 0.01 | + override splits |
 | c3_npc_w0001_prediv_s42 | 5762 | 0.001 | + override splits |
 
-Pre-diversity split: `data/circuits/splits/stage2_all_pre_diversity.json` (5762 circuits, post-indist pre-diversity).
+Pre-diversity split: `data/circuits/splits/train_all_pre_diversity.json` (5762 circuits, post-indist pre-diversity).
 
 ### Phase 6: QAP Mirror Descent & Iterative Refinement (2026-04-12, in progress)
 
@@ -642,9 +663,9 @@ Inspired by "Noise-Aware Iterative Attention for Scalable Qubit Mapping" (anonym
 #### Implementation (2026-04-12)
 - `precompute_c_eff()` / `precompute_c_eff_synthetic()` in `hardware_graph.py`: Floyd-Warshall with 3×ε₂ edge weights; adjacent pairs overwritten with raw ε₂
 - `QAPFidelityLoss` in `losses.py`: tr(Ã_c P C_eff P^T) via efficient matmul: PC = P@C_eff, APC = Ã_c@PC, trace = (APC * P).sum()
-- `circuit_adj` (Ã_c) dense matrix built in collation from `circuit_edge_pairs`/`circuit_edge_weights`
+- `circuit_adj` (Ã_c) dense matrix built per-sample in collation from `circuit_edge_pairs`/`circuit_edge_weights` → (B, l, l)
 - Iterative refinement in `GraphQMap.forward()`: learnable λ parameter, temperature annealing (β=0.9 per iteration)
-- Config: `configs/stage2_qap_refine.yaml` (full backend), `configs/stage2_toronto_qap_refine.yaml` (Toronto-only)
+- Config: `configs/qap_refine.yaml` (full backend), `configs/archive/stage2_toronto_qap_refine.yaml` (Toronto-only)
 
 #### v1 results (Toronto-only, no score normalization)
 Run `20260413_040016_toronto_qap_refine_v1` — **Best Val PST 0.6664 (epoch 44)**
@@ -670,16 +691,49 @@ After normalization: S_norm std=1.0, Feedback std≈0.34 → **ratio 2.92** (was
 
 Run `toronto_qap_refine_v2_normscore` in progress.
 
+### Phase 7: Per-Sample Collation Bug Fix (2026-04-14)
+
+**Critical bug discovered and fixed:** `collate_mapping_samples()` took per-circuit metadata (`circuit_edge_pairs`, `circuit_edge_weights`, `qubit_importance`, `circuit_adj`, `grama_g_single`) from the **first sample (s0) only** in each batch. These are per-circuit properties, not per-backend — every circuit has a different edge topology. With typical batch sizes of 4-18 (depending on backend size), **75-95% of training samples received loss gradients computed from the wrong circuit topology.**
+
+**Root cause of multiple known symptoms:**
+- Circuit-invariant layouts (Phase D diagnosis) → loss signals for most samples were disconnected from their actual circuit structure
+- PST not converging → majority of gradient updates were incorrect
+- Score matrix row collapse → model couldn't learn circuit-specific patterns because loss didn't reflect circuit differences
+
+**Fix (3 files, all loss components affected):**
+
+1. **`data/dataset.py` — collation:**
+   - `circuit_edge_pairs`: `s0` only → `[s.circuit_edge_pairs for s in samples]` (list of lists)
+   - `circuit_edge_weights`: `s0` only → `[s.circuit_edge_weights for s in samples]` (list of lists)
+   - `qubit_importance`: `(l,)` from s0 → `(B, l)` stacked tensor
+   - `circuit_adj`: `(l, l)` from s0 → `(B, l, l)` stacked tensor
+   - `grama_g_single`: `(l,)` from s0 → `(B, l)` stacked tensor
+
+2. **`training/losses.py` — all loss components:**
+   - 7 edge-pair losses (error_distance, adjacency, adj_error_aware, adj_size_aware, hop_distance, swap_count, soft_proximity): iterate over batch dim with per-sample edge pairs
+   - `QAPFidelityLoss`: batched `(B, l, l)` circuit_adj via `torch.bmm`
+   - `GraMALoss`: per-sample adjacency matrix + per-sample `g_single`
+   - `NodePlacementCostLoss`: batched `(B, l)` g_single
+   - `NodeQualityLoss`: batched `(B, l)` qubit_importance
+   - `_ensure_per_sample_lists()` helper: auto-detects flat list (old test format) vs list-of-lists and wraps for backward compat
+
+3. **`models/graphqmap.py` — QAP iterative refinement:**
+   - `circuit_adj` 2D→3D auto-expansion + `torch.bmm` for per-sample feedback
+
+**Additional fix:** `trainer.py:529` — `losses.get("l_total")` → `losses.get("total")` (key mismatch causing `best_loss` checkpoint to never save).
+
+**All 152 tests pass.** All prior experiment results are contaminated by this bug — re-evaluation required.
+
 ### Phase 1: Edge Loss Optimization (2026-04-03, superseded by Phase 4)
 New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft). Results incorporated into Phase 4 conclusions above.
 
 ## Known Issues & Active Investigation
+- **⚠ All prior experiment results contaminated (2026-04-14)**: Per-sample collation bug (Phase 7) means ALL historical PST numbers were computed with models trained on incorrect loss signals. Re-run with fixed code required to establish true baselines.
 - **Score matrix row collapse**: Circuit information collapses through GNN→cross-attention, making score matrix rows indistinguishable. Partially addressed by feature registry + RWPE. Feature-indistinguishable circuit filtering removes worst cases.
 - **No per-node circuit signal in edge losses**: Both `error_distance` and `adjacency` gradients (∂L/∂P_ip) depend only on neighbor mapping P_j and hardware structure — circuit qubit i's properties never appear. Layout diagnosis (Phase D, 2026-04-09) confirmed this causes circuit-invariant layouts. **Mitigation**: `node_placement_cost` (L_npc) added 2026-04-10 — ∂L_npc/∂P_ip = n_1Q(i)·ε_1Q(p) + λ_r·ε_readout(p), directly injecting per-node circuit signal. Weight tuning in progress (0.1 too large → gradient dominant; testing 0.01, 0.001).
 - **error_distance saturates by epoch 3**: Drops from ~0.14 to ~0.01 and provides negligible gradient thereafter. `adjacency` is the only loss providing meaningful gradient throughout training.
 - **node_quality collapse**: Learned MLP reaches trivial solution (-1.0) by epoch 1-2, zero gradient thereafter. **Do not use** — replaced by `swap_count` and `soft_proximity` in Phase 1 experiments.
 - **Val PST oscillation**: PST validation fluctuates 0.12-0.36 across epochs without converging. Best PST often occurs early/mid-training then degrades. Caused by weak correlation between surrogate loss and actual PST, compounded by SABRE routing non-determinism. No early stopping used — train for full max_epochs and select best PST checkpoint.
-- **Stage 1 pretrained checkpoint harmful**: Controlled test (2 pretrained vs 4 scratch runs) confirmed negative transfer. Pretrained avg eval PST 0.527, scratch avg 0.522 at best but with wider variance. Stage 1 CE-trained weights interfere with Stage 2 surrogate loss optimization.
 - **High run-to-run variance**: Same config + same seed produces eval PST range of 0.395-0.589 across runs. Non-deterministic CUDA ops, dataloader shuffle, and multi-programming random assignment contribute. Single-run results are unreliable — always run 2+ seeds.
 - **Sinkhorn >> Softmax (under re-evaluation)**: Previous controlled test showed Sinkhorn +0.086 PST over softmax, but that test (1) had val=test leakage and (2) used the old column-sum-squared exclusion loss which pushed toward uniform spread rather than preventing collision. Re-testing with pairwise collision exclusion loss (2026-04-10).
 - **HW feature gaps in older backends**: `single_qubit_error` ALL ZERO on 10 backends (burlington, essex, london, almaden, boeblingen, johannesburg, poughkeepsie, singapore, cambridge, rochester); `2q_gate_error` ALL ZERO on kyoto. These are FakeBackendV2 data gaps, not code bugs. Model learns to handle zero-variance features via z-score → all-zero column. **Note**: Rochester (53Q) is now a test backend (moved 2026-04-13) — its `single_qubit_error` ALL ZERO may affect eval PST. 9 remaining training backends with this gap + 1 test backend.
@@ -687,7 +741,8 @@ New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft
 - **Structural near-duplicates dominated training data (resolved 2026-04-08)**: Pre-Step-7 nominal 5,757 training circuits had only ~487 effective unique structures (8.5%) when grouped by `(num_qubits, num_edges, sorted_degree_sequence)` fingerprint. QUEKO had 215-circuit clusters of random-seed variants and MLQD had 359-circuit clusters of structurally identical small circuits across different algorithm names. Strong diversity filter (Step 7, K=1 per fingerprint) reduces training to 969 circuits — represents the actual structural variety the model can learn from. Validation set drops to 28 circuits → expect higher val metric variance.
 
 ## Critical Rules
-- All quantum circuits are pre-normalized to basis gates {cx, id, rz, sx, x} via `scripts/normalize_gates.py`
+- All quantum circuits (training + benchmarks) are normalized to basis gates {cx, id, rz, sx, x} via `scripts/normalize_gates.py`
+- Original Clifford+T Pozzi benchmark circuits available in `data/circuits/qasm/pozzi_benchmarks/` for reference
 - All quantum circuits loaded from .qasm files (OPENQASM 2.0)
 - Hardware noise features: z-scored features MUST be z-score normalized WITHIN each backend; raw features (T2/T1 ratio, edge_coherence_ratio) are NOT z-scored
 - Circuit node features MUST be z-score normalized WITHIN each circuit (RWPE is NOT z-score normalized)
@@ -695,11 +750,11 @@ New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft
 - Score normalization: configurable via `sinkhorn.score_norm` in YAML
   - `softmax` (default): row-wise softmax → P (batch, l, h)
   - `sinkhorn`: log-domain Sinkhorn with dummy padding → P (batch, h, h), sliced to (batch, l, h)
-- Stage 1 uses existing labels: QUEKO (τ⁻¹), MLQD (OLSQ2)
-- Stage 2 uses unsupervised surrogate losses on all circuits
+- Training uses unsupervised surrogate losses on all circuits
 - Score Matrix uses Cross-Attention + learned projection, NOT simple dot product (noise_bias disabled by default)
 - All hyperparameters configurable via YAML
 - Batching groups samples by (backend, num_logical) for uniform tensor shapes
+- Collation passes per-sample circuit metadata: `circuit_edge_pairs` (list of lists), `circuit_edge_weights` (list of lists), `qubit_importance` (B, l), `circuit_adj` (B, l, l), `grama_g_single` (B, l). Hardware data (d_error, d_hw, c_eff) is per-backend and shared across batch.
 - PST measurement: P(correct output) = primary metric
 - PST simulation: tensor_network + GPU (cuQuantum) as default; simulators created once per backend, reused for all circuits
 - PST simulation: on tensor_network failure (large/deep circuits on 100Q+ backends), simulators are recreated to recover GPU state
@@ -708,7 +763,7 @@ New loss components implemented: `swap_count` (L_swap), `soft_proximity` (L_soft
 - Transpilation: all evaluation paths (baselines + model) use unified `transpile_with_timing()` from `evaluation/transpiler.py`
 - Transpilation: custom PassManager with noise-aware UnitarySynthesis (`backend_props`) for all methods
 - Transpilation: supported layout×routing combinations (sabre, nassc, dense, noise_adaptive, trivial, qap)
-- Benchmark circuits: 23 standard circuits (3Q-13Q), stored in `data/circuits/qasm/benchmarks/`, deduplicated from training sets
+- Benchmark circuits: 25 Pozzi benchmark circuits (3Q-16Q), stored in `data/circuits/qasm/benchmarks/`, deduplicated from training sets. Split into `POZZI_TRAIN_CIRCUITS` (12, colleague's training set) and `POZZI_TEST_CIRCUITS` (13, colleague's unseen test set). CLI: `--circuit-set train12|test13|all25`
 - Multi-programming: model handles arbitrary circuit count; training scenarios configured via YAML (no fixed limit on circuit count)
 
 ## Dependencies

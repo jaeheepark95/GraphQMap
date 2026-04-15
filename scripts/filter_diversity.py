@@ -18,10 +18,10 @@ reproducibility.
 
 Reads:
   data/circuits/cache/{source}/*.pt
-  data/circuits/splits/stage2_all.json (and other splits)
+  data/circuits/splits/train_all.json (and other splits)
 
 Writes (when --apply):
-  data/circuits/splits/{stage1_*, stage2_*, val*}.json   (in-place)
+  data/circuits/splits/{stage2_*, val*}.json   (in-place)
   data/circuits/splits/filter_log.json                   (extended)
   data/circuits/splits/diversity_filter_log.json         (per-cluster details)
 
@@ -51,10 +51,7 @@ CACHE_ROOT = Path("data/circuits/cache")
 SPLITS_DIR = Path("data/circuits/splits")
 DATASETS = ["queko", "mlqd", "mqt_bench", "qasmbench", "revlib"]
 SPLIT_FILES = [
-    "stage1_supervised.json",
-    "stage1_queko_only.json",
-    "stage1_unsupervised.json",
-    "stage2_all.json",
+    "train_all.json",
     "val.json",
     "val_queko_only.json",
 ]
@@ -115,8 +112,8 @@ def main() -> None:
         "revlib": args.k_revlib,
     }
 
-    # Load active set membership from current stage2_all.json
-    stage2 = json.load(open(SPLITS_DIR / "stage2_all.json"))
+    # Load active set membership from current train_all.json
+    stage2 = json.load(open(SPLITS_DIR / "train_all.json"))
     active = {(e["source"], Path(e["file"]).stem) for e in stage2}
 
     # For each dataset, find which active circuits to keep

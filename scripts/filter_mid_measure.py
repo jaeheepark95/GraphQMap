@@ -10,7 +10,7 @@ Reads:
   data/circuits/splits/mid_measure_log.json   (produced by check_mid_measure.py)
 
 Writes (when --apply):
-  data/circuits/splits/{stage1_*, stage2_*, val*}.json   (in-place update)
+  data/circuits/splits/{stage2_*, val*}.json   (in-place update)
   data/circuits/splits/filter_log.json                   (extended with mid_measure entries)
 
 Usage:
@@ -30,10 +30,7 @@ logger = logging.getLogger(__name__)
 
 SPLITS_DIR = Path("data/circuits/splits")
 SPLIT_FILES = [
-    "stage1_supervised.json",
-    "stage1_queko_only.json",
-    "stage1_unsupervised.json",
-    "stage2_all.json",
+    "train_all.json",
     "val.json",
     "val_queko_only.json",
 ]

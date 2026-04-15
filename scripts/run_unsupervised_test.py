@@ -42,7 +42,7 @@ from data.hardware_graph import (
     precompute_error_distance,
 )
 from models.graphqmap import GraphQMap
-from training.losses import Stage2Loss
+from training.losses import SurrogateLoss
 from training.quality_score import QualityScore
 
 logging.basicConfig(
@@ -162,7 +162,7 @@ def build_stage2_sample(
 def train_unsupervised(
     model: GraphQMap,
     quality_score: QualityScore,
-    criterion: Stage2Loss,
+    criterion: SurrogateLoss,
     dataloader,
     device: torch.device,
     num_epochs: int = 30,
@@ -374,7 +374,7 @@ def main() -> None:
         {"name": c.name, "weight": c.weight}
         for c in cfg.loss.components
     ]
-    criterion = Stage2Loss(
+    criterion = SurrogateLoss(
         components=components,
         quality_score=quality_score,
     )

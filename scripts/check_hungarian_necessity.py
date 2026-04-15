@@ -7,7 +7,7 @@ Analyzes the P matrix after Sinkhorn to determine:
 
 Usage:
     python scripts/check_hungarian_necessity.py \
-        --config configs/stage2.yaml \
+        --config configs/base.yaml \
         --checkpoint runs/stage2/<RUN>/checkpoints/best.pt \
         --backend toronto
 """

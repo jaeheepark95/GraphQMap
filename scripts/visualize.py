@@ -2,19 +2,19 @@
 
 Usage:
     # Training metrics (single run)
-    python scripts/visualize.py runs/stage1/20260323_025733_baseline_v1
+    python scripts/visualize.py runs/train/20260323_025733_baseline_v1
 
     # Compare multiple training runs
-    python scripts/visualize.py runs/stage1/RUN_A runs/stage1/RUN_B
+    python scripts/visualize.py runs/train/RUN_A runs/train/RUN_B
 
     # Evaluation results
     python scripts/visualize.py --eval results/eval_toronto.csv
 
     # Both training + evaluation
-    python scripts/visualize.py runs/stage2/RUN --eval results/eval_toronto.csv
+    python scripts/visualize.py runs/train/RUN --eval results/eval_toronto.csv
 
     # Save plots without showing (for headless servers)
-    python scripts/visualize.py runs/stage1/RUN --no-show
+    python scripts/visualize.py runs/RUN --no-show
 """
 
 from __future__ import annotations
@@ -27,53 +27,8 @@ import numpy as np
 import pandas as pd
 
 
-def plot_stage1(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.Figure]:
-    """Plot Stage 1 training metrics: train/val loss."""
-    figures = []
-
-    fig, ax = plt.subplots(1, 1, figsize=(8, 4))
-    fig.suptitle("Stage 1 Training", fontsize=14)
-
-    for run_dir in run_dirs:
-        metrics_path = run_dir / "metrics.csv"
-        if not metrics_path.exists():
-            print(f"  Skip (no metrics.csv): {run_dir}")
-            continue
-
-        df = pd.read_csv(metrics_path)
-        label = run_dir.name
-
-        # Phase boundaries
-        phases = df["phase"].unique()
-        phase_colors = {"mlqd_queko_best": "C0", "queko_best": "C1"}
-
-        for phase in phases:
-            mask = df["phase"] == phase
-            color = phase_colors.get(phase, "C2")
-            offset = 0 if phase == phases[0] else df[mask].index[0]
-            epochs = df.loc[mask, "epoch"] + offset
-            ax.plot(epochs, df.loc[mask, "train_loss"], color=color, alpha=0.5,
-                    linestyle="--", label=f"{label} train ({phase.split('_')[0]})")
-            ax.plot(epochs, df.loc[mask, "val_loss"], color=color,
-                    label=f"{label} val ({phase.split('_')[0]})")
-
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("CE Loss")
-    ax.set_title("Train / Val Loss")
-    ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    figures.append(fig)
-
-    if save_dir:
-        fig.savefig(save_dir / "stage1_training.png", dpi=150, bbox_inches="tight")
-
-    return figures
-
-
-def plot_stage2(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.Figure]:
-    """Plot Stage 2 training metrics: loss components and Val PST."""
+def plot_training(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.Figure]:
+    """Plot training metrics: loss components and Val PST."""
     figures = []
 
     # Detect if any run has PST data
@@ -88,7 +43,7 @@ def plot_stage2(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.
 
     ncols = 3 if has_pst else 2
     fig, axes = plt.subplots(1, ncols, figsize=(6 * ncols, 4))
-    fig.suptitle("Stage 2 Training", fontsize=14)
+    fig.suptitle("Training", fontsize=14)
 
     for run_dir in run_dirs:
         metrics_path = run_dir / "metrics.csv"
@@ -149,7 +104,7 @@ def plot_stage2(run_dirs: list[Path], save_dir: Path | None = None) -> list[plt.
     figures.append(fig)
 
     if save_dir:
-        fig.savefig(save_dir / "stage2_training.png", dpi=150, bbox_inches="tight")
+        fig.savefig(save_dir / "training.png", dpi=150, bbox_inches="tight")
 
     return figures
 
@@ -416,19 +371,6 @@ def plot_pst_table(
     return fig
 
 
-def detect_stage(run_dir: Path) -> int | None:
-    """Detect stage from metrics CSV columns."""
-    metrics_path = run_dir / "metrics.csv"
-    if not metrics_path.exists():
-        return None
-    df = pd.read_csv(metrics_path, nrows=0)
-    if "phase" in df.columns:
-        return 1
-    if "l_total" in df.columns:
-        return 2
-    return None
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Visualize GraphQMap experiments")
     parser.add_argument(
@@ -461,22 +403,14 @@ def main() -> None:
 
     # Training plots
     if args.run_dirs:
-        stage1_dirs = [d for d in args.run_dirs if detect_stage(d) == 1]
-        stage2_dirs = [d for d in args.run_dirs if detect_stage(d) == 2]
-
-        if stage1_dirs:
-            s1_save = save_dir if save_dir else stage1_dirs[0] / "plots"
-            s1_save.mkdir(parents=True, exist_ok=True)
-            all_figures.extend(plot_stage1(stage1_dirs, s1_save))
-            print(f"Plots saved to {s1_save}/")
-        if stage2_dirs:
-            s2_save = save_dir if save_dir else stage2_dirs[0] / "plots"
-            s2_save.mkdir(parents=True, exist_ok=True)
-            all_figures.extend(plot_stage2(stage2_dirs, s2_save))
-            print(f"Plots saved to {s2_save}/")
-
-        undetected = [d for d in args.run_dirs if detect_stage(d) is None]
-        for d in undetected:
+        valid_dirs = [d for d in args.run_dirs if (d / "metrics.csv").exists()]
+        missing = [d for d in args.run_dirs if not (d / "metrics.csv").exists()]
+        if valid_dirs:
+            s_save = save_dir if save_dir else valid_dirs[0] / "plots"
+            s_save.mkdir(parents=True, exist_ok=True)
+            all_figures.extend(plot_training(valid_dirs, s_save))
+            print(f"Plots saved to {s_save}/")
+        for d in missing:
             print(f"  Warning: no metrics.csv found in {d}")
 
     # Evaluation plots

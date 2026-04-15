@@ -2,10 +2,10 @@
 
 Usage:
     # Model evaluation with baselines (auto-saves to runs/eval/<run_name>/)
-    python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto rochester washington --reps 3
+    python evaluate.py --config configs/base.yaml --checkpoint runs/train/<RUN>/checkpoints/best.pt --backend toronto rochester washington --reps 3
 
     # Custom output path
-    python evaluate.py --config configs/stage2.yaml --checkpoint runs/stage2/<RUN>/checkpoints/best.pt --backend toronto --reps 3 --output runs/eval/custom/eval_results.csv
+    python evaluate.py --config configs/base.yaml --checkpoint runs/train/<RUN>/checkpoints/best.pt --backend toronto --reps 3 --output runs/eval/custom/eval_results.csv
 
     # Benchmark mode (baselines only, no model)
     python evaluate.py --benchmark --backend toronto rochester washington
@@ -33,6 +33,7 @@ from data.hardware_graph import (
 from evaluation.benchmark import (
     BENCHMARK_CIRCUIT_DIR,
     BENCHMARK_CIRCUITS,
+    CIRCUIT_SETS,
     execute_on_simulators,
     load_benchmark_circuit,
     run_benchmark_single,
@@ -165,7 +166,7 @@ def evaluate_model(args, cfg) -> None:
 
     # Load model
     model = GraphQMap.from_config(cfg)
-    ckpt_path = args.checkpoint or getattr(cfg, "pretrained_checkpoint", None)
+    ckpt_path = args.checkpoint
     if ckpt_path:
         logger.info("Loading checkpoint: %s", ckpt_path)
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
@@ -391,7 +392,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=43)
     parser.add_argument(
         "--circuits", nargs="*", default=None,
-        help="Circuit names (default: standard 8)",
+        help="Circuit names (default: all 25 Pozzi benchmarks)",
+    )
+    parser.add_argument(
+        "--circuit-set", default=None,
+        choices=list(CIRCUIT_SETS.keys()),
+        help="Predefined circuit set: train12, test13, all25",
     )
     parser.add_argument(
         "--circuit-dir", default=BENCHMARK_CIRCUIT_DIR,
@@ -412,9 +418,14 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Resolve circuit list: --circuits > --circuit-set > default (all25)
+    circuit_names = args.circuits
+    if circuit_names is None and args.circuit_set:
+        circuit_names = CIRCUIT_SETS[args.circuit_set]
+
     if args.benchmark:
         run_benchmark_single(
-            circuit_names=args.circuits,
+            circuit_names=circuit_names,
             backend_names=args.backend,
             reps=args.reps,
             shots=args.shots,
@@ -439,6 +450,7 @@ def main() -> None:
         for backend_name in args.backend:
             args_copy = argparse.Namespace(**vars(args))
             args_copy.backend = backend_name
+            args_copy.circuits = circuit_names  # pass resolved circuit list
             # Disable per-backend CSV save; collect results instead
             args_copy.output = None
             rows = evaluate_model(args_copy, cfg)
@@ -450,7 +462,7 @@ def main() -> None:
             output_path = Path(args.output)
             eval_dir = output_path.parent
         elif args.checkpoint:
-            # Auto-derive from checkpoint: runs/stage2/<RUN>/checkpoints/best.pt → runs/eval/<RUN>/
+            # Auto-derive from checkpoint: runs/train/<RUN>/checkpoints/best.pt → runs/eval/<RUN>/
             ckpt_path = Path(args.checkpoint)
             run_name = ckpt_path.parent.parent.name  # e.g. 20260324_091153_rerun_consistency
             eval_dir = Path("runs/eval") / run_name
