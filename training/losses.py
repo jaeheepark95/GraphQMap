@@ -901,7 +901,10 @@ class SurrogateLoss(nn.Module):
             Dict with 'total' and per-component loss tensors (keyed by name).
         """
         result: dict[str, torch.Tensor] = {}
-        total = torch.tensor(0.0, device=P.device)
+        # Seed total with a grad-preserving zero derived from P so that the
+        # returned tensor has a grad_fn even when every active component
+        # short-circuits to a constant 0 (e.g. a batch with no 2Q circuit edges).
+        total = P.sum() * 0.0
 
         for name, weight in zip(self.component_names, self.component_weights):
             loss_val = self.losses[name](P, **kwargs)
