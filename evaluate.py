@@ -74,17 +74,23 @@ def _save_pst_tables(raw_df: pd.DataFrame, eval_dir: Path) -> None:
     """Save PST summary tables as CSV and Markdown."""
     method_order = [label for _, _, label in BASELINE_COMBOS] + [label for _, label in MODEL_ROUTING_VARIANTS]
 
-    # Average across reps
-    pivot = raw_df.groupby(["backend", "circuit", "method"])["pst"].mean().reset_index()
-    table = pivot.pivot_table(index=["backend", "circuit"], columns="method", values="pst")
+    # Average across reps — NaN propagates (any NaN rep makes circuit mean NaN).
+    pivot = (
+        raw_df.groupby(["backend", "circuit", "method"])["pst"]
+        .apply(lambda s: s.mean(skipna=False))
+        .reset_index()
+    )
+    table = pivot.pivot_table(
+        index=["backend", "circuit"], columns="method", values="pst", dropna=False,
+    )
     table = table[[m for m in method_order if m in table.columns]]
 
-    # Build table with per-backend averages
+    # Build table with per-backend averages — any NaN circuit makes AVG NaN.
     backends = sorted(table.index.get_level_values(0).unique())
     parts = []
     for backend in backends:
         sub = table.loc[backend]
-        avg = pd.DataFrame([sub.mean()], index=pd.MultiIndex.from_tuples([(backend, "AVG")]))
+        avg = pd.DataFrame([sub.mean(skipna=False)], index=pd.MultiIndex.from_tuples([(backend, "AVG")]))
         avg.columns = table.columns
         parts.append(pd.concat([table.loc[[backend]], avg]))
     full_table = pd.concat(parts)
@@ -118,7 +124,7 @@ def _save_pst_tables(raw_df: pd.DataFrame, eval_dir: Path) -> None:
                 for m in sub.columns:
                     f.write(f" {sub.loc[circuit, m]:.4f} |")
                 f.write("\n")
-            avg = sub.mean()
+            avg = sub.mean(skipna=False)
             f.write(f"| **AVG** |")
             for m in sub.columns:
                 f.write(f" **{avg[m]:.4f}** |")
@@ -342,7 +348,7 @@ def evaluate_model(args, cfg) -> None:
     data = {("PST", m): all_pst[m] for m in method_labels}
     df = pd.DataFrame(data, index=evaluated_circuits)
     df.columns = pd.MultiIndex.from_tuples(df.columns)
-    df.loc["Avg"] = df.mean(numeric_only=True, axis=0)
+    df.loc["Avg"] = df.mean(numeric_only=True, axis=0, skipna=False)
 
     pd.options.display.float_format = "{:.4f}".format
     print(f"\n=== Results for {args.backend} ===")

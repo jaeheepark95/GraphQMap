@@ -26,11 +26,19 @@ class EvalResult:
 
     @property
     def pst_mean(self) -> float:
-        return float(np.mean(self.pst_values)) if self.pst_values else 0.0
+        if not self.pst_values:
+            return 0.0
+        if any(np.isnan(v) for v in self.pst_values):
+            return float("nan")
+        return float(np.mean(self.pst_values))
 
     @property
     def pst_std(self) -> float:
-        return float(np.std(self.pst_values)) if self.pst_values else 0.0
+        if not self.pst_values:
+            return 0.0
+        if any(np.isnan(v) for v in self.pst_values):
+            return float("nan")
+        return float(np.std(self.pst_values))
 
     @property
     def swap_mean(self) -> float:
@@ -97,10 +105,14 @@ def aggregate_results(results: list[EvalResult]) -> dict[str, Any]:
     all_depth = [r.depth_mean for r in results]
     all_time = [r.inference_time_mean for r in results if r.inference_times]
 
+    any_pst_nan = any(np.isnan(v) for v in all_pst)
+    pst_mean_val = float("nan") if any_pst_nan else float(np.mean(all_pst))
+    pst_std_val = float("nan") if any_pst_nan else float(np.std(all_pst))
+
     agg = {
         "num_circuits": len(results),
-        "pst_mean": float(np.mean(all_pst)),
-        "pst_std": float(np.std(all_pst)),
+        "pst_mean": pst_mean_val,
+        "pst_std": pst_std_val,
         "swap_mean": float(np.mean(all_swap)),
         "swap_std": float(np.std(all_swap)),
         "depth_mean": float(np.mean(all_depth)),

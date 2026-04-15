@@ -166,3 +166,44 @@ class TestMetrics:
         r = EvalResult("empty", "manila", "test")
         assert r.pst_mean == 0.0
         assert r.pst_std == 0.0
+
+    def test_eval_result_nan_propagates(self):
+        """A single NaN rep must poison pst_mean / pst_std to NaN.
+
+        Rationale: tensor-network simulator crashes on OURS-compiled circuits
+        must surface as an explicit NaN in aggregates, not be silently hidden
+        by averaging the surviving reps. This preserves the learning signal
+        "the model should produce layouts that do not crash the simulator."
+        """
+        import math
+
+        r = EvalResult(
+            circuit_name="hwb4_49", backend_name="washington", method="OURS+SABRE",
+            pst_values=[0.3, float("nan"), 0.4],
+        )
+        assert math.isnan(r.pst_mean)
+        assert math.isnan(r.pst_std)
+
+    def test_aggregate_results_nan_propagates(self):
+        """One NaN-circuit must poison the backend-level aggregate to NaN."""
+        import math
+
+        results = [
+            EvalResult("c1", "washington", "OURS", [0.9]),
+            EvalResult("c2", "washington", "OURS", [float("nan")]),  # crashed
+            EvalResult("c3", "washington", "OURS", [0.7]),
+        ]
+        agg = aggregate_results(results)
+        assert agg["num_circuits"] == 3
+        assert math.isnan(agg["pst_mean"])
+        assert math.isnan(agg["pst_std"])
+
+    def test_aggregate_results_no_nan_baseline(self):
+        """Aggregate must stay numeric when no rep NaN is present."""
+        results = [
+            EvalResult("c1", "washington", "SABRE", [0.5, 0.55]),
+            EvalResult("c2", "washington", "SABRE", [0.6, 0.65]),
+        ]
+        agg = aggregate_results(results)
+        assert agg["pst_mean"] == pytest.approx(0.575, abs=0.01)
+        assert agg["pst_std"] >= 0.0

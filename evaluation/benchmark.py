@@ -271,10 +271,10 @@ def run_benchmark_single(
                         cx_runs.append(metadata["map_cx"])
                         total_time_runs.append(metadata["total_time"])
 
-                all_pst[label].append(np.nanmean(psts_runs) if psts_runs else 0.0)
-                all_time[label].append(np.nanmean(times_runs) if times_runs else 0.0)
-                all_cx[label].append(np.nanmean(cx_runs) if cx_runs else 0.0)
-                all_total_time[label].append(np.nanmean(total_time_runs) if total_time_runs else 0.0)
+                all_pst[label].append(np.mean(psts_runs) if psts_runs else 0.0)
+                all_time[label].append(np.mean(times_runs) if times_runs else 0.0)
+                all_cx[label].append(np.mean(cx_runs) if cx_runs else 0.0)
+                all_total_time[label].append(np.mean(total_time_runs) if total_time_runs else 0.0)
 
         # Build MultiIndex DataFrame
         data = {}
