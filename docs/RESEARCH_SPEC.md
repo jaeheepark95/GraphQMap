@@ -268,7 +268,7 @@ Multi-programming uses the same 4 node features as single-circuit. Circuit graph
 - **Z-score within backend:** Error rates, coherence ratios, degree — scale varies significantly across backends (e.g., T1 can differ 10× between backends). Z-score preserves relative ordering.
 - **Raw (not z-scored):** Dimensionless ratios with physical meaning (`t2_t1_ratio`, `edge_coherence_ratio`). Their absolute values carry information (e.g., T2/T1 ≈ 2.0 means relaxation-limited regardless of backend). Z-score would destroy this.
 
-**Exception handling:** ε = 1e-8 for zero standard deviation. If a qubit has no connected edges (isolated), mean_cx_duration defaults to 1.0 to avoid division by zero in ratio features. T2/T1 ratio clipped to [0, 2] per theoretical bound T2 ≤ 2T1; 2.5% of qubits (mostly synthetic backends) hit the clip boundary.
+**Exception handling:** ε = 1e-8 for zero standard deviation. If a qubit has no connected edges (isolated), mean_cx_duration defaults to 1.0 to avoid division by zero in ratio features. T2/T1 ratio clipped to [0, 2] per theoretical bound T2 ≤ 2T1.
 
 ---
 
@@ -833,15 +833,6 @@ data/circuits/
 │   ├── queko/                   # 900 circuits (540 with τ⁻¹ labels, 360 without)
 │   ├── qasmbench/               # 94 circuits (2Q-127Q, label-free)
 │   └── revlib/                  # 231 circuits (3Q-127Q, converted from .real)
-├── labels/                      # Label files (reference only)
-│   ├── mlqd/labels.json         # OLSQ2 solver labels (3,729 circuits)
-│   └── queko/labels.json        # τ⁻¹ true optimal labels (540 circuits)
-├── backends/                    # Synthetic backend definitions for non-Qiskit hardware
-│   ├── queko_aspen4.json        # Rigetti Aspen-4 (16Q) — QUEKO + MLQD
-│   ├── queko_tokyo.json         # IBM Tokyo (20Q) — QUEKO only
-│   ├── queko_rochester.json     # IBM Rochester (53Q) — QUEKO only
-│   ├── queko_sycamore.json      # Google Sycamore (54Q) — QUEKO + MLQD
-│   └── mlqd_grid5x5.json       # 5x5 Grid (25Q) — MLQD only
 └── splits/
     ├── train_all.json              # 969 training circuits → surrogate loss
     ├── val.json                     # 28 labeled validation
@@ -855,10 +846,8 @@ data/circuits/
 ```
 
 **Design rationale:**
-- **Circuits and labels are decoupled.** Even within a labeled dataset (e.g., MQT Bench), only a subset may have labels compatible with our experimental setup. The remaining circuits are still valuable for unsupervised training.
-- **Label format:** JSON mapping from circuit filename to layout: `{"circuit.qasm": {"backend": "manila", "layout": [0, 1, 3, 2, 4]}, ...}`
-- **Split files control training behavior.** Adding new labels or circuits only requires updating `labels/*.json` and `splits/*.json` — no reorganization of circuit files.
-- **QASMBench and RevLib** have no `labels/` directory entry (always unsupervised).
+- **Unsupervised training only.** Training uses surrogate losses (no layout labels required). The labels/ directory and synthetic backend noise profiles that were used for an earlier supervised prototype have been removed.
+- **Split files control training behavior.** Adding new circuits only requires updating `splits/*.json` — no reorganization of circuit files.
 #### Dataset Preprocessing Pipeline
 
 All raw circuit datasets undergo the following preprocessing before use in training. Each step is applied once and the results are stored in place.
@@ -943,35 +932,13 @@ All raw circuit datasets undergo the following preprocessing before use in train
 | RevLib | 263 | 231 | 219 | 219 | 113 |
 | **Total** | **7,165** | **6,887** | **5,769** | **5,757** | **969** |
 
-#### QUEKO Backend Handling
+#### QUEKO and MLQD Backend Handling
 
-QUEKO circuits are designed for 4 specific hardware topologies (Aspen-4, Tokyo, Rochester, Sycamore) that are not available as Qiskit FakeBackendV2. Since QUEKO only provides coupling maps without noise data, we generate **synthetic noise profiles** by sampling from distributions observed across real FakeBackendV2 hardware:
-
-- Noise values (T1, T2, readout_error, sq_gate_error, cx_error, cx_duration) are sampled from clipped normal distributions fitted to 11 real FakeBackends. The JSON files also include `frequency`, but it is not used as a model feature.
-- Generated once with fixed seed (42) for reproducibility, stored in `data/circuits/backends/`
-- QUEKO's optimal layouts are topology-based (zero-SWAP), so synthetic noise does not affect label correctness
-- Noise-aware optimization is driven by surrogate losses over real hardware profiles
-
-See `scripts/generate_queko_noise.py` for the generation script.
-
-#### MLQD Backend and Label Handling
-
-MLQD provides OLSQ2-mapped result circuits but not explicit initial layouts. Layouts are extracted by:
-
-1. Parsing measurement lines in the result circuit to obtain the **final mapping** (logical → physical after all SWAPs)
-2. Detecting SWAP patterns (3-CNOT decomposition: `cx a,b; cx b,a; cx a,b`) and reversing them to recover the **initial layout**
-3. Circuits where SWAP detection fails (pattern mismatch) are kept unlabeled
-
-**Backend mapping for MLQD:**
-- **Melbourne, Rochester** → Qiskit FakeMelbourneV2 / FakeRochesterV2 (real noise data available)
-- **Aspen-4, Sycamore** → reuse QUEKO synthetic noise profiles (identical topologies)
-- **Grid 5x5** → dedicated synthetic noise profile (`mlqd_grid5x5.json`)
-
-See `scripts/process_mlqd.py` for the extraction script.
+QUEKO and MLQD circuits were originally designed for hardware topologies not available as Qiskit FakeBackendV2. Since the current training pipeline uses only the 49 real Qiskit FakeBackendV2 backends, QUEKO/MLQD circuits are **randomly re-assigned to real backends** at data load time. Earlier synthetic noise profile JSONs have been removed.
 
 ### Training Strategy: Unsupervised
 
-Train with configurable surrogate losses (default: L_surr + L_node) on all available circuits, including label-free datasets (MQT Bench, QASMBench, RevLib). Loss components are modular and configured via YAML registry. Uses only the real Qiskit FakeBackendV2 backends — synthetic backends are excluded. QUEKO/MLQD circuits (which were originally assigned to synthetic backends) are randomly re-assigned to real backends at data load time.
+Train with configurable surrogate losses on all available circuits (MQT Bench, QASMBench, RevLib, QUEKO, MLQD — all treated as unlabeled). Loss components are modular and configured via YAML registry. Uses only the real Qiskit FakeBackendV2 backends.
 
 ---
 

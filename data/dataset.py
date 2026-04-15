@@ -29,21 +29,13 @@ from data.circuit_graph import (
 )
 from data.hardware_graph import (
     build_hardware_graph,
-    build_hardware_graph_from_synthetic,
     get_backend,
     get_hw_node_features,
-    get_hw_node_features_synthetic,
-    is_synthetic_backend,
     precompute_c_eff,
-    precompute_c_eff_synthetic,
     precompute_error_distance,
-    precompute_error_distance_synthetic,
     precompute_grama_W,
-    precompute_grama_W_synthetic,
     precompute_grama_single_qubit_costs,
-    precompute_grama_single_qubit_costs_synthetic,
     precompute_hop_distance,
-    precompute_hop_distance_synthetic,
 )
 from data.label_generation import layout_to_permutation_matrix
 
@@ -128,11 +120,8 @@ _grama_sq_costs_cache: dict[str, dict[str, np.ndarray]] = {}
 def _get_hardware_graph(backend_name: str) -> Data:
     """Get hardware graph, using cache to avoid recomputation."""
     if backend_name not in _hw_graph_cache:
-        if is_synthetic_backend(backend_name):
-            _hw_graph_cache[backend_name] = build_hardware_graph_from_synthetic(backend_name)
-        else:
-            backend = get_backend(backend_name)
-            _hw_graph_cache[backend_name] = build_hardware_graph(backend)
+        backend = get_backend(backend_name)
+        _hw_graph_cache[backend_name] = build_hardware_graph(backend)
     return _hw_graph_cache[backend_name]
 
 
@@ -147,44 +136,32 @@ def _get_num_physical(backend_name: str) -> int:
 def _get_error_distance(backend_name: str) -> np.ndarray:
     """Get error distance matrix, using cache."""
     if backend_name not in _d_error_cache:
-        if is_synthetic_backend(backend_name):
-            _d_error_cache[backend_name] = precompute_error_distance_synthetic(backend_name)
-        else:
-            backend = get_backend(backend_name)
-            _d_error_cache[backend_name] = precompute_error_distance(backend)
+        backend = get_backend(backend_name)
+        _d_error_cache[backend_name] = precompute_error_distance(backend)
     return _d_error_cache[backend_name]
 
 
 def _get_c_eff(backend_name: str) -> np.ndarray:
     """Get unified effective cost matrix, using cache."""
     if backend_name not in _c_eff_cache:
-        if is_synthetic_backend(backend_name):
-            _c_eff_cache[backend_name] = precompute_c_eff_synthetic(backend_name)
-        else:
-            backend = get_backend(backend_name)
-            _c_eff_cache[backend_name] = precompute_c_eff(backend)
+        backend = get_backend(backend_name)
+        _c_eff_cache[backend_name] = precompute_c_eff(backend)
     return _c_eff_cache[backend_name]
 
 
 def _get_hop_distance(backend_name: str) -> np.ndarray:
     """Get hop distance matrix, using cache."""
     if backend_name not in _d_hw_cache:
-        if is_synthetic_backend(backend_name):
-            _d_hw_cache[backend_name] = precompute_hop_distance_synthetic(backend_name)
-        else:
-            backend = get_backend(backend_name)
-            _d_hw_cache[backend_name] = precompute_hop_distance(backend)
+        backend = get_backend(backend_name)
+        _d_hw_cache[backend_name] = precompute_hop_distance(backend)
     return _d_hw_cache[backend_name]
 
 
 def _get_hw_node_features(backend_name: str) -> np.ndarray:
     """Get quality-score input features, using cache."""
     if backend_name not in _hw_features_cache:
-        if is_synthetic_backend(backend_name):
-            _hw_features_cache[backend_name] = get_hw_node_features_synthetic(backend_name)
-        else:
-            backend = get_backend(backend_name)
-            _hw_features_cache[backend_name] = get_hw_node_features(backend)
+        backend = get_backend(backend_name)
+        _hw_features_cache[backend_name] = get_hw_node_features(backend)
     return _hw_features_cache[backend_name]
 
 
@@ -194,26 +171,18 @@ def _get_grama_W(backend_name: str) -> np.ndarray:
     W is built once per backend (Floyd-Warshall on -log(1-eps) edge weights).
     """
     if backend_name not in _grama_W_cache:
-        if is_synthetic_backend(backend_name):
-            _grama_W_cache[backend_name] = precompute_grama_W_synthetic(backend_name)
-        else:
-            backend = get_backend(backend_name)
-            _grama_W_cache[backend_name] = precompute_grama_W(backend)
+        backend = get_backend(backend_name)
+        _grama_W_cache[backend_name] = precompute_grama_W(backend)
     return _grama_W_cache[backend_name]
 
 
 def _get_grama_sq_costs(backend_name: str) -> dict[str, np.ndarray]:
     """Get GraMA raw single-qubit cost vectors (s_read, s_gate), using cache."""
     if backend_name not in _grama_sq_costs_cache:
-        if is_synthetic_backend(backend_name):
-            _grama_sq_costs_cache[backend_name] = (
-                precompute_grama_single_qubit_costs_synthetic(backend_name)
-            )
-        else:
-            backend = get_backend(backend_name)
-            _grama_sq_costs_cache[backend_name] = (
-                precompute_grama_single_qubit_costs(backend)
-            )
+        backend = get_backend(backend_name)
+        _grama_sq_costs_cache[backend_name] = (
+            precompute_grama_single_qubit_costs(backend)
+        )
     return _grama_sq_costs_cache[backend_name]
 
 

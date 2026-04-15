@@ -85,7 +85,7 @@ loss:
   components:
     - name: error_distance       # L_surr: error-weighted shortest path distance (primary)
       weight: 1.0
-    - name: node_quality         # L_node: NISQ node quality (bounded [-1,0])
+    - name: adjacency            # L_adj: binary adjacency matching (gate-freq weighted)
       weight: 0.3
 
 

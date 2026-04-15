@@ -41,5 +41,5 @@ def test_load_base_config():
     assert len(cfg.loss.components) == 2
     assert cfg.loss.components[0].name == "error_distance"
     assert cfg.loss.components[0].weight == 1.0
-    assert cfg.loss.components[1].name == "node_quality"
+    assert cfg.loss.components[1].name == "adjacency"
     assert cfg.loss.components[1].weight == 0.3
