@@ -683,8 +683,10 @@ L_sep = -(1/|E_cross|) · Σ_{(i,j)∈cross-circuit} Σ_{p,q} P_ip · P_jq · d_
 #### Combined Surrogate Loss
 
 ```
-L_2 = Σ_k weight_k · component_k(P, ...)
+L_total = Σ_k weight_k · component_k(P, ...)
 ```
+
+**Implementation detail (grad-safe zero init).** `SurrogateLoss.forward` seeds the running total as `P.sum() * 0.0`, not as `torch.tensor(0.0)`. Reason: edge-based components (`error_distance`, `adjacency`, `soft_proximity`, ...) short-circuit to a constant 0 when a batch has no 2Q circuit edges (e.g. single-CX circuits with `num_logical=2`). If every component short-circuits, `torch.tensor(0.0)` has no grad_fn and `backward()` raises `"element 0 of tensors does not require grad and does not have a grad_fn"`. Seeding from P preserves a grad_fn with zero contributed gradient.
 
 **Current best configuration (Eval OURS+SABRE 3-backend avg 0.692, 2026-04-09):**
 
