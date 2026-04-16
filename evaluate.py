@@ -403,7 +403,7 @@ def main() -> None:
     parser.add_argument(
         "--circuit-set", default=None,
         choices=list(CIRCUIT_SETS.keys()),
-        help="Predefined circuit set: train12, test13, all25",
+        help="Predefined circuit set: test1 (12), test2 (13), all (25)",
     )
     parser.add_argument(
         "--circuit-dir", default=BENCHMARK_CIRCUIT_DIR,
@@ -424,7 +424,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Resolve circuit list: --circuits > --circuit-set > default (all25)
+    # Resolve circuit list: --circuits > --circuit-set > default (all)
     circuit_names = args.circuits
     if circuit_names is None and args.circuit_set:
         circuit_names = CIRCUIT_SETS[args.circuit_set]

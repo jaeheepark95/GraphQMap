@@ -78,7 +78,7 @@ Raw datasets are preprocessed before training (details in `docs/RESEARCH_SPEC.md
 6. **Mid-circuit measurement filtering** — 12 additional circuits removed (`scripts/filter_mid_measure.py`, scan via `scripts/check_mid_measure.py`). 21 mid-measure circuits found total (7 unique algorithms: bb84, ipea, shor, cc×3, seca; replicated across MLQD backend variants), of which 9 were already removed by indist filter. Mid-measure circuits cannot be modeled correctly by the GraphQMap circuit graph (single node per logical qubit) and may carry inconsistent labels. See `data/circuits/splits/mid_measure_log.json`.
 7. **Strong diversity filtering** (`scripts/filter_diversity.py`, applied 2026-04-08) — 4,788 additional circuits removed by collapsing structural near-duplicates. Two circuits sharing fingerprint `(num_qubits, num_edges, sorted_degree_sequence)` are considered duplicates; only K=1 representative per fingerprint per source is kept (alphabetical first). Motivation: pre-filter analysis showed nominal 5,757 training circuits had only ~487 effective unique structures (8.5%) — QUEKO's 215-circuit clusters of `*QBT_*CYC_QSE_*` random-seed variants and MLQD's 359-circuit cluster of identical small-circuit fingerprints across different algorithm names. Reduction: queko 894→245, mlqd 4159→267, mqt_bench 433→305, qasmbench 52→39, revlib 219→113. See `data/circuits/splits/diversity_filter_log.json` and `dataset_diversity.md` for the analysis. Validation splits (val.json 395→28, val_queko_only 52→2) significantly reduced — monitor val metric noise increase.
 - Original 7,165 → Post-preprocessing 6,887 → Post-diversity 969 → **Final 964 training circuits** (Pozzi test dedup: 5 RevLib circuits removed)
-8. **Pozzi test circuit deduplication** — 5 circuits (`decod24-v0_38`, `ex1_226`, `decod24-bdd_294`, `ham7_104`, `rd53_138`) removed from training splits to prevent evaluation leakage. These appear in `POZZI_TEST_CIRCUITS` (13 evaluation circuits)
+8. **Pozzi test circuit deduplication** — 5 circuits (`decod24-v0_38`, `ex1_226`, `decod24-bdd_294`, `ham7_104`, `rd53_138`) removed from training splits to prevent evaluation leakage. These appear in `POZZI_TEST2_CIRCUITS` (13 evaluation circuits)
 - Most removal is structural deduplication (Step 7), not data quality issues
 - Quality/diversity analysis: `scripts/dataset_quality_table.py`, `scripts/dataset_diversity.py`
 
@@ -125,10 +125,10 @@ python evaluate.py --config configs/base.yaml \
   --checkpoint runs/train/<RUN>/checkpoints/best.pt \
   --backend toronto rochester washington --reps 3
 
-# Evaluate on specific circuit set (train12, test13, all25)
+# Evaluate on specific circuit set (test1, test2, all)
 python evaluate.py --config configs/base.yaml \
   --checkpoint runs/train/<RUN>/checkpoints/best.pt \
-  --backend toronto --circuit-set test13 --reps 3
+  --backend toronto --circuit-set test2 --reps 3
 
 # Benchmark (baselines only, no model)
 python evaluate.py --benchmark --backend toronto rochester washington
@@ -310,7 +310,7 @@ hardware_gnn:
 ## Pozzi Benchmark Circuits (Evaluation)
 25 circuits split into 12 train + 13 test, matching colleague's attention-based qubit mapping paper setup. Gate-normalized to `{cx, id, rz, sx, x}` basis (same as training data). Original Clifford+T versions available in `data/circuits/qasm/pozzi_benchmarks/`. Source: RevLib reversible logic benchmarks + Pozzi realistic benchmarks.
 
-**Train 12** (`POZZI_TRAIN_CIRCUITS`): Colleague trains their model on these circuits.
+**Test set 1** (`POZZI_TEST1_CIRCUITS`, 12 circuits): 1차 test — used for evaluation only.
 
 | Circuit | Qubits | Gates | CX | Depth |
 |---------|:------:|:-----:|:--:|:-----:|
@@ -327,7 +327,7 @@ hardware_gnn:
 | decod24-v2_43 | 4 | 64 | 22 | 34 |
 | 4gt13_92 | 5 | 82 | 30 | 48 |
 
-**Test 13** (`POZZI_TEST_CIRCUITS`): Unseen by colleague's model — fair comparison set.
+**Test set 2** (`POZZI_TEST2_CIRCUITS`, 13 circuits): 2차 test — used for evaluation only.
 
 | Circuit | Qubits | Gates | CX | Depth |
 |---------|:------:|:-----:|:--:|:-----:|
@@ -345,10 +345,38 @@ hardware_gnn:
 | rd53_138 | 8 | 156 | 52 | 76 |
 | qft_10 | 16 | 200 | 90 | 63 |
 
-**CLI usage**: `--circuit-set train12|test13|all25` (default: all25)
+**CLI usage**: `--circuit-set test1|test2|all` (default: all)
 **Data directory**: `data/circuits/qasm/benchmarks/` (all 25 normalized)
 **Raw source**: `data/circuits/qasm/pozzi_benchmarks/` (158 Pozzi circuits, Clifford+T basis, 16Q register)
-**Code**: `evaluation/benchmark.py` — `POZZI_TRAIN_CIRCUITS`, `POZZI_TEST_CIRCUITS`, `BENCHMARK_CIRCUITS` (all 25), `CIRCUIT_SETS`
+**Code**: `evaluation/benchmark.py` — `POZZI_TEST1_CIRCUITS`, `POZZI_TEST2_CIRCUITS`, `BENCHMARK_CIRCUITS` (all 25), `CIRCUIT_SETS`
+
+## Default Training Setup (as of 2026-04-15)
+
+**Base config**: `configs/base_curated.yaml` — all new experiments should inherit from or override this.
+
+**Baseline choices (2026-04-15)**:
+- Score normalization: **Sinkhorn** (`score_norm: sinkhorn`)
+- τ schedule: **exponential annealing 1.0 → 0.05** over training
+- Loss: **`qap_fidelity` only** (weight=1.0, normalize=true) — tr(Ã_c · P · C_eff · Pᵀ)
+
+**Dataset**: `data/circuits/splits/train_curated_toronto.json` — 143 curated circuits (revlib 93 + qasmbench 27 + mlqd 11 + mqt_bench 9 + queko 3), all 2Q–27Q (Toronto-fit). Derived from `train_curated.json` (183) by removing 35 circuits >27Q + 5 test2 leakage circuits. Replaces `train_all.json` (969 post-diversity) as default for this phase.
+
+**Training backends (14, 옵션 A-final)** — size-matched to test targets:
+| Size | Gate | Backends |
+|:----:|:----:|----------|
+| 27Q | cx (Falcon r5) | Hanoi, Kolkata, Cairo, Algiers, Auckland, Mumbai, Montreal (×7) |
+| 65Q | cx (Hummingbird r2) | Brooklyn, Manhattan (×2) |
+| 127Q | ecr (Eagle r3) | Kyiv, Sherbrooke, Brisbane, Kyoto, Osaka (×5) |
+
+**Validation backend (1, held-out)**: Paris (27Q cx) — fast validation, matches Toronto calibration (Falcon r5).
+
+**Test backends (unseen)**: Toronto (27Q cx), Rochester (53Q cx), Washington (127Q cx).
+
+**Rationale & constraints**:
+- 127Q cx-only has just FakeWashington (held out for test) → ecr 127Q unavoidable in training. Model is gate-agnostic (uses coupling_map + z-scored 2q_error, not gate name).
+- Rochester (53Q) excluded from training because `single_qubit_error` ALL ZERO — keeps the feature-gap as a pure test-time challenge.
+- Prague (33Q cz) reserved for post-training zero-shot check (gate-agnostic verification).
+- Legacy `pozzi_train12_*.yaml` configs moved to `configs/legacy/`.
 
 ## Training Strategy
 Unsupervised surrogate losses on filtered circuits.
@@ -769,7 +797,7 @@ Rationale: a crashing layout is a *bad* layout from the evaluation-pipeline pers
 - Transpilation: all evaluation paths (baselines + model) use unified `transpile_with_timing()` from `evaluation/transpiler.py`
 - Transpilation: custom PassManager with noise-aware UnitarySynthesis (`backend_props`) for all methods
 - Transpilation: supported layout×routing combinations (sabre, nassc, dense, noise_adaptive, trivial, qap)
-- Benchmark circuits: 25 Pozzi benchmark circuits (3Q-16Q), stored in `data/circuits/qasm/benchmarks/`, deduplicated from training sets. Split into `POZZI_TRAIN_CIRCUITS` (12, colleague's training set) and `POZZI_TEST_CIRCUITS` (13, colleague's unseen test set). CLI: `--circuit-set train12|test13|all25`
+- Benchmark circuits: 25 Pozzi benchmark circuits (2Q-16Q), stored in `data/circuits/qasm/benchmarks/`, deduplicated from training sets. Split into `POZZI_TEST1_CIRCUITS` (12, 1차 test) and `POZZI_TEST2_CIRCUITS` (13, 2차 test). CLI: `--circuit-set test1|test2|all`
 - Multi-programming: model handles arbitrary circuit count; training scenarios configured via YAML (no fixed limit on circuit count)
 
 ## Dependencies

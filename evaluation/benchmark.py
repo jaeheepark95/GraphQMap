@@ -34,9 +34,9 @@ from evaluation.transpiler import transpile_with_timing
 
 logger = logging.getLogger(__name__)
 
-# Pozzi benchmark split (matching colleague's 12 train / 13 test setup)
-# Train: 12 RevLib circuits used for colleague's model training
-POZZI_TRAIN_CIRCUITS = [
+# Pozzi benchmark split — ALL 25 used as test circuits (never training).
+# Test set 1 (12 circuits): smaller/simpler, matches colleague's paper's "train" split
+POZZI_TEST1_CIRCUITS = [
     "bv_n3",
     "bv_n4",
     "peres_3",
@@ -51,8 +51,8 @@ POZZI_TRAIN_CIRCUITS = [
     "4gt13_92",
 ]
 
-# Test: 13 Pozzi realistic benchmark circuits (unseen by colleague's model)
-POZZI_TEST_CIRCUITS = [
+# Test set 2 (13 circuits): matches colleague's paper's "test" split
+POZZI_TEST2_CIRCUITS = [
     "ham3_102",
     "miller_11",
     "decod24-v0_38",
@@ -69,13 +69,13 @@ POZZI_TEST_CIRCUITS = [
 ]
 
 # All 25 Pozzi benchmark circuits
-BENCHMARK_CIRCUITS = POZZI_TRAIN_CIRCUITS + POZZI_TEST_CIRCUITS
+BENCHMARK_CIRCUITS = POZZI_TEST1_CIRCUITS + POZZI_TEST2_CIRCUITS
 
 # Named circuit sets for --circuit-set CLI option
 CIRCUIT_SETS = {
-    "train12": POZZI_TRAIN_CIRCUITS,
-    "test13": POZZI_TEST_CIRCUITS,
-    "all25": BENCHMARK_CIRCUITS,
+    "test1": POZZI_TEST1_CIRCUITS,
+    "test2": POZZI_TEST2_CIRCUITS,
+    "all": BENCHMARK_CIRCUITS,
 }
 
 # Default method combinations: (routing_method, layout_method)
